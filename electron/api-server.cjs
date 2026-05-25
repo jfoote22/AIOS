@@ -12,6 +12,7 @@ const cors = (req, res, next) => {
 };
 
 const { getProviderKey } = require('./keystore.cjs');
+const { getModelId } = require('./modelstore.cjs');
 
 // Dynamic imports for ESM-only ai SDK packages.
 async function loadAi() {
@@ -24,9 +25,9 @@ async function loadAi() {
 function streamHandler(buildModel, defaultSystem) {
   return async (req, res) => {
     try {
-      const { messages, showReasoning = false, mode = 'normal' } = req.body || {};
+      const { messages, showReasoning = false, mode = 'normal', variant } = req.body || {};
       const { ai, createOpenAI, createAnthropic } = await loadAi();
-      const { model, system } = buildModel({ showReasoning, mode, createOpenAI, createAnthropic });
+      const { model, system } = buildModel({ showReasoning, mode, variant, createOpenAI, createAnthropic });
       const result = await ai.streamText({
         model,
         messages: ai.convertToCoreMessages(messages),
@@ -77,39 +78,100 @@ function start() {
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
-  // --- OpenAI chat (gpt-4o) ---
+  // --- OpenAI chat (model ID configurable via Models tab) ---
   app.post('/api/openai/chat', streamHandler(
     ({ createOpenAI }) => {
       const key = getProviderKey('openai');
       if (!key) throw new Error('OpenAI key not configured. Add it in Models tab.');
       const client = createOpenAI({ apiKey: key });
-      return { model: client('gpt-4o'), system: 'You are a helpful AI assistant' };
+      return { model: client(getModelId('openai')), system: 'You are a helpful AI assistant' };
     }
   ));
 
-  // --- Anthropic chat (claude-3-opus) ---
+  // --- Anthropic chat (model IDs for Opus/Sonnet variants configurable via Models tab) ---
   app.post('/api/anthropic/chat', streamHandler(
-    ({ createAnthropic }) => {
+    ({ variant, createAnthropic }) => {
       const key = getProviderKey('anthropic');
       if (!key) throw new Error('Anthropic key not configured. Add it in Models tab.');
       const client = createAnthropic({ apiKey: key });
-      return { model: client('claude-3-opus-20240229'), system: 'You are a helpful AI assistant. You provide thoughtful, accurate, and engaging responses.' };
+      const slot = variant === 'sonnet' ? 'anthropic' : 'claude';
+      return { model: client(getModelId(slot)), system: 'You are a helpful AI assistant. You provide thoughtful, accurate, and engaging responses.' };
     }
   ));
 
-  // --- Grok chat (X.AI, OpenAI-compatible) ---
+  // --- Grok chat (X.AI, OpenAI-compatible; model ID configurable via Models tab) ---
   app.post('/api/grok/chat', streamHandler(
     ({ showReasoning, mode, createOpenAI }) => {
       const key = getProviderKey('grok');
       if (!key) throw new Error('Grok (xAI) key not configured. Add it in Models tab.');
       const client = createOpenAI({ baseURL: 'https://api.x.ai/v1', apiKey: key });
-      return { model: client('grok-4'), system: buildGrokSystemPrompt({ showReasoning, mode }) };
+      return { model: client(getModelId('grok')), system: buildGrokSystemPrompt({ showReasoning, mode }) };
     }
   ));
 
   // --- Deepgram key fetch (renderer needs the key to talk to Deepgram directly) ---
   app.get('/api/deepgram', (_req, res) => {
     res.json({ key: getProviderKey('deepgram') || '' });
+  });
+
+  // --- Vision OCR / snippet analysis (currently OpenAI; matches Gemini analyzeSnip shape) ---
+  app.post('/api/vision/analyze-snip', async (req, res) => {
+    try {
+      const { imageDataUrl, provider } = req.body || {};
+      if (!imageDataUrl || typeof imageDataUrl !== 'string') {
+        return res.status(400).json({ error: 'imageDataUrl is required' });
+      }
+      if (provider && provider !== 'openai') {
+        return res.status(400).json({ error: `Vision provider "${provider}" is not yet wired. Use 'openai' or analyze via Gemini directly.` });
+      }
+      const key = getProviderKey('openai');
+      if (!key) return res.status(400).json({ error: 'OpenAI key not configured. Add it in the Models tab.' });
+
+      const modelId = getModelId('openai');
+      const OpenAI = (await import('openai')).default;
+      const client = new OpenAI({ apiKey: key });
+
+      const prompt = `You are the AI curator for "AIOS Vault" — a personal knowledge capture tool. The user has just captured this screenshot. Analyze it and return ONLY valid JSON in exactly this shape (no markdown, no code fences):
+{
+  "title": "5-10 word descriptive title for this capture",
+  "summary": "A concise paragraph (2-4 sentences) describing what is in the image and what it appears to be doing or showing",
+  "category": "One short category name like Houdini, Travel, Finance, Development, Design, Reference, Personal, General",
+  "source": "Best guess of source app/website based on visible UI cues (Chrome, VS Code, Houdini, YouTube, Slack, etc.)",
+  "tags": ["3-8 lowercase keyword tags"],
+  "entities": [{ "type": "link|number|address|info", "label": "Short label", "value": "literal extracted value" }],
+  "extractedText": "All readable text in the image, transcribed verbatim. Empty string if no text."
+}
+Be specific and faithful to what is actually visible. Do not invent details. If the image is mostly empty or unreadable, say so honestly in the summary. Respond with ONLY the JSON object.`;
+
+      const completion = await client.chat.completions.create({
+        model: modelId,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: imageDataUrl } },
+          ],
+        }],
+      });
+
+      let text = completion.choices?.[0]?.message?.content || '';
+      // Strip any stray markdown fences and isolate the outermost JSON object.
+      text = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+      const start = text.indexOf('{');
+      const end = text.lastIndexOf('}');
+      if (start >= 0 && end > start) text = text.substring(start, end + 1);
+
+      const parsed = JSON.parse(text);
+      const allowed = new Set(['link', 'number', 'address', 'info']);
+      parsed.entities = (parsed.entities || []).map(e => ({ ...e, type: allowed.has(e?.type) ? e.type : 'info' }));
+      parsed.tags = Array.isArray(parsed.tags) ? parsed.tags : [];
+      parsed.extractedText = parsed.extractedText || '';
+
+      res.json(parsed);
+    } catch (e) {
+      console.error('Vision OCR error:', e);
+      res.status(500).json({ error: e?.message || 'Vision analysis failed' });
+    }
   });
 
   // TODO Phase 3: /api/openai/transcribe, /api/grok/analyze-learning,

@@ -2,6 +2,9 @@
 // Phase 2 will add OpenAI/Anthropic/Grok routing for DeepDive chat.
 
 import { GoogleGenAI, Type } from '@google/genai';
+import { apiUrl } from './apiBase';
+
+export type OcrProvider = 'openai' | 'gemini' | 'anthropic' | 'grok';
 
 export interface AnalyzedEntity {
   type: 'link' | 'number' | 'address' | 'info';
@@ -104,6 +107,34 @@ export async function analyzeSnip(imageDataUrl: string): Promise<SnipAnalysis> {
   parsed.entities = (parsed.entities ?? []).map(e => ({ ...e, type: allowed.has(e.type) ? e.type : 'info' }));
   parsed.tags = parsed.tags ?? [];
   return parsed;
+}
+
+// Dispatches snippet analysis to the chosen vision provider.
+// - 'gemini' uses the direct GoogleGenAI SDK from the renderer.
+// - 'openai' goes through the local Electron API server (which holds the encrypted key
+//   in main and pulls the user-configured model ID from provider-models.json).
+// - 'anthropic' / 'grok' are not yet wired.
+export async function analyzeSnipWith(provider: OcrProvider, imageDataUrl: string): Promise<SnipAnalysis> {
+  if (provider === 'gemini') return analyzeSnip(imageDataUrl);
+  if (provider === 'openai') {
+    const res = await fetch(apiUrl('/api/vision/analyze-snip'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageDataUrl, provider: 'openai' }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+      throw new Error(err.error || `OpenAI vision failed (${res.status})`);
+    }
+    return res.json();
+  }
+  throw new Error(`${provider} OCR is not yet wired. Switch to OpenAI or Gemini.`);
+}
+
+export function isOcrProviderReady(provider: OcrProvider, configured: Set<string>): boolean {
+  if (provider === 'gemini') return configured.has('gemini') || isGeminiReady();
+  if (provider === 'openai') return configured.has('openai');
+  return false;
 }
 
 export interface TextAnalysis {

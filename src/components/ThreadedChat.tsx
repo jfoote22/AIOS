@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from 're
 import { useChat } from 'ai/react';
 import React from 'react';
 import { apiUrl } from '../lib/apiBase';
+import { getCachedModels, onModelsChange, type ModelSlot } from '../lib/models';
 
 export interface Message {
   id: string;
@@ -69,6 +70,8 @@ function useThreadChat(selectedModel: ModelProvider, threadId: string, initialMe
     body: {
       showReasoning,
       ...(selectedModel === 'grok' && { mode: grokMode }),
+      ...(selectedModel === 'claude' && { variant: 'opus' }),
+      ...(selectedModel === 'anthropic' && { variant: 'sonnet' }),
     },
     onError: (error) => {
       console.error(`Thread ${threadId} chat error:`, error);
@@ -199,6 +202,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     body: {
       showReasoning: mainShowReasoning,
       ...(selectedModel === 'grok' && { mode: grokMode }),
+      ...(selectedModel === 'claude' && { variant: 'opus' }),
+      ...(selectedModel === 'anthropic' && { variant: 'sonnet' }),
     }
   });
 
@@ -1106,13 +1111,17 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     );
   };
 
+  const [configuredModels, setConfiguredModels] = useState<Record<ModelSlot, string>>(getCachedModels());
+  useEffect(() => onModelsChange(setConfiguredModels), []);
+  const labelFor = (slot: ModelSlot, fallback: string) => configuredModels[slot]?.trim() || fallback;
+
   const ModelSelector = () => (
     <div className="flex flex-wrap gap-2">
       {[
-        { value: 'openai' as ModelProvider, label: 'GPT-4', emoji: '🧠', color: 'green' },
-        { value: 'claude' as ModelProvider, label: 'Claude 4 Opus', emoji: '🤖', color: 'blue' },
-        { value: 'anthropic' as ModelProvider, label: 'Claude 3.5 Sonnet', emoji: '🎯', color: 'purple' },
-        { value: 'grok' as ModelProvider, label: 'Grok4', emoji: '⚡', color: 'orange' }
+        { value: 'openai' as ModelProvider,    label: labelFor('openai', 'GPT-4o'),              emoji: '🧠', color: 'green'  },
+        { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.7'),     emoji: '🤖', color: 'blue'   },
+        { value: 'anthropic' as ModelProvider, label: labelFor('anthropic', 'Claude Sonnet 4.6'),emoji: '🎯', color: 'purple' },
+        { value: 'grok' as ModelProvider,      label: labelFor('grok', 'Grok 4'),                emoji: '⚡', color: 'orange' }
       ].map((model) => (
         <button
           key={model.value}

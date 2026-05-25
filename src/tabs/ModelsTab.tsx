@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Sliders, KeyRound, Check, Trash2, ExternalLink, Lock } from 'lucide-react';
+import { Sliders, KeyRound, Check, Trash2, ExternalLink, Lock, Cpu, RotateCcw } from 'lucide-react';
 import { PROVIDERS, type ProviderId, refreshConfigured, getConfigured, onConfiguredChange } from '../lib/providers';
 import { setGeminiKey } from '../lib/ai';
+import { type ModelSlot, SLOT_LABELS, getCachedModels, getDefaults, onModelsChange, refreshModels, saveModel, resetModel } from '../lib/models';
 
 function maskKey(key: string): string {
   if (!key) return '';
@@ -168,7 +169,109 @@ export default function ModelsTab() {
         <p className="mt-8 text-[10px] text-zinc-600 leading-relaxed max-w-2xl">
           Credentials are stored encrypted at rest via Electron's safeStorage (Windows DPAPI). They're decrypted in the main process only and never exposed to the renderer in plaintext beyond the moment you paste them. AIOS never bundles or transmits your keys.
         </p>
+
+        <ModelIdEditor />
       </div>
+    </div>
+  );
+}
+
+function ModelIdEditor() {
+  const [models, setModels] = useState<Record<ModelSlot, string>>(getCachedModels());
+  const [defaults, setDefaults] = useState<Record<ModelSlot, string>>(getDefaults());
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [savingSlot, setSavingSlot] = useState<string | null>(null);
+  const [msg, setMsg] = useState<Record<string, { kind: 'ok' | 'err'; text: string }>>({});
+
+  useEffect(() => {
+    refreshModels().then(() => { setModels(getCachedModels()); setDefaults(getDefaults()); });
+    const unsub = onModelsChange((c) => setModels(c));
+    return unsub;
+  }, []);
+
+  const slots: ModelSlot[] = ['openai', 'claude', 'anthropic', 'grok'];
+
+  const handleSave = async (slot: ModelSlot) => {
+    const draft = (drafts[slot] ?? '').trim();
+    if (!draft || draft === models[slot]) return;
+    setSavingSlot(slot);
+    setMsg(m => ({ ...m, [slot]: undefined as any }));
+    try {
+      await saveModel(slot, draft);
+      setDrafts(d => ({ ...d, [slot]: '' }));
+      setMsg(m => ({ ...m, [slot]: { kind: 'ok', text: 'Saved.' } }));
+    } catch (e: any) {
+      setMsg(m => ({ ...m, [slot]: { kind: 'err', text: e?.message || 'Failed to save.' } }));
+    } finally { setSavingSlot(null); }
+  };
+
+  const handleReset = async (slot: ModelSlot) => {
+    try {
+      await resetModel(slot);
+      setDrafts(d => ({ ...d, [slot]: '' }));
+      setMsg(m => ({ ...m, [slot]: { kind: 'ok', text: 'Reset to default.' } }));
+    } catch (e: any) {
+      setMsg(m => ({ ...m, [slot]: { kind: 'err', text: e?.message || 'Failed to reset.' } }));
+    }
+  };
+
+  return (
+    <div className="mt-10">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="p-2 bg-zinc-900 border border-zinc-800 rounded-lg"><Cpu className="w-4 h-4 text-indigo-400" /></div>
+        <div>
+          <h3 className="text-lg font-bold">Model IDs</h3>
+          <p className="text-[11px] text-zinc-500">Override the model used for each DeepDive chat button. Paste the literal model ID your provider expects.</p>
+        </div>
+      </div>
+      <div className="space-y-3">
+        {slots.map(slot => {
+          const meta = SLOT_LABELS[slot];
+          const current = models[slot] || '';
+          const def = defaults[slot] || '';
+          const draft = drafts[slot] ?? '';
+          const m = msg[slot];
+          const dirty = draft.trim() && draft.trim() !== current;
+          return (
+            <div key={slot} className="p-4 bg-zinc-900/50 border border-zinc-800 rounded-xl">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">{meta.emoji}</span>
+                  <div>
+                    <p className="text-xs font-bold">{meta.provider} · <span className="text-indigo-300">{meta.variant}</span></p>
+                    <p className="text-[10px] text-zinc-500">Current: <span className="font-mono text-zinc-300">{current || '(unset)'}</span>{def && current !== def && <span className="ml-2 text-zinc-600">default: <span className="font-mono">{def}</span></span>}</p>
+                  </div>
+                </div>
+                {current && def && current !== def && (
+                  <button onClick={() => handleReset(slot)} className="text-[10px] text-zinc-500 hover:text-indigo-400 flex items-center gap-1 uppercase tracking-widest">
+                    <RotateCcw className="w-3 h-3" />Reset
+                  </button>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text" autoComplete="off" spellCheck={false}
+                  value={draft}
+                  onChange={(e) => { setDrafts(d => ({ ...d, [slot]: e.target.value })); setMsg(mm => ({ ...mm, [slot]: undefined as any })); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleSave(slot); }}
+                  placeholder={`New model ID (e.g. ${def || 'model-name'})`}
+                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
+                />
+                <button
+                  onClick={() => handleSave(slot)}
+                  disabled={!dirty || savingSlot === slot}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-lg text-white text-xs font-bold uppercase tracking-wider transition-colors">
+                  {savingSlot === slot ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+              {m && <p className={`mt-2 text-[11px] ${m.kind === 'err' ? 'text-red-400' : 'text-emerald-400'}`}>{m.text}</p>}
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-4 text-[10px] text-zinc-600 leading-relaxed">
+        Model IDs are stored unencrypted at <span className="font-mono">%APPDATA%/AIOS/provider-models.json</span> (they aren't secrets). Changes apply on next message — no restart needed.
+      </p>
     </div>
   );
 }

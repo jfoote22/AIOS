@@ -2,14 +2,16 @@ import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Camera, X, Scissors, Copy, History, Search, Bell, PauseCircle, PlayCircle,
-  MoreVertical, LayoutGrid, List, MessageSquare, Send, Sparkles
+  MoreVertical, LayoutGrid, List, MessageSquare, Send, Sparkles, Eye
 } from 'lucide-react';
 import * as db from '../lib/db';
 import {
-  analyzeSnip, analyzeText, isGeminiReady, setGeminiKey, onGeminiReadyChange,
+  analyzeSnip, analyzeSnipWith, analyzeText, isGeminiReady, setGeminiKey, onGeminiReadyChange,
   embedText, cosineSimilarity, buildEmbedSource, chatWithVault,
-  type ChatTurn, type VaultContextItem
+  type ChatTurn, type VaultContextItem, type OcrProvider,
 } from '../lib/ai';
+import { getConfigured, onConfiguredChange, type ProviderId } from '../lib/providers';
+import { getCachedModels, onModelsChange, type ModelSlot } from '../lib/models';
 
 interface Region { startX: number; startY: number; width: number; height: number; }
 interface Entity { type: 'link' | 'number' | 'address' | 'info'; value: string; label: string; }
@@ -60,6 +62,27 @@ export default function SnippingTab() {
   }, []);
 
   useEffect(() => { setAiReady(isGeminiReady()); const unsub = onGeminiReadyChange(setAiReady); return unsub; }, []);
+
+  // OCR provider selection (persisted in IndexedDB meta store)
+  const [ocrProvider, setOcrProvider] = useState<OcrProvider>('openai');
+  const [configuredProviders, setConfiguredProviders] = useState<Set<ProviderId>>(getConfigured());
+  const [configuredModels, setConfiguredModels] = useState<Record<ModelSlot, string>>(getCachedModels());
+  useEffect(() => onConfiguredChange(setConfiguredProviders), []);
+  useEffect(() => onModelsChange(setConfiguredModels), []);
+  useEffect(() => {
+    db.getMeta<OcrProvider>('snipping-ocr-provider')
+      .then(saved => { if (saved === 'openai' || saved === 'gemini' || saved === 'anthropic' || saved === 'grok') setOcrProvider(saved); })
+      .catch(() => {});
+  }, []);
+  const updateOcrProvider = (p: OcrProvider) => {
+    setOcrProvider(p);
+    db.setMeta('snipping-ocr-provider', p).catch(err => console.error('Failed to save OCR provider:', err));
+  };
+  const ocrReady = (() => {
+    if (ocrProvider === 'gemini') return aiReady || configuredProviders.has('gemini');
+    if (ocrProvider === 'openai') return configuredProviders.has('openai');
+    return false;
+  })();
 
   useEffect(() => {
     handleSnipImageRef.current = ({ dataUrl, targetId }) => {
@@ -149,23 +172,24 @@ export default function SnippingTab() {
 
   const processSnip = (dataUrl: string) => {
     const id = Math.random().toString(36).slice(2, 11);
+    const providerLabel = ocrProvider === 'openai' ? 'OpenAI' : ocrProvider === 'gemini' ? 'Gemini' : ocrProvider;
     const placeholder: CapturedItem = {
       id, image: dataUrl, timestamp: Date.now(), tags: [],
       title: 'Analyzing…',
-      summary: aiReady ? 'AI is processing this capture…' : 'AI not configured — open Models tab to add your Gemini key.',
-      source: '—', category: aiReady ? 'Pending' : 'Unprocessed',
+      summary: ocrReady ? `${providerLabel} is processing this capture…` : `OCR provider "${providerLabel}" not configured — open Models tab to add the key.`,
+      source: '—', category: ocrReady ? 'Pending' : 'Unprocessed',
       entities: [], subImages: [dataUrl], extractedText: '',
-      status: aiReady ? 'analyzing' : 'error',
-      error: aiReady ? undefined : 'Gemini API key not set',
+      status: ocrReady ? 'analyzing' : 'error',
+      error: ocrReady ? undefined : `${providerLabel} key not set`,
     };
     setVault(prev => [placeholder, ...prev]);
     db.putSnippet(placeholder).catch(err => console.error('Failed to persist snip:', err));
     setShowFlash(true);
     setTimeout(() => setShowFlash(false), 800);
 
-    if (!aiReady) return;
+    if (!ocrReady) return;
 
-    analyzeSnip(dataUrl)
+    analyzeSnipWith(ocrProvider, dataUrl)
       .then(analysis => {
         const updated: CapturedItem = {
           ...placeholder,
@@ -188,7 +212,7 @@ export default function SnippingTab() {
         console.error('AI analysis failed:', err);
         const failed: CapturedItem = {
           ...placeholder, title: 'Analysis failed',
-          summary: 'Gemini analysis failed: ' + (err?.message ?? String(err)),
+          summary: `${providerLabel} analysis failed: ${err?.message ?? String(err)}`,
           category: 'Unprocessed', status: 'error', error: err?.message ?? String(err),
         };
         setVault(prev => prev.map(i => (i.id === id ? failed : i)));
@@ -588,6 +612,31 @@ export default function SnippingTab() {
               <MessageSquare className="w-3.5 h-3.5 inline mr-1.5" />Ask
             </button>
           </div>
+
+          {/* OCR model selector — picks which provider analyzes each new snip */}
+          <div className="flex items-center gap-1.5 bg-zinc-900/60 px-2 py-1 rounded-lg border border-zinc-800" title="Which AI model runs OCR on each new snip">
+            <Eye className="w-3.5 h-3.5 text-zinc-500" />
+            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">OCR</span>
+            <select
+              value={ocrProvider}
+              onChange={(e) => updateOcrProvider(e.target.value as OcrProvider)}
+              className="bg-zinc-900 border border-zinc-800 rounded px-2 py-0.5 text-[11px] font-mono text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+            >
+              <option value="openai" disabled={!configuredProviders.has('openai')}>
+                OpenAI · {configuredModels.openai || 'gpt-4o'}{!configuredProviders.has('openai') ? ' (no key)' : ''}
+              </option>
+              <option value="gemini" disabled={!configuredProviders.has('gemini')}>
+                Gemini · gemini-2.5-flash{!configuredProviders.has('gemini') ? ' (no key)' : ''}
+              </option>
+              <option value="anthropic" disabled>
+                Anthropic · {configuredModels.claude || 'claude-opus-4-7'} (soon)
+              </option>
+              <option value="grok" disabled>
+                Grok · {configuredModels.grok || 'grok-4'} (soon)
+              </option>
+            </select>
+          </div>
+
           {activeCategory && (
             <button onClick={() => setActiveCategory(null)} className="text-xs text-zinc-500 hover:text-white">
               {activeCategory} <X className="w-3 h-3 inline ml-1" />

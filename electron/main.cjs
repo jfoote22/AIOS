@@ -2,6 +2,7 @@ const { app, BrowserWindow, Tray, Menu, globalShortcut, nativeImage, desktopCapt
 const path = require('path');
 const fs = require('fs');
 const { getProviderKey, setProviderKey, listConfiguredProviders } = require('./keystore.cjs');
+const modelstore = require('./modelstore.cjs');
 const apiServer = require('./api-server.cjs');
 
 // --- Legacy single-key compatibility (Gemini) ---
@@ -216,3 +217,17 @@ ipcMain.handle('keys:clear', (_e, providerId) => {
 
 ipcMain.handle('keys:list', () => listConfiguredProviders());
 ipcMain.handle('keys:available', () => safeStorage.isEncryptionAvailable());
+
+// Model-ID slot handlers
+ipcMain.handle('models:get-all', () => modelstore.getAllModels());
+ipcMain.handle('models:set', (_e, slot, modelId) => {
+  if (typeof slot !== 'string' || typeof modelId !== 'string') throw new Error('slot and modelId must be strings');
+  modelstore.setModelId(slot, modelId);
+  return modelstore.getAllModels();
+});
+ipcMain.handle('models:reset', (_e, slot) => {
+  if (typeof slot !== 'string') throw new Error('slot must be a string');
+  modelstore.resetSlot(slot);
+  return modelstore.getAllModels();
+});
+ipcMain.handle('models:defaults', () => modelstore.DEFAULTS);

@@ -19,4 +19,9 @@ contextBridge.exposeInMainWorld('aios', {
   clearProviderKey: (providerId) => ipcRenderer.invoke('keys:clear', providerId),
   listProviders: () => ipcRenderer.invoke('keys:list'),
   isSecureStorageAvailable: () => ipcRenderer.invoke('keys:available'),
+  // Configurable model IDs (per-slot)
+  getModels: () => ipcRenderer.invoke('models:get-all'),
+  setModel: (slot, modelId) => ipcRenderer.invoke('models:set', slot, modelId),
+  resetModel: (slot) => ipcRenderer.invoke('models:reset', slot),
+  getModelDefaults: () => ipcRenderer.invoke('models:defaults'),
 });

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Save, FolderOpen, Trash2, Copy, X, AlertCircle } from 'lucide-react';
+import { Save, FolderOpen, Plus, Copy, X, AlertCircle } from 'lucide-react';
 import ThreadedChat from '../components/ThreadedChat';
 import * as db from '../lib/db';
 import { isConfigured, onConfiguredChange, getConfigured, type ProviderId } from '../lib/providers';
@@ -109,8 +109,10 @@ export default function DeepDivesTab() {
     }
   };
 
-  const handleClear = () => {
-    if (!confirm('Clear all conversations? This wipes the current chat — saved DeepDives are kept.')) return;
+  const handleNewChat = () => {
+    const state = threadedChatRef.current?.getCurrentState?.();
+    const hasContent = (state?.mainMessages?.length ?? 0) > 0 || (state?.threads?.length ?? 0) > 0;
+    if (hasContent && !confirm('Start a new chat? The current conversation will be cleared. Saved DeepDives are kept — Save first if you want to keep this session.')) return;
     threadedChatRef.current?.clearAllAndStartFresh?.();
     setCurrentId(null);
     setSaveTitle('');
@@ -139,6 +141,11 @@ export default function DeepDivesTab() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          <button onClick={handleNewChat}
+            className="bg-indigo-600/90 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-md text-xs font-bold border border-indigo-500/60 flex items-center gap-1.5 transition-colors uppercase tracking-wider"
+            title="Start a new chat (clears current conversation)">
+            <Plus className="w-3.5 h-3.5" />New Chat
+          </button>
           <button onClick={() => { if (!saveTitle) setSaveTitle(`DeepDive ${new Date().toLocaleDateString()}`); setShowSave(true); }}
             className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-1.5 rounded-md text-xs font-medium border border-slate-700 flex items-center gap-1.5 transition-colors">
             <Save className="w-3.5 h-3.5" />Save
@@ -146,10 +153,6 @@ export default function DeepDivesTab() {
           <button onClick={() => setShowLoad(true)}
             className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-1.5 rounded-md text-xs font-medium border border-slate-700 flex items-center gap-1.5 transition-colors">
             <FolderOpen className="w-3.5 h-3.5" />Load ({saved.length})
-          </button>
-          <button onClick={handleClear}
-            className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-1.5 rounded-md text-xs font-medium border border-slate-700 flex items-center gap-1.5 transition-colors">
-            <Trash2 className="w-3.5 h-3.5" />Clear
           </button>
           <button onClick={handleCopy}
             className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-1.5 rounded-md text-xs font-medium border border-slate-700 flex items-center gap-1.5 transition-colors">

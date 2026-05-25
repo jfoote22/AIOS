@@ -14,6 +14,10 @@ declare global {
       clearProviderKey: (providerId: string) => Promise<true>;
       listProviders: () => Promise<string[]>;
       isSecureStorageAvailable: () => Promise<boolean>;
+      getModels: () => Promise<Record<string, string>>;
+      setModel: (slot: string, modelId: string) => Promise<Record<string, string>>;
+      resetModel: (slot: string) => Promise<Record<string, string>>;
+      getModelDefaults: () => Promise<Record<string, string>>;
     };
   }
 }
