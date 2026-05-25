@@ -1,0 +1,80 @@
+import { useState } from 'react';
+import { motion } from 'motion/react';
+import { Compass, Scissors, Brain, Feather, Sliders, CreditCard, ChevronLeft, ChevronRight, Camera } from 'lucide-react';
+
+export type TabId = 'deepdives' | 'snipping' | 'secondbrain' | 'hermes' | 'models' | 'subscriptions';
+
+interface TabDef { id: TabId; label: string; icon: React.ComponentType<{ className?: string }>; }
+const TABS: TabDef[] = [
+  { id: 'deepdives',     label: 'DeepDives',     icon: Compass },
+  { id: 'snipping',      label: 'Snipping',      icon: Scissors },
+  { id: 'secondbrain',   label: 'Second Brain',  icon: Brain },
+  { id: 'hermes',        label: 'Hermes',        icon: Feather },
+  { id: 'models',        label: 'Models',        icon: Sliders },
+  { id: 'subscriptions', label: 'Subscriptions', icon: CreditCard },
+];
+
+interface Props {
+  active: TabId;
+  onSelect: (id: TabId) => void;
+  collapsed: boolean;
+  onToggle: () => void;
+  onQuickSnip: () => void;
+}
+
+export default function Sidebar({ active, onSelect, collapsed, onToggle, onQuickSnip }: Props) {
+  return (
+    <motion.aside
+      animate={{ width: collapsed ? 64 : 240 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 28 }}
+      className="h-full bg-zinc-900/60 border-r border-zinc-800 flex flex-col select-none"
+    >
+      <div className={`flex items-center ${collapsed ? 'justify-center' : 'justify-between'} px-4 h-16 border-b border-zinc-800`}>
+        {!collapsed && (
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-md bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center">
+              <Camera className="w-4 h-4 text-white" />
+            </div>
+            <span className="text-sm font-bold tracking-tight">AIOS</span>
+          </div>
+        )}
+        <button
+          onClick={onToggle}
+          className="p-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {collapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+        </button>
+      </div>
+
+      <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto scrollbar-hide">
+        {TABS.map(t => {
+          const Icon = t.icon;
+          const isActive = t.id === active;
+          return (
+            <button
+              key={t.id}
+              onClick={() => onSelect(t.id)}
+              title={collapsed ? t.label : undefined}
+              className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-3 px-3'} py-2.5 rounded-lg text-sm font-medium transition-colors ${isActive ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60 border border-transparent'}`}
+            >
+              <Icon className="w-4 h-4 shrink-0" />
+              {!collapsed && <span className="truncate">{t.label}</span>}
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="p-2 border-t border-zinc-800">
+        <button
+          onClick={onQuickSnip}
+          title="Quick snip (Ctrl+Shift+S)"
+          className={`w-full flex items-center ${collapsed ? 'justify-center' : 'gap-2 px-3'} py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold uppercase tracking-wider transition-all active:scale-95 shadow-lg shadow-indigo-600/10`}
+        >
+          <Scissors className="w-3.5 h-3.5 shrink-0" />
+          {!collapsed && <span>Snip</span>}
+        </button>
+      </div>
+    </motion.aside>
+  );
+}

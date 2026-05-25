@@ -1,0 +1,22 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('aios', {
+  isElectron: true,
+  // Capture
+  requestCapture: () => ipcRenderer.send('capture:request'),
+  requestCaptureForItem: (itemId) => ipcRenderer.send('capture:request-for-item', itemId),
+  onSnipImage: (cb) => {
+    const listener = (_e, payload) => cb(payload);
+    ipcRenderer.on('snip-image', listener);
+    return () => ipcRenderer.removeListener('snip-image', listener);
+  },
+  // App info
+  getVersion: () => ipcRenderer.invoke('app:get-version'),
+  getApiPort: () => ipcRenderer.invoke('app:get-api-port'),
+  // Multi-provider keys
+  getProviderKey: (providerId) => ipcRenderer.invoke('keys:get', providerId),
+  setProviderKey: (providerId, key) => ipcRenderer.invoke('keys:set', providerId, key),
+  clearProviderKey: (providerId) => ipcRenderer.invoke('keys:clear', providerId),
+  listProviders: () => ipcRenderer.invoke('keys:list'),
+  isSecureStorageAvailable: () => ipcRenderer.invoke('keys:available'),
+});
