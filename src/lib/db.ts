@@ -2,12 +2,13 @@
 // Phase 2 will migrate to SQLite via better-sqlite3 (for FTS5-powered Second Brain).
 
 const DB_NAME = 'aios';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const SNIPS = 'snippets';
 const META = 'meta';
 const THREADS = 'threads';
 const MESSAGES = 'messages';
 const IMPORTS = 'imports';
+const IMPORT_CHUNKS = 'import_chunks';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -39,6 +40,11 @@ function openDb(): Promise<IDBDatabase> {
         store.createIndex('provider', 'provider');
         store.createIndex('createdAt', 'createdAt');
         store.createIndex('updatedAt', 'updatedAt');
+      }
+      if (!db.objectStoreNames.contains(IMPORT_CHUNKS)) {
+        const store = db.createObjectStore(IMPORT_CHUNKS, { keyPath: 'id' });
+        store.createIndex('conversationId', 'conversationId');
+        store.createIndex('provider', 'provider');
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -187,6 +193,70 @@ export async function putImports<T extends { id: string }>(items: T[]): Promise<
 export async function removeImport(id: string): Promise<void> {
   const { tx, store } = await txStore(IMPORTS, 'readwrite');
   store.delete(id);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// --- Import chunks (for Second Brain semantic search) ---
+export async function getAllImportChunks<T>(): Promise<T[]> {
+  const { store } = await txStore(IMPORT_CHUNKS, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.getAll();
+    req.onsuccess = () => resolve((req.result as T[]) ?? []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function getChunksForConversation<T>(conversationId: string): Promise<T[]> {
+  const { store } = await txStore(IMPORT_CHUNKS, 'readonly');
+  const idx = store.index('conversationId');
+  return new Promise((resolve, reject) => {
+    const req = idx.getAll(conversationId);
+    req.onsuccess = () => resolve((req.result as T[]) ?? []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function getConversationsWithChunkCounts(): Promise<Map<string, number>> {
+  const { store } = await txStore(IMPORT_CHUNKS, 'readonly');
+  const idx = store.index('conversationId');
+  return new Promise((resolve, reject) => {
+    const req = idx.openKeyCursor();
+    const counts = new Map<string, number>();
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (cur) {
+        const k = String(cur.key);
+        counts.set(k, (counts.get(k) ?? 0) + 1);
+        cur.continue();
+      } else {
+        resolve(counts);
+      }
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function putImportChunks<T extends { id: string }>(items: T[]): Promise<void> {
+  if (!items.length) return;
+  const { tx, store } = await txStore(IMPORT_CHUNKS, 'readwrite');
+  for (const item of items) store.put(item);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function deleteChunksForConversation(conversationId: string): Promise<void> {
+  const { tx, store } = await txStore(IMPORT_CHUNKS, 'readwrite');
+  const idx = store.index('conversationId');
+  const req = idx.openCursor(IDBKeyRange.only(conversationId));
+  req.onsuccess = () => {
+    const cur = req.result;
+    if (cur) { cur.delete(); cur.continue(); }
+  };
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);

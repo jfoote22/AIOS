@@ -8,7 +8,7 @@ import { cosineSimilarity } from './ai';
 
 export interface BrainNode {
   id: string;
-  kind: 'snippet' | 'deepdive';
+  kind: 'snippet' | 'deepdive' | 'import';
   label: string;
   /** Used by react-force-graph's nodeAutoColorBy="group" for clustering color. */
   group: string;
@@ -55,12 +55,41 @@ interface DeepDiveLike {
   updatedAt?: number;
 }
 
+interface ImportLike {
+  id: string;
+  provider: 'claude' | 'chatgpt';
+  title: string;
+  messages: { role: string; content: string }[];
+  createdAt: number;
+  updatedAt: number;
+  /** Optional conversation-level centroid (mean of chunk embeddings).
+   *  Required for an import to participate in semantic similarity links. */
+  embedding?: number[];
+}
+
 const SIMILARITY_THRESHOLD = 0.62;
 const SIMILAR_TOP_K = 3;
 
-export function buildGraph(snippets: SnippetLike[], deepDives: DeepDiveLike[]): BrainGraph {
+export function buildGraph(
+  snippets: SnippetLike[],
+  deepDives: DeepDiveLike[],
+  imports: ImportLike[] = [],
+): BrainGraph {
   const nodes: BrainNode[] = [];
   const links: BrainLink[] = [];
+
+  // --- Imported conversation nodes (one per conversation, not per chunk —
+  //     chunks live in their own store and are used for chat retrieval only) ---
+  for (const im of imports) {
+    nodes.push({
+      id: `import:${im.id}`,
+      kind: 'import',
+      label: im.title || '(untitled)',
+      group: im.provider === 'claude' ? 'Claude' : 'ChatGPT',
+      val: 5 + Math.min(10, (im.messages?.length ?? 0) * 0.15),
+      data: im,
+    });
+  }
 
   // --- Snippet nodes ---
   for (const s of snippets) {
@@ -139,26 +168,38 @@ export function buildGraph(snippets: SnippetLike[], deepDives: DeepDiveLike[]): 
     links.push({ source: `snip:${a}`, target: `snip:${b}`, kind: 'tag', value: shared });
   }
 
-  // --- Semantic similarity links (top-K per snippet, threshold) ---
-  const embedded = snippets.filter(s => s.embedding && s.embedding.length > 0);
-  if (embedded.length > 1) {
+  // --- Semantic similarity links (top-K per node, threshold) ---
+  // Unified pool: snippets + indexed imports. Imports without an embedding
+  // (not yet indexed) are skipped — they show as isolated nodes until indexed.
+  // Cross-kind links emerge naturally because they share the same vector space.
+  type Embedded = { graphId: string; embedding: number[] };
+  const pool: Embedded[] = [];
+  for (const s of snippets) {
+    if (s.embedding?.length) pool.push({ graphId: `snip:${s.id}`, embedding: s.embedding });
+  }
+  for (const im of imports) {
+    if (im.embedding?.length) pool.push({ graphId: `import:${im.id}`, embedding: im.embedding });
+  }
+
+  if (pool.length > 1) {
     const seen = new Set<string>();
-    for (let i = 0; i < embedded.length; i++) {
-      const a = embedded[i];
-      const sims: { id: string; sim: number }[] = [];
-      for (let j = 0; j < embedded.length; j++) {
+    for (let i = 0; i < pool.length; i++) {
+      const a = pool[i];
+      const sims: { graphId: string; sim: number }[] = [];
+      for (let j = 0; j < pool.length; j++) {
         if (i === j) continue;
-        const b = embedded[j];
-        const sim = cosineSimilarity(a.embedding!, b.embedding!);
-        if (sim >= SIMILARITY_THRESHOLD) sims.push({ id: b.id, sim });
+        const b = pool[j];
+        if (a.embedding.length !== b.embedding.length) continue; // skip dim mismatches
+        const sim = cosineSimilarity(a.embedding, b.embedding);
+        if (sim >= SIMILARITY_THRESHOLD) sims.push({ graphId: b.graphId, sim });
       }
       sims.sort((x, y) => y.sim - x.sim);
-      for (const { id, sim } of sims.slice(0, SIMILAR_TOP_K)) {
-        const [x, y] = a.id < id ? [a.id, id] : [id, a.id];
+      for (const { graphId, sim } of sims.slice(0, SIMILAR_TOP_K)) {
+        const [x, y] = a.graphId < graphId ? [a.graphId, graphId] : [graphId, a.graphId];
         const key = `${x}|${y}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        links.push({ source: `snip:${x}`, target: `snip:${y}`, kind: 'similar', value: sim * 4 });
+        links.push({ source: x, target: y, kind: 'similar', value: sim * 4 });
       }
     }
   }
@@ -168,6 +209,23 @@ export function buildGraph(snippets: SnippetLike[], deepDives: DeepDiveLike[]): 
 
 /** Convert a graph node back into a Vault-style context item for chat retrieval. */
 export function nodeAsContextItem(node: BrainNode) {
+  if (node.kind === 'import') {
+    const im = node.data as ImportLike;
+    const text = (im.messages ?? [])
+      .map(m => `${m.role}: ${m.content}`)
+      .join('\n\n')
+      .slice(0, 4000);
+    return {
+      id: node.id,
+      title: im.title || '(untitled)',
+      summary: `Imported ${im.provider === 'claude' ? 'Claude' : 'ChatGPT'} conversation, ${im.messages?.length ?? 0} messages.`,
+      category: im.provider === 'claude' ? 'Claude' : 'ChatGPT',
+      source: 'Imported',
+      tags: [],
+      extractedText: text,
+      timestamp: im.updatedAt || im.createdAt || 0,
+    };
+  }
   if (node.kind === 'snippet') {
     const s = node.data as SnippetLike;
     return {

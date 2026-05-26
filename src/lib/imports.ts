@@ -4,6 +4,7 @@
 // first. We auto-detect the provider by inspecting the structure.
 
 import * as db from './db';
+import { embedText } from './ai';
 
 export type ImportProvider = 'claude' | 'chatgpt';
 export type ImportRole = 'user' | 'assistant' | 'system' | 'tool';
@@ -217,6 +218,7 @@ export async function importFromFile(file: File): Promise<ImportResult> {
   const existingIds = new Set(existing.map(e => e.id));
   const toAdd = parsed.filter(p => !existingIds.has(p.id));
   await db.putImports(toAdd);
+  if (toAdd.length) emitImportsChange();
 
   return {
     provider,
@@ -227,6 +229,202 @@ export async function importFromFile(file: File): Promise<ImportResult> {
 }
 
 export const listImports = () => db.getAllImports<ImportedConversation>();
-export const deleteImport = (id: string) => db.removeImport(id);
+export const deleteImport = async (id: string) => {
+  await db.deleteChunksForConversation(id);
+  await db.removeImport(id);
+};
 export const clearImportsByProvider = (provider: ImportProvider) => db.clearImports(provider);
 export const clearAllImports = () => db.clearImports();
+
+// ── Chunking + indexing for Second Brain ──────────────────────────────────────
+// Strategy: split each conversation into turn-pair chunks (user msg + the
+// assistant reply that follows). System messages stand alone. Cap each chunk
+// at ~3500 chars; if a pair exceeds that, split mid-message at paragraph
+// boundaries so we never cross a turn boundary. One chunk = one embedding.
+
+export interface ImportChunk {
+  id: string;                  // `${conversationId}-c${index}`
+  conversationId: string;
+  provider: ImportProvider;
+  conversationTitle: string;
+  turnIndex: number;           // ordering within the conversation
+  text: string;                // the chunk content (already prefixed with role labels)
+  charCount: number;
+  createdAt: number;
+  embedding: number[];
+}
+
+const MAX_CHUNK_CHARS = 3500;
+
+export function chunkConversation(c: ImportedConversation): Array<Omit<ImportChunk, 'embedding'>> {
+  const out: Array<Omit<ImportChunk, 'embedding'>> = [];
+  const msgs = c.messages;
+  let i = 0;
+  let turnIndex = 0;
+
+  const push = (text: string, ts?: number) => {
+    const t = text.trim();
+    if (!t) return;
+    // If still too big after pair-level split, fall back to paragraph splitting
+    for (const piece of splitOversized(t, MAX_CHUNK_CHARS)) {
+      out.push({
+        id: `${c.id}-c${turnIndex}`,
+        conversationId: c.id,
+        provider: c.provider,
+        conversationTitle: c.title,
+        turnIndex,
+        text: piece,
+        charCount: piece.length,
+        createdAt: ts ?? c.createdAt,
+      });
+      turnIndex++;
+    }
+  };
+
+  while (i < msgs.length) {
+    const m = msgs[i];
+    if (m.role === 'user' && i + 1 < msgs.length && msgs[i + 1].role === 'assistant') {
+      const u = msgs[i];
+      const a = msgs[i + 1];
+      const pair = `USER: ${u.content}\n\nASSISTANT: ${a.content}`;
+      push(pair, u.ts ?? a.ts);
+      i += 2;
+    } else {
+      // Lone turn (system msg, orphan user, orphan assistant, tool, etc.)
+      push(`${m.role.toUpperCase()}: ${m.content}`, m.ts);
+      i++;
+    }
+  }
+  return out;
+}
+
+function splitOversized(text: string, max: number): string[] {
+  if (text.length <= max) return [text];
+  const out: string[] = [];
+  const paras = text.split(/\n\n+/);
+  let buf = '';
+  for (const p of paras) {
+    if (buf.length + p.length + 2 > max && buf) {
+      out.push(buf);
+      buf = '';
+    }
+    if (p.length > max) {
+      // Single paragraph is bigger than max — hard-split on char boundary
+      if (buf) { out.push(buf); buf = ''; }
+      for (let i = 0; i < p.length; i += max) out.push(p.slice(i, i + max));
+    } else {
+      buf = buf ? `${buf}\n\n${p}` : p;
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
+export interface IndexProgress {
+  conversationsTotal: number;
+  conversationsDone: number;
+  chunksTotal: number;
+  chunksDone: number;
+  currentTitle?: string;
+}
+
+/**
+ * Index every conversation that has no chunks yet. Embeddings are produced
+ * one chunk at a time via the Gemini embeddings API; chunks for a conversation
+ * are written as a single transaction.
+ */
+export async function indexUnindexed(
+  onProgress?: (p: IndexProgress) => void,
+  signal?: AbortSignal,
+): Promise<{ indexed: number; chunks: number; skipped: number }> {
+  const all = await db.getAllImports<ImportedConversation>();
+  const haveChunks = await db.getConversationsWithChunkCounts();
+  const todo = all.filter(c => !haveChunks.has(c.id));
+
+  // Pre-compute total chunk count for an honest progress bar.
+  const plans = todo.map(c => ({ conv: c, chunks: chunkConversation(c) }));
+  const chunksTotal = plans.reduce((sum, p) => sum + p.chunks.length, 0);
+
+  let chunksDone = 0;
+  let indexed = 0;
+
+  for (let pi = 0; pi < plans.length; pi++) {
+    if (signal?.aborted) break;
+    const { conv, chunks } = plans[pi];
+    onProgress?.({
+      conversationsTotal: plans.length,
+      conversationsDone: pi,
+      chunksTotal,
+      chunksDone,
+      currentTitle: conv.title,
+    });
+
+    const embedded: ImportChunk[] = [];
+    for (const c of chunks) {
+      if (signal?.aborted) break;
+      try {
+        const vec = await embedText(c.text);
+        embedded.push({ ...c, embedding: vec });
+      } catch (e) {
+        // If embedding fails (rate limit, etc.) propagate so the caller can decide
+        throw new Error(`Embedding failed on "${conv.title}": ${(e as Error)?.message ?? e}`);
+      }
+      chunksDone++;
+      onProgress?.({
+        conversationsTotal: plans.length,
+        conversationsDone: pi,
+        chunksTotal,
+        chunksDone,
+        currentTitle: conv.title,
+      });
+    }
+    if (embedded.length) {
+      await db.putImportChunks(embedded);
+      indexed++;
+    }
+  }
+
+  if (indexed) emitImportsChange();
+  return { indexed, chunks: chunksDone, skipped: all.length - todo.length };
+}
+
+export const listAllChunks = () => db.getAllImportChunks<ImportChunk>();
+export const listChunkCounts = () => db.getConversationsWithChunkCounts();
+export const removeChunksForConversation = (id: string) => db.deleteChunksForConversation(id);
+
+// Cross-component change bus so Second Brain reloads when a fresh index
+// or a new import shows up.
+type Listener = () => void;
+const importListeners = new Set<Listener>();
+export function onImportsChange(fn: Listener): () => void {
+  importListeners.add(fn);
+  return () => importListeners.delete(fn);
+}
+export function emitImportsChange(): void {
+  for (const fn of importListeners) {
+    try { fn(); } catch (e) { console.error('imports change listener failed', e); }
+  }
+}
+
+/** Cheap estimate for the index-confirmation dialog. */
+export async function estimateIndexCost(): Promise<{
+  conversations: number;
+  chunks: number;
+  approxTokens: number;
+}> {
+  const all = await db.getAllImports<ImportedConversation>();
+  const haveChunks = await db.getConversationsWithChunkCounts();
+  const todo = all.filter(c => !haveChunks.has(c.id));
+  let chunks = 0;
+  let chars = 0;
+  for (const c of todo) {
+    const ch = chunkConversation(c);
+    chunks += ch.length;
+    chars += ch.reduce((s, x) => s + x.charCount, 0);
+  }
+  return {
+    conversations: todo.length,
+    chunks,
+    approxTokens: Math.ceil(chars / 4), // industry-standard rough char→token ratio
+  };
+}

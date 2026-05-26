@@ -5,7 +5,7 @@
 // (detectProvider, parseClaude, parseChatGPT).
 
 const mod = await import('../src/lib/imports.ts');
-const { detectProvider, parseClaude, parseChatGPT } = mod;
+const { detectProvider, parseClaude, parseChatGPT, chunkConversation } = mod;
 
 let pass = 0, fail = 0;
 const ok = (name, cond, detail = '') => {
@@ -115,6 +115,53 @@ console.log('\nDetection');
 ok('rejects empty array', detectProvider([]) === null);
 ok('rejects non-array', detectProvider({ foo: 1 }) === null);
 ok('rejects unknown shape', detectProvider([{ foo: 1 }]) === null);
+
+// ── Chunking ─────────────────────────────────────────────────────────────────
+console.log('\nChunking');
+
+const chunkA = chunkConversation({
+  id: 'claude-x', provider: 'claude', title: 'Pairs',
+  createdAt: 1, updatedAt: 2,
+  messages: [
+    { role: 'user', content: 'Hi.' },
+    { role: 'assistant', content: 'Hello!' },
+    { role: 'user', content: 'How are you?' },
+    { role: 'assistant', content: 'Good.' },
+  ],
+});
+ok('two pairs → two chunks', chunkA.length === 2, `got ${chunkA.length}`);
+ok('pair contains both USER and ASSISTANT', chunkA[0].text.includes('USER:') && chunkA[0].text.includes('ASSISTANT:'));
+ok('turn indexes 0,1', chunkA[0].turnIndex === 0 && chunkA[1].turnIndex === 1);
+ok('chunk ids include conv id', chunkA[0].id === 'claude-x-c0');
+
+// Orphan user (no assistant follow) becomes its own chunk
+const chunkB = chunkConversation({
+  id: 'g-y', provider: 'chatgpt', title: 'Orphans',
+  createdAt: 1, updatedAt: 2,
+  messages: [
+    { role: 'system', content: 'You are helpful.' },
+    { role: 'user', content: 'Lone Q' },
+    { role: 'assistant', content: 'Lone A' },
+    { role: 'assistant', content: 'Trailing A with no prior Q' },
+  ],
+});
+ok('system + pair + trailing assistant → 3 chunks', chunkB.length === 3, `got ${chunkB.length}`);
+ok('first is SYSTEM', chunkB[0].text.startsWith('SYSTEM:'));
+ok('second is paired', chunkB[1].text.includes('USER:') && chunkB[1].text.includes('ASSISTANT:'));
+ok('third is lone ASSISTANT', chunkB[2].text.startsWith('ASSISTANT:'));
+
+// Oversized pair → split into multiple chunks
+const giant = 'x '.repeat(4000); // 8000 chars
+const chunkC = chunkConversation({
+  id: 'big', provider: 'claude', title: 'Big',
+  createdAt: 1, updatedAt: 2,
+  messages: [
+    { role: 'user', content: giant },
+    { role: 'assistant', content: giant },
+  ],
+});
+ok('oversized pair splits into multiple chunks', chunkC.length >= 4, `got ${chunkC.length}`);
+ok('no chunk exceeds cap', chunkC.every(c => c.charCount <= 3500), `max was ${Math.max(...chunkC.map(c => c.charCount))}`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Upload, Download, Trash2, X, FileJson, MessageSquare, AlertCircle, CheckCircle2,
-  Bot, User as UserIcon, Search,
+  Bot, User as UserIcon, Search, Sparkles, Loader2,
 } from 'lucide-react';
 import {
   importFromFile, listImports, deleteImport,
-  type ImportedConversation, type ImportProvider, type ImportResult,
+  indexUnindexed, estimateIndexCost, listChunkCounts,
+  type ImportedConversation, type ImportProvider, type ImportResult, type IndexProgress,
 } from '../lib/imports';
+import { isGeminiReady, onGeminiReadyChange } from '../lib/ai';
 
 type FilterId = 'all' | ImportProvider;
 
@@ -24,18 +26,27 @@ const PROVIDER_ACCENT: Record<ImportProvider, string> = {
 export default function ImportsTab() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [items, setItems] = useState<ImportedConversation[]>([]);
+  const [chunkCounts, setChunkCounts] = useState<Map<string, number>>(new Map());
   const [filter, setFilter] = useState<FilterId>('all');
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ImportResult | null>(null);
   const [open, setOpen] = useState<ImportedConversation | null>(null);
+  const [aiReady, setAiReady] = useState(isGeminiReady());
+  const [indexPrompt, setIndexPrompt] = useState<{ conversations: number; chunks: number; approxTokens: number } | null>(null);
+  const [indexing, setIndexing] = useState<IndexProgress | null>(null);
+  const indexAbort = useRef<AbortController | null>(null);
 
+  useEffect(() => onGeminiReadyChange(setAiReady), []);
   useEffect(() => { refresh(); }, []);
 
   const refresh = async () => {
-    try { setItems(await listImports()); }
-    catch (e: any) { setError(e?.message ?? String(e)); }
+    try {
+      const [list, counts] = await Promise.all([listImports(), listChunkCounts()]);
+      setItems(list);
+      setChunkCounts(counts);
+    } catch (e: any) { setError(e?.message ?? String(e)); }
   };
 
   const onPick = () => fileRef.current?.click();
@@ -56,11 +67,48 @@ export default function ImportsTab() {
   };
 
   const onDelete = async (id: string) => {
-    if (!confirm('Delete this imported conversation?')) return;
+    if (!confirm('Delete this imported conversation? Any Second Brain index entries will also be removed.')) return;
     await deleteImport(id);
     if (open?.id === id) setOpen(null);
     await refresh();
   };
+
+  const openIndexPrompt = async () => {
+    setError(null);
+    try {
+      const est = await estimateIndexCost();
+      if (est.conversations === 0) {
+        setError('Everything is already indexed.');
+        return;
+      }
+      setIndexPrompt(est);
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    }
+  };
+
+  const runIndex = async () => {
+    setIndexPrompt(null);
+    setError(null);
+    indexAbort.current = new AbortController();
+    setIndexing({ conversationsTotal: 0, conversationsDone: 0, chunksTotal: 0, chunksDone: 0 });
+    try {
+      await indexUnindexed(p => setIndexing(p), indexAbort.current.signal);
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setIndexing(null);
+      indexAbort.current = null;
+    }
+  };
+
+  const cancelIndex = () => indexAbort.current?.abort();
+
+  const unindexedCount = useMemo(
+    () => items.filter(i => !chunkCounts.has(i.id)).length,
+    [items, chunkCounts],
+  );
 
   const counts = useMemo(() => {
     const c = { all: items.length, claude: 0, chatgpt: 0 };
@@ -88,6 +136,18 @@ export default function ImportsTab() {
         </span>
 
         <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={openIndexPrompt}
+            disabled={!!indexing || unindexedCount === 0 || !aiReady}
+            title={!aiReady ? 'Add a Gemini key in Models first' : unindexedCount === 0 ? 'All imports are indexed' : `Embed ${unindexedCount} unindexed conversation${unindexedCount === 1 ? '' : 's'}`}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-100 text-[11px] font-bold uppercase tracking-wider transition-colors"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+            Index for Second Brain
+            {unindexedCount > 0 && (
+              <span className="ml-0.5 px-1.5 py-0.5 rounded bg-indigo-500/30 text-indigo-200 text-[10px]">{unindexedCount}</span>
+            )}
+          </button>
           <button
             onClick={onPick}
             disabled={busy}
@@ -200,6 +260,14 @@ export default function ImportsTab() {
                       {c.messages.length}
                     </span>
                     <span>{formatDate(c.updatedAt)}</span>
+                    {chunkCounts.has(c.id) ? (
+                      <span className="flex items-center gap-1 text-emerald-400">
+                        <Sparkles className="w-3 h-3" />
+                        Indexed · {chunkCounts.get(c.id)} chunks
+                      </span>
+                    ) : (
+                      <span className="text-zinc-600">Not indexed</span>
+                    )}
                   </div>
                 </div>
                 <button
@@ -223,9 +291,119 @@ export default function ImportsTab() {
             onDelete={() => onDelete(open.id)}
           />
         )}
+        {indexPrompt && (
+          <IndexConfirmModal
+            estimate={indexPrompt}
+            onCancel={() => setIndexPrompt(null)}
+            onConfirm={runIndex}
+          />
+        )}
+        {indexing && (
+          <IndexProgressModal progress={indexing} onCancel={cancelIndex} />
+        )}
       </AnimatePresence>
     </div>
   );
+}
+
+function IndexConfirmModal({
+  estimate, onCancel, onConfirm,
+}: {
+  estimate: { conversations: number; chunks: number; approxTokens: number };
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      onClick={onCancel}
+      className="fixed inset-0 z-50 bg-black/90 backdrop-blur-xl overflow-y-auto"
+    >
+      <div className="min-h-full flex items-start justify-center p-8">
+        <motion.div
+          initial={{ scale: 0.97, y: 12 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.97, y: 12 }}
+          onClick={e => e.stopPropagation()}
+          className="my-auto w-full max-w-md bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden"
+        >
+          <header className="h-14 px-5 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/30">
+            <Sparkles className="w-4 h-4 text-indigo-400" />
+            <h3 className="text-sm font-semibold">Index for Second Brain</h3>
+          </header>
+          <div className="px-5 py-4 space-y-3 text-[13px] text-zinc-300">
+            <p>
+              This will embed every chunk so Second Brain can find the relevant
+              moments in your past Claude / ChatGPT conversations.
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <Stat label="Conversations" value={estimate.conversations} />
+              <Stat label="Chunks" value={estimate.chunks} />
+              <Stat label="≈ Tokens" value={fmtCompact(estimate.approxTokens)} />
+            </div>
+            <p className="text-[11px] text-zinc-500">
+              Uses your Gemini key. Pricing varies by tier — check
+              ai.google.dev for current embeddings rates.
+            </p>
+          </div>
+          <footer className="px-5 py-3 border-t border-zinc-800 bg-zinc-900/30 flex justify-end gap-2">
+            <button onClick={onCancel} className="px-3 py-1.5 rounded-md text-[12px] text-zinc-400 hover:text-white hover:bg-zinc-800">Cancel</button>
+            <button onClick={onConfirm} className="px-3 py-1.5 rounded-md text-[12px] font-bold uppercase tracking-wider bg-indigo-600 hover:bg-indigo-500 text-white">Start</button>
+          </footer>
+        </motion.div>
+      </div>
+    </motion.div>
+  );
+}
+
+function IndexProgressModal({ progress, onCancel }: { progress: IndexProgress; onCancel: () => void }) {
+  const pct = progress.chunksTotal > 0
+    ? Math.round((progress.chunksDone / progress.chunksTotal) * 100)
+    : 0;
+  return (
+    <motion.div
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 bg-black/90 backdrop-blur-xl flex items-center justify-center p-8"
+    >
+      <motion.div
+        initial={{ scale: 0.97, y: 12 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.97, y: 12 }}
+        className="w-full max-w-md bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden"
+      >
+        <header className="h-14 px-5 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/30">
+          <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
+          <h3 className="text-sm font-semibold">Indexing for Second Brain</h3>
+        </header>
+        <div className="px-5 py-4 space-y-3">
+          <div className="h-2 w-full bg-zinc-900 rounded-full overflow-hidden">
+            <div className="h-full bg-indigo-500 transition-all" style={{ width: `${pct}%` }} />
+          </div>
+          <div className="flex items-center justify-between text-[12px] text-zinc-400">
+            <span>{progress.chunksDone} / {progress.chunksTotal} chunks</span>
+            <span>{progress.conversationsDone} / {progress.conversationsTotal} conversations</span>
+          </div>
+          {progress.currentTitle && (
+            <div className="text-[11px] text-zinc-500 truncate">Embedding: <span className="text-zinc-300">{progress.currentTitle}</span></div>
+          )}
+        </div>
+        <footer className="px-5 py-3 border-t border-zinc-800 bg-zinc-900/30 flex justify-end">
+          <button onClick={onCancel} className="px-3 py-1.5 rounded-md text-[12px] text-zinc-400 hover:text-white hover:bg-zinc-800">Cancel</button>
+        </footer>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="px-2 py-2 rounded-md bg-zinc-900/60 border border-zinc-800 text-center">
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
+      <div className="text-sm font-bold text-zinc-100 mt-0.5">{value}</div>
+    </div>
+  );
+}
+
+function fmtCompact(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
 }
 
 function EmptyState({ hasItems }: { hasItems: boolean }) {

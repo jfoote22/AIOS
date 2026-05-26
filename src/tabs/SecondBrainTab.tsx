@@ -7,12 +7,15 @@ import {
   type ChatTurn, type VaultContextItem,
 } from '../lib/ai';
 import { buildGraph, nodeAsContextItem, type BrainNode, type BrainLink, type BrainGraph } from '../lib/graph';
+import { listImports, listAllChunks, onImportsChange, type ImportedConversation, type ImportChunk } from '../lib/imports';
 
 interface ChatMessage extends ChatTurn { citedIds?: string[]; }
 
 export default function SecondBrainTab() {
   const [snippets, setSnippets] = useState<any[]>([]);
   const [deepDives, setDeepDives] = useState<any[]>([]);
+  const [imports, setImports] = useState<ImportedConversation[]>([]);
+  const [chunks, setChunks] = useState<ImportChunk[]>([]);
   const [graph, setGraph] = useState<BrainGraph>({ nodes: [], links: [] });
   const [focusedNode, setFocusedNode] = useState<BrainNode | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -28,24 +31,50 @@ export default function SecondBrainTab() {
 
   useEffect(() => onGeminiReadyChange(setAiReady), []);
 
-  // Load snippets + DeepDive sessions
+  // Load snippets + DeepDive sessions + imported conversations + their chunks
   const loadData = useCallback(async () => {
     try {
-      const [snips, dds] = await Promise.all([
+      const [snips, dds, imps, chks] = await Promise.all([
         db.getAllSnippets<any>(),
         db.getAllThreads<any>(),
+        listImports(),
+        listAllChunks(),
       ]);
       setSnippets(snips);
       setDeepDives(dds);
+      setImports(imps);
+      setChunks(chks);
     } catch (e) { console.error('SecondBrain load failed:', e); }
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => onImportsChange(() => { loadData(); }), [loadData]);
 
-  // Rebuild graph whenever underlying data changes
+  // Rebuild graph whenever underlying data changes.
+  // Compute a conversation-level centroid (mean of chunk embeddings) so
+  // imports participate in semantic similarity links the same way snippets do.
   useEffect(() => {
-    setGraph(buildGraph(snippets, deepDives));
-  }, [snippets, deepDives]);
+    const centroids = new Map<string, number[]>();
+    if (chunks.length) {
+      const groups = new Map<string, number[][]>();
+      for (const c of chunks) {
+        if (!c.embedding?.length) continue;
+        const arr = groups.get(c.conversationId) ?? [];
+        arr.push(c.embedding);
+        groups.set(c.conversationId, arr);
+      }
+      for (const [convId, vecs] of groups) {
+        if (!vecs.length) continue;
+        const dim = vecs[0].length;
+        const mean = new Array(dim).fill(0);
+        for (const v of vecs) for (let i = 0; i < dim; i++) mean[i] += v[i];
+        for (let i = 0; i < dim; i++) mean[i] /= vecs.length;
+        centroids.set(convId, mean);
+      }
+    }
+    const importsForGraph = imports.map(im => ({ ...im, embedding: centroids.get(im.id) }));
+    setGraph(buildGraph(snippets, deepDives, importsForGraph));
+  }, [snippets, deepDives, imports, chunks]);
 
   // Track container size for the graph canvas
   useEffect(() => {
@@ -108,8 +137,15 @@ export default function SecondBrainTab() {
         return { dd, score: hits };
       }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
 
+      // Semantic ranking across import chunks (Claude / ChatGPT history)
+      const chunkRanked = chunks
+        .filter(c => c.embedding?.length)
+        .map(c => ({ chunk: c, sim: cosineSimilarity(queryVec, c.embedding) }))
+        .sort((a, b) => b.sim - a.sim);
+
       const TOP_SNIPS = 6;
       const TOP_DDS = 3;
+      const TOP_CHUNKS = 6;
 
       const context: VaultContextItem[] = [
         ...snipRanked.slice(0, TOP_SNIPS).filter(r => r.sim >= 0.4).map(r => ({
@@ -121,6 +157,16 @@ export default function SecondBrainTab() {
           tags: r.item.tags || [],
           extractedText: r.item.extractedText || '',
           timestamp: r.item.timestamp || 0,
+        })),
+        ...chunkRanked.slice(0, TOP_CHUNKS).filter(r => r.sim >= 0.4).map(r => ({
+          id: `chunk:${r.chunk.id}`,
+          title: r.chunk.conversationTitle || '(untitled)',
+          summary: `Turn ${r.chunk.turnIndex} of ${r.chunk.provider === 'claude' ? 'Claude' : 'ChatGPT'} chat`,
+          category: r.chunk.provider === 'claude' ? 'Claude' : 'ChatGPT',
+          source: 'Imported',
+          tags: [],
+          extractedText: r.chunk.text,
+          timestamp: r.chunk.createdAt || 0,
         })),
         ...ddScored.slice(0, TOP_DDS).map(({ dd }) => {
           const node: BrainNode = { id: `dd:${dd.id}`, kind: 'deepdive', label: dd.title, group: 'DeepDive', val: 0, data: dd };
