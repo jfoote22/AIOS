@@ -24,4 +24,23 @@ contextBridge.exposeInMainWorld('aios', {
   setModel: (slot, modelId) => ipcRenderer.invoke('models:set', slot, modelId),
   resetModel: (slot) => ipcRenderer.invoke('models:reset', slot),
   getModelDefaults: () => ipcRenderer.invoke('models:defaults'),
+
+  // Terminal (Kanban → Terminal pane)
+  term: {
+    available: () => ipcRenderer.invoke('term:available'),
+    spawn: (opts) => ipcRenderer.invoke('term:spawn', opts),
+    write: (id, data) => ipcRenderer.invoke('term:write', id, data),
+    resize: (id, cols, rows) => ipcRenderer.invoke('term:resize', id, cols, rows),
+    kill: (id) => ipcRenderer.invoke('term:kill', id),
+    onData: (cb) => {
+      const listener = (_e, payload) => cb(payload);
+      ipcRenderer.on('term:data', listener);
+      return () => ipcRenderer.removeListener('term:data', listener);
+    },
+    onExit: (cb) => {
+      const listener = (_e, payload) => cb(payload);
+      ipcRenderer.on('term:exit', listener);
+      return () => ipcRenderer.removeListener('term:exit', listener);
+    },
+  },
 });

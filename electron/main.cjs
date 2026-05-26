@@ -4,6 +4,7 @@ const fs = require('fs');
 const { getProviderKey, setProviderKey, listConfiguredProviders } = require('./keystore.cjs');
 const modelstore = require('./modelstore.cjs');
 const apiServer = require('./api-server.cjs');
+const terminal = require('./terminal.cjs');
 
 // --- Legacy single-key compatibility (Gemini) ---
 function migrateLegacyKey() {
@@ -175,6 +176,8 @@ app.whenReady().then(async () => {
     console.error('Failed to start API server:', e);
   }
 
+  terminal.registerTerminalIpc();
+
   createWindow();
   createTray();
 
@@ -192,6 +195,7 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  terminal.killAll();
 });
 
 ipcMain.handle('app:get-version', () => app.getVersion());

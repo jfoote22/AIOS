@@ -10,7 +10,6 @@ import {
 } from '../lib/kanban';
 import { type AgentDef } from '../lib/agents';
 import AgentBuilder from '../components/AgentBuilder';
-import TerminalPane from '../components/TerminalPane';
 
 const PRIORITY_COLOR: Record<Priority, string> = {
   low:    'bg-zinc-700 text-zinc-300',
@@ -31,16 +30,13 @@ export default function KanbanTab() {
       <header className="h-16 border-b border-zinc-800 px-6 flex items-center gap-4 bg-zinc-900/10 backdrop-blur-md shrink-0">
         <div className="flex items-center gap-2">
           <div className="p-1.5 bg-zinc-800 rounded-md"><KanbanSquare className="w-4 h-4 text-indigo-400" /></div>
-          <h1 className="text-sm font-bold uppercase tracking-widest text-zinc-100">Kanban</h1>
+          <h1 className="text-sm font-bold uppercase tracking-widest text-zinc-100">Orchestrator</h1>
         </div>
-        <span className="text-[11px] text-zinc-500">Agent orchestration · terminal · builder · board</span>
+        <span className="text-[11px] text-zinc-500">Agent builder · task board</span>
       </header>
 
       <div className="flex-1 min-h-0 flex">
-        <div className="w-[28%] min-w-[300px] border-r border-zinc-800 relative">
-          <TerminalPane />
-        </div>
-        <div className="w-[34%] min-w-[360px] border-r border-zinc-800 relative">
+        <div className="w-[38%] min-w-[380px] border-r border-zinc-800 relative">
           <AgentBuilder onAgentsChange={setAgents} />
         </div>
         <div className="flex-1 min-w-0 relative">

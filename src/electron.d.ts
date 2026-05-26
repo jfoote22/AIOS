@@ -18,6 +18,22 @@ declare global {
       setModel: (slot: string, modelId: string) => Promise<Record<string, string>>;
       resetModel: (slot: string) => Promise<Record<string, string>>;
       getModelDefaults: () => Promise<Record<string, string>>;
+      term: {
+        available: () => Promise<{ available: boolean; platform: string }>;
+        spawn: (opts?: {
+          shell?: string;
+          args?: string[];
+          cwd?: string;
+          cols?: number;
+          rows?: number;
+          env?: Record<string, string>;
+        }) => Promise<{ id: string; shell: string; cwd: string }>;
+        write: (id: string, data: string) => Promise<void>;
+        resize: (id: string, cols: number, rows: number) => Promise<void>;
+        kill: (id: string) => Promise<void>;
+        onData: (cb: (p: { id: string; data: string }) => void) => () => void;
+        onExit: (cb: (p: { id: string; exitCode: number; signal?: number }) => void) => () => void;
+      };
     };
   }
 }
