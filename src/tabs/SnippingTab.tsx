@@ -257,6 +257,26 @@ export default function SnippingTab() {
     updateItem(id, { tags: item.tags.filter(t => t !== tag) }, { reembed: true });
   };
 
+  const updateEntity = (id: string, index: number, patch: Partial<Entity>) => {
+    const item = vault.find(i => i.id === id);
+    if (!item) return;
+    const next = item.entities.map((e, i) => (i === index ? { ...e, ...patch } : e));
+    updateItem(id, { entities: next }, { reembed: true });
+  };
+
+  const removeEntity = (id: string, index: number) => {
+    const item = vault.find(i => i.id === id);
+    if (!item) return;
+    updateItem(id, { entities: item.entities.filter((_, i) => i !== index) }, { reembed: true });
+  };
+
+  const addEntity = (id: string) => {
+    const item = vault.find(i => i.id === id);
+    if (!item) return;
+    const blank: Entity = { type: 'info', label: 'NEW', value: '' };
+    updateItem(id, { entities: [...item.entities, blank] });
+  };
+
   const appendImageToItem = (id: string, dataUrl: string) => {
     const item = vault.find(i => i.id === id);
     if (!item) return;
@@ -424,178 +444,226 @@ export default function SnippingTab() {
       <AnimatePresence>
         {selectedItem && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-xl flex items-center justify-center p-8 overflow-y-auto"
+            className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-xl overflow-y-auto"
             onClick={() => setSelectedItem(null)}>
-            <div className="max-w-6xl w-full grid grid-cols-1 lg:grid-cols-3 gap-8 bg-zinc-900/50 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl relative" onClick={(e) => e.stopPropagation()}>
+            <div className="min-h-full flex items-start justify-center p-8">
+            <div className="max-w-4xl w-full my-auto bg-zinc-900/50 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl relative" onClick={(e) => e.stopPropagation()}>
               <button onClick={() => setSelectedItem(null)} className="absolute top-6 right-6 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-10"><X className="w-5 h-5" /></button>
 
-              <div className="lg:col-span-2 p-8 flex flex-col">
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="px-3 py-1 bg-indigo-600/20 border border-indigo-500/30 rounded-lg text-indigo-400 font-bold text-[10px] uppercase tracking-widest">Original Capture</div>
-                  <span className="text-zinc-500 text-xs font-mono">{selectedItem.id}</span>
-                  {selectedItem.originThreadId && (
-                    <span className="text-[10px] text-indigo-400/80 font-mono">from thread {selectedItem.originThreadId.slice(0, 8)}</span>
-                  )}
-                </div>
-                <div className="flex-1 min-h-[400px] bg-zinc-800 rounded-2xl overflow-hidden border border-zinc-700 shadow-inner flex items-center justify-center">
-                  <img src={selectedItem.image} alt="High resolution capture" className="max-w-full max-h-full object-contain" />
-                </div>
+              <div className="p-8 space-y-8">
+                <header>
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="px-3 py-1 bg-indigo-600/20 border border-indigo-500/30 rounded-lg text-indigo-400 font-bold text-[10px] uppercase tracking-widest">Original Capture</div>
+                    <span className="text-zinc-500 text-xs font-mono">{selectedItem.id}</span>
+                    {selectedItem.originThreadId && (
+                      <span className="text-[10px] text-indigo-400/80 font-mono">from thread {selectedItem.originThreadId.slice(0, 8)}</span>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    value={selectedItem.title}
+                    onChange={(e) => updateItem(selectedItem.id, { title: e.target.value }, { reembed: true })}
+                    placeholder="Untitled capture"
+                    className="w-full bg-transparent text-xl font-bold text-zinc-100 leading-tight mb-2 focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded px-1 -mx-1"
+                  />
+                  <textarea
+                    value={selectedItem.summary}
+                    onChange={(e) => updateItem(selectedItem.id, { summary: e.target.value }, { reembed: true })}
+                    rows={2}
+                    placeholder="No summary"
+                    className="w-full resize-none bg-transparent text-sm text-zinc-400 leading-relaxed focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded px-1 -mx-1"
+                  />
+                  {selectedItem.status === 'analyzing' && <p className="mt-3 text-[10px] text-indigo-400 uppercase tracking-widest">Analyzing…</p>}
+                  {selectedItem.status === 'error' && <p className="mt-3 text-[10px] text-red-400 uppercase tracking-widest">Error: {selectedItem.error}</p>}
+                </header>
 
-                <div className="mt-8 grid grid-cols-4 gap-4">
-                  {selectedItem.subImages.slice(1).map((img, i) => {
-                    const realIndex = i + 1;
-                    return (
-                      <div key={realIndex} className="aspect-square bg-zinc-800 rounded-xl border border-zinc-700 overflow-hidden group relative">
-                        <img src={img} alt="Extra capture" className="w-full h-full object-cover group-hover:scale-110 transition-transform" />
-                        <button onClick={() => removeSubImage(selectedItem.id, realIndex)} className="absolute top-1 right-1 p-1 bg-black/60 hover:bg-red-500/80 rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity" title="Remove this capture"><X className="w-3 h-3" /></button>
-                      </div>
-                    );
-                  })}
-                  <button
-                    onClick={() => {
-                      if (!isElectron) { alert('Adding extra screenshots is only available in the desktop app.'); return; }
-                      window.aios?.requestCaptureForItem(selectedItem.id);
-                    }}
-                    className="aspect-square bg-zinc-900 border border-dashed border-zinc-700 rounded-xl flex flex-col items-center justify-center text-zinc-500 hover:border-indigo-500/60 hover:text-indigo-400 transition-colors"
-                    title="Add another screenshot to this snippet">
-                    <LayoutGrid className="w-6 h-6 mb-1" />
-                    <span className="text-[9px] uppercase tracking-widest font-bold">Add Shot</span>
-                  </button>
-                </div>
-              </div>
+                {/* 1. Image on top */}
+                <section>
+                  <div className="bg-zinc-800 rounded-2xl overflow-hidden border border-zinc-700 shadow-inner flex items-center justify-center max-h-[60vh]">
+                    <img src={selectedItem.image} alt="High resolution capture" className="max-w-full max-h-[60vh] object-contain" />
+                  </div>
 
-              <div className="bg-zinc-950 p-8 border-l border-zinc-800 flex flex-col">
-                <div className="space-y-8 flex-1">
-                  <header>
-                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Title</p>
-                    <h2 className="text-xl font-bold text-zinc-100 leading-tight mb-3">{selectedItem.title || selectedItem.summary}</h2>
-                    <p className="text-sm text-zinc-400 leading-relaxed">{selectedItem.summary}</p>
-                    {selectedItem.status === 'analyzing' && <p className="mt-3 text-[10px] text-indigo-400 uppercase tracking-widest">Analyzing…</p>}
-                    {selectedItem.status === 'error' && <p className="mt-3 text-[10px] text-red-400 uppercase tracking-widest">Error: {selectedItem.error}</p>}
-                  </header>
+                  <div className="mt-4 grid grid-cols-6 gap-3">
+                    {selectedItem.subImages.slice(1).map((img, i) => {
+                      const realIndex = i + 1;
+                      return (
+                        <div key={realIndex} className="aspect-square bg-zinc-800 rounded-xl border border-zinc-700 overflow-hidden group relative">
+                          <img src={img} alt="Extra capture" className="w-full h-full object-cover group-hover:scale-110 transition-transform" />
+                          <button onClick={() => removeSubImage(selectedItem.id, realIndex)} className="absolute top-1 right-1 p-1 bg-black/60 hover:bg-red-500/80 rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity" title="Remove this capture"><X className="w-3 h-3" /></button>
+                        </div>
+                      );
+                    })}
+                    <button
+                      onClick={() => {
+                        if (!isElectron) { alert('Adding extra screenshots is only available in the desktop app.'); return; }
+                        window.aios?.requestCaptureForItem(selectedItem.id);
+                      }}
+                      className="aspect-square bg-zinc-900 border border-dashed border-zinc-700 rounded-xl flex flex-col items-center justify-center text-zinc-500 hover:border-indigo-500/60 hover:text-indigo-400 transition-colors"
+                      title="Add another screenshot to this snippet">
+                      <LayoutGrid className="w-5 h-5 mb-1" />
+                      <span className="text-[9px] uppercase tracking-widest font-bold">Add Shot</span>
+                    </button>
+                  </div>
+                </section>
 
-                  {selectedItem.extractedText && (
-                    <section>
-                      <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Extracted Text</p>
-                      <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl max-h-48 overflow-y-auto">
-                        <pre ref={extractedTextRef} className="text-xs text-zinc-300 whitespace-pre-wrap font-mono select-text" onMouseUp={() => {
-                          const sel = window.getSelection();
-                          const node = extractedTextRef.current;
-                          if (!sel || !node || sel.isCollapsed) { setTextSelection(''); return; }
-                          const text = sel.toString();
-                          if (text && node.contains(sel.anchorNode) && node.contains(sel.focusNode)) setTextSelection(text);
-                          else setTextSelection('');
-                        }}>{selectedItem.extractedText}</pre>
-                      </div>
-                      <div className="mt-2 flex items-center justify-between gap-3">
-                        <button onClick={() => copyToClipboard(selectedItem.extractedText)} className="text-[10px] text-indigo-400 hover:text-indigo-300 uppercase tracking-widest">Copy all text</button>
-                        <button disabled={!textSelection.trim()} onClick={() => { const sel = textSelection; setTextSelection(''); window.getSelection()?.removeAllRanges(); extractChunkFromItem(selectedItem.id, sel); }}
-                          className="text-[10px] px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-lg text-white uppercase tracking-widest font-bold transition-colors">
-                          Extract Selection
-                        </button>
-                      </div>
-                    </section>
-                  )}
-
+                {/* 2. Extracted text underneath */}
+                {selectedItem.extractedText && (
                   <section>
-                    <div className="flex items-center justify-between mb-4">
-                      <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Extracted Entities</p>
-                      <span className="text-[10px] bg-indigo-500/10 text-indigo-400 px-2 py-0.5 rounded-full font-bold">SMART TAGS</span>
+                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Extracted Text</p>
+                    <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl max-h-64 overflow-y-auto">
+                      <pre ref={extractedTextRef} className="text-xs text-zinc-300 whitespace-pre-wrap font-mono select-text" onMouseUp={() => {
+                        const sel = window.getSelection();
+                        const node = extractedTextRef.current;
+                        if (!sel || !node || sel.isCollapsed) { setTextSelection(''); return; }
+                        const text = sel.toString();
+                        if (text && node.contains(sel.anchorNode) && node.contains(sel.focusNode)) setTextSelection(text);
+                        else setTextSelection('');
+                      }}>{selectedItem.extractedText}</pre>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between gap-3">
+                      <button onClick={() => copyToClipboard(selectedItem.extractedText)} className="text-[10px] text-indigo-400 hover:text-indigo-300 uppercase tracking-widest">Copy all text</button>
+                      <button disabled={!textSelection.trim()} onClick={() => { const sel = textSelection; setTextSelection(''); window.getSelection()?.removeAllRanges(); extractChunkFromItem(selectedItem.id, sel); }}
+                        className="text-[10px] px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-lg text-white uppercase tracking-widest font-bold transition-colors">
+                        Extract Selection
+                      </button>
+                    </div>
+                  </section>
+                )}
+
+                {/* 3. Tags underneath that */}
+                <section>
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Tags</p>
+                    <span className="text-[10px] text-zinc-600">{selectedItem.tags.length}</span>
+                  </div>
+                  <div className="flex flex-wrap gap-2 mb-3">
+                    {selectedItem.tags.map(tag => (
+                      <span key={tag} className="group flex items-center gap-1.5 text-[11px] px-2.5 py-1 bg-indigo-600/10 border border-indigo-500/20 rounded-full text-indigo-300">
+                        {tag}
+                        <button onClick={() => removeTagFromItem(selectedItem.id, tag)} className="text-indigo-400/60 hover:text-red-400 transition-colors" title="Remove tag"><X className="w-3 h-3" /></button>
+                      </span>
+                    ))}
+                    {selectedItem.tags.length === 0 && <span className="text-[11px] text-zinc-600 italic">No tags yet</span>}
+                  </div>
+                  <input type="text" value={tagDraft} onChange={(e) => setTagDraft(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addTagToItem(selectedItem.id, tagDraft); setTagDraft(''); } }}
+                    onBlur={() => { if (tagDraft.trim()) { addTagToItem(selectedItem.id, tagDraft); setTagDraft(''); } }}
+                    placeholder="Add tag (Enter to confirm)"
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all" />
+                </section>
+
+                <section>
+                  <div className="flex items-center justify-between mb-4">
+                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Extracted Entities</p>
+                    <button onClick={() => addEntity(selectedItem.id)} className="text-[10px] px-2 py-1 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded-lg text-indigo-300 font-bold uppercase tracking-widest transition-colors">+ Add</button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {selectedItem.entities.map((ent, idx) => (
+                      <div key={idx} className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl group hover:border-indigo-500/50 transition-all flex items-center gap-2">
+                        <div className="space-y-1 min-w-0 flex-1">
+                          <input
+                            type="text"
+                            value={ent.label}
+                            onChange={(e) => updateEntity(selectedItem.id, idx, { label: e.target.value })}
+                            placeholder="LABEL"
+                            className="w-full bg-transparent text-[9px] font-bold text-zinc-500 uppercase tracking-tighter focus:outline-none focus:text-indigo-400"
+                          />
+                          <input
+                            type="text"
+                            value={ent.value}
+                            onChange={(e) => updateEntity(selectedItem.id, idx, { value: e.target.value })}
+                            placeholder="value"
+                            className="w-full bg-transparent text-sm font-mono text-indigo-300 focus:outline-none focus:text-indigo-200"
+                          />
+                        </div>
+                        <button onClick={() => copyToClipboard(ent.value)} className="p-2 hover:bg-indigo-600/20 rounded-lg text-zinc-500 hover:text-indigo-400 transition-colors shrink-0" title="Copy value"><Copy className="w-4 h-4" /></button>
+                        <button onClick={() => removeEntity(selectedItem.id, idx)} className="p-2 hover:bg-red-500/20 rounded-lg text-zinc-500 hover:text-red-400 transition-colors shrink-0" title="Remove entity"><X className="w-4 h-4" /></button>
+                      </div>
+                    ))}
+                    {selectedItem.entities.length === 0 && <p className="text-[11px] text-zinc-600 italic col-span-full">No entities yet — click "Add" to create one.</p>}
+                  </div>
+                </section>
+
+                {selectedItem.chunks && selectedItem.chunks.length > 0 && (
+                  <section>
+                    <div className="flex items-center justify-between mb-3">
+                      <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Saved Chunks</p>
+                      <span className="text-[10px] text-zinc-600">{selectedItem.chunks.length}</span>
                     </div>
                     <div className="space-y-3">
-                      {selectedItem.entities.map((ent, idx) => (
-                        <div key={idx} className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl group hover:border-indigo-500/50 transition-all flex items-center justify-between">
-                          <div className="space-y-1">
-                            <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-tighter">{ent.label}</p>
-                            <p className="text-sm font-mono text-indigo-300 truncate max-w-[180px]">{ent.value}</p>
+                      {selectedItem.chunks.map(chunk => (
+                        <div key={chunk.id} className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl group">
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div className="space-y-1 min-w-0">
+                              <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest truncate">
+                                {chunk.label}
+                                {chunk.status === 'analyzing' && <span className="ml-2 text-amber-400 animate-pulse">analyzing…</span>}
+                                {chunk.status === 'error' && <span className="ml-2 text-red-400">error</span>}
+                              </p>
+                              {chunk.summary && chunk.status !== 'analyzing' && <p className="text-[11px] text-zinc-400 leading-relaxed">{chunk.summary}</p>}
+                            </div>
+                            <div className="flex gap-1 shrink-0">
+                              <button onClick={() => copyToClipboard(chunk.text)} className="p-1.5 hover:bg-indigo-600/20 rounded text-zinc-500 hover:text-indigo-400 transition-colors" title="Copy chunk text"><Copy className="w-3.5 h-3.5" /></button>
+                              <button onClick={() => removeChunk(selectedItem.id, chunk.id)} className="p-1.5 hover:bg-red-500/20 rounded text-zinc-500 hover:text-red-400 transition-colors" title="Delete chunk"><X className="w-3.5 h-3.5" /></button>
+                            </div>
                           </div>
-                          <button onClick={() => copyToClipboard(ent.value)} className="p-2 hover:bg-indigo-600/20 rounded-lg text-zinc-500 hover:text-indigo-400 transition-colors"><Copy className="w-4 h-4" /></button>
+                          <pre className="text-[11px] text-zinc-300 whitespace-pre-wrap font-mono bg-black/30 border border-zinc-800 rounded-lg p-2 max-h-24 overflow-y-auto">{chunk.text}</pre>
+                          {chunk.tags.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-2">
+                              {chunk.tags.map(t => <span key={t} className="text-[9px] px-1.5 py-0.5 bg-indigo-500/10 border border-indigo-500/20 rounded-full text-indigo-300">{t}</span>)}
+                            </div>
+                          )}
+                          {chunk.entities.length > 0 && (
+                            <div className="mt-2 space-y-1">
+                              {chunk.entities.map((ent, i) => (
+                                <div key={i} className="flex items-center justify-between gap-2 text-[10px]">
+                                  <span className="text-zinc-500 uppercase tracking-tighter font-bold">{ent.label}</span>
+                                  <button onClick={() => copyToClipboard(ent.value)} className="font-mono text-indigo-300 hover:text-indigo-200 truncate max-w-[140px] text-right" title="Copy">{ent.value}</button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
                   </section>
+                )}
 
-                  {selectedItem.chunks && selectedItem.chunks.length > 0 && (
-                    <section>
-                      <div className="flex items-center justify-between mb-3">
-                        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Saved Chunks</p>
-                        <span className="text-[10px] text-zinc-600">{selectedItem.chunks.length}</span>
-                      </div>
-                      <div className="space-y-3">
-                        {selectedItem.chunks.map(chunk => (
-                          <div key={chunk.id} className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl group">
-                            <div className="flex items-start justify-between gap-2 mb-2">
-                              <div className="space-y-1 min-w-0">
-                                <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest truncate">
-                                  {chunk.label}
-                                  {chunk.status === 'analyzing' && <span className="ml-2 text-amber-400 animate-pulse">analyzing…</span>}
-                                  {chunk.status === 'error' && <span className="ml-2 text-red-400">error</span>}
-                                </p>
-                                {chunk.summary && chunk.status !== 'analyzing' && <p className="text-[11px] text-zinc-400 leading-relaxed">{chunk.summary}</p>}
-                              </div>
-                              <div className="flex gap-1 shrink-0">
-                                <button onClick={() => copyToClipboard(chunk.text)} className="p-1.5 hover:bg-indigo-600/20 rounded text-zinc-500 hover:text-indigo-400 transition-colors" title="Copy chunk text"><Copy className="w-3.5 h-3.5" /></button>
-                                <button onClick={() => removeChunk(selectedItem.id, chunk.id)} className="p-1.5 hover:bg-red-500/20 rounded text-zinc-500 hover:text-red-400 transition-colors" title="Delete chunk"><X className="w-3.5 h-3.5" /></button>
-                              </div>
-                            </div>
-                            <pre className="text-[11px] text-zinc-300 whitespace-pre-wrap font-mono bg-black/30 border border-zinc-800 rounded-lg p-2 max-h-24 overflow-y-auto">{chunk.text}</pre>
-                            {chunk.tags.length > 0 && (
-                              <div className="flex flex-wrap gap-1 mt-2">
-                                {chunk.tags.map(t => <span key={t} className="text-[9px] px-1.5 py-0.5 bg-indigo-500/10 border border-indigo-500/20 rounded-full text-indigo-300">{t}</span>)}
-                              </div>
-                            )}
-                            {chunk.entities.length > 0 && (
-                              <div className="mt-2 space-y-1">
-                                {chunk.entities.map((ent, i) => (
-                                  <div key={i} className="flex items-center justify-between gap-2 text-[10px]">
-                                    <span className="text-zinc-500 uppercase tracking-tighter font-bold">{ent.label}</span>
-                                    <button onClick={() => copyToClipboard(ent.value)} className="font-mono text-indigo-300 hover:text-indigo-200 truncate max-w-[140px] text-right" title="Copy">{ent.value}</button>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-                  )}
-
-                  <section>
-                    <div className="flex items-center justify-between mb-3">
-                      <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Tags</p>
-                      <span className="text-[10px] text-zinc-600">{selectedItem.tags.length}</span>
+                <section>
+                  <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-3">Vault Classification</p>
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl">
+                      <p className="text-zinc-500 mb-1">Category</p>
+                      <input
+                        type="text"
+                        list="category-suggestions"
+                        value={selectedItem.category}
+                        onChange={(e) => updateItem(selectedItem.id, { category: e.target.value }, { reembed: true })}
+                        className="w-full bg-transparent font-bold text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded px-1 -mx-1"
+                      />
+                      <datalist id="category-suggestions">
+                        {categories.map(c => <option key={c} value={c} />)}
+                      </datalist>
                     </div>
-                    <div className="flex flex-wrap gap-2 mb-3">
-                      {selectedItem.tags.map(tag => (
-                        <span key={tag} className="group flex items-center gap-1.5 text-[11px] px-2.5 py-1 bg-indigo-600/10 border border-indigo-500/20 rounded-full text-indigo-300">
-                          {tag}
-                          <button onClick={() => removeTagFromItem(selectedItem.id, tag)} className="text-indigo-400/60 hover:text-red-400 transition-colors" title="Remove tag"><X className="w-3 h-3" /></button>
-                        </span>
-                      ))}
-                      {selectedItem.tags.length === 0 && <span className="text-[11px] text-zinc-600 italic">No tags yet</span>}
+                    <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl">
+                      <p className="text-zinc-500 mb-1">Source</p>
+                      <input
+                        type="text"
+                        value={selectedItem.source}
+                        onChange={(e) => updateItem(selectedItem.id, { source: e.target.value }, { reembed: true })}
+                        className="w-full bg-transparent font-bold text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded px-1 -mx-1"
+                      />
                     </div>
-                    <input type="text" value={tagDraft} onChange={(e) => setTagDraft(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addTagToItem(selectedItem.id, tagDraft); setTagDraft(''); } }}
-                      onBlur={() => { if (tagDraft.trim()) { addTagToItem(selectedItem.id, tagDraft); setTagDraft(''); } }}
-                      placeholder="Add tag (Enter to confirm)"
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all" />
-                  </section>
+                  </div>
+                </section>
 
-                  <section>
-                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-4">Vault Classification</p>
-                    <div className="grid grid-cols-2 gap-3 text-xs">
-                      <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl"><p className="text-zinc-500 mb-1">Category</p><p className="font-bold text-white">{selectedItem.category}</p></div>
-                      <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl"><p className="text-zinc-500 mb-1">Source</p><p className="font-bold text-white">{selectedItem.source}</p></div>
-                    </div>
-                  </section>
-                </div>
-
-                <div className="mt-8 pt-8 border-t border-zinc-800">
+                <div className="pt-6 border-t border-zinc-800">
                   <button onClick={(e) => deleteItem(selectedItem.id, e as any)} className="w-full py-4 bg-red-600/10 border border-red-500/20 rounded-xl text-red-500 text-sm font-bold uppercase tracking-widest hover:bg-red-600/20 transition-all">
                     Delete from Vault
                   </button>
                 </div>
               </div>
+            </div>
             </div>
           </motion.div>
         )}

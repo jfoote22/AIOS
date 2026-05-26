@@ -27,6 +27,7 @@
     "openai": "^4.77.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-force-graph-2d": "^1.27.0",
     "react-markdown": "^9.0.1",
     "replicate": "^1.0.1"
   },
