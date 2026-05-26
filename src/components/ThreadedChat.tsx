@@ -10,7 +10,11 @@ import {
 import { apiUrl } from '../lib/apiBase';
 import { getCachedModels, onModelsChange, type ModelSlot } from '../lib/models';
 import { getConfigured, onConfiguredChange, type ProviderId } from '../lib/providers';
-import { getAnthropicAuthMode, onAnthropicAuthModeChange, type AnthropicAuthMode } from '../lib/authMode';
+import {
+  getAnthropicAuthMode, onAnthropicAuthModeChange,
+  getOpenAIAuthMode, onOpenAIAuthModeChange,
+  type AnthropicAuthMode, type AuthMode,
+} from '../lib/authMode';
 
 export interface Message {
   id: string;
@@ -45,13 +49,20 @@ interface MobileSelection {
 type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'grok';
 
 // Custom hook for thread chat instances - creates isolated chat for each thread
-function useThreadChat(selectedModel: ModelProvider, threadId: string, initialMessages?: Message[], grokMode: string = 'normal', anthropicAuthMode: AnthropicAuthMode = 'api') {
+function useThreadChat(
+  selectedModel: ModelProvider,
+  threadId: string,
+  initialMessages?: Message[],
+  grokMode: string = 'normal',
+  anthropicAuthMode: AnthropicAuthMode = 'api',
+  openaiAuthMode: AuthMode = 'api',
+) {
   const [showReasoning, setShowReasoning] = useState(false);
 
   const getApiEndpoint = (model: ModelProvider) => {
     switch (model) {
       case 'openai':
-        return apiUrl('/api/openai/chat');
+        return apiUrl(openaiAuthMode === 'subscription' ? '/api/codex-agent/chat' : '/api/openai/chat');
       case 'claude':
       case 'anthropic':
         return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
@@ -189,15 +200,20 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   }, [threads, showAllContexts]);
 
   const [anthropicAuthMode, setAnthropicAuthMode] = useState<AnthropicAuthMode>('api');
+  const [openaiAuthMode, setOpenaiAuthMode] = useState<AuthMode>('api');
   useEffect(() => {
     getAnthropicAuthMode().then(setAnthropicAuthMode).catch(() => {});
     return onAnthropicAuthModeChange(setAnthropicAuthMode);
+  }, []);
+  useEffect(() => {
+    getOpenAIAuthMode().then(setOpenaiAuthMode).catch(() => {});
+    return onOpenAIAuthModeChange(setOpenaiAuthMode);
   }, []);
 
   const getApiEndpoint = (model: ModelProvider) => {
     switch (model) {
       case 'openai':
-        return apiUrl('/api/openai/chat');
+        return apiUrl(openaiAuthMode === 'subscription' ? '/api/codex-agent/chat' : '/api/openai/chat');
       case 'claude':
       case 'anthropic':
         return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
@@ -1137,9 +1153,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   };
 
   const isModelReady = (m: ModelProvider) => {
-    // Claude/Anthropic in subscription mode don't need an API key — the local
-    // Claude Code CLI provides auth via the user's Claude Pro/Max subscription.
+    // Subscription modes bypass the per-provider API key requirement —
+    // the local CLI (claude / codex) supplies auth from the user's plan.
     if ((m === 'claude' || m === 'anthropic') && anthropicAuthMode === 'subscription') return true;
+    if (m === 'openai' && openaiAuthMode === 'subscription') return true;
     return configuredProviders.has(providerForModel(m));
   };
 
@@ -1500,7 +1517,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     const initialMessages = threadMessagesToLoad[thread.id] || thread.messages || [];
     
     // Create a dedicated, isolated chat instance for this specific thread with initial messages
-    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode);
+    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode, openaiAuthMode);
     
     // Store the thread chat instance reference for accessing messages during save
     React.useEffect(() => {

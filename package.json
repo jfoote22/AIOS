@@ -20,6 +20,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.150",
     "@anthropic-ai/sdk": "^0.32.1",
     "@google/genai": "^1.29.0",
+    "@openai/codex-sdk": "^0.133.0",
     "@tailwindcss/vite": "^4.1.14",
     "ai": "^3.3.20",
     "express": "^4.21.2",

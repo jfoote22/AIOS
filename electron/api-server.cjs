@@ -194,6 +194,86 @@ function start() {
     }
   });
 
+  // --- OpenAI Codex SDK chat (uses local `codex` CLI ChatGPT-subscription auth) ---
+  // Requires Codex CLI installed and signed in: `codex login` (Plus/Pro/Business).
+  // The renderer routes here when the user picks "ChatGPT subscription" auth in Models tab.
+  app.post('/api/codex-agent/chat', async (req, res) => {
+    try {
+      const { messages = [] } = req.body || {};
+      const last = messages[messages.length - 1];
+      if (!last || last.role !== 'user') {
+        return res.status(400).json({ error: 'Last message must be from user.' });
+      }
+
+      const history = messages.slice(0, -1).map(m =>
+        `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`
+      ).join('\n\n');
+      const prompt = history ? `${history}\n\nUser: ${last.content}` : last.content;
+
+      // Codex with a ChatGPT-account login picks the model based on your plan
+      // and rejects most explicit model IDs (the `openai` modelstore slot is
+      // intended for the Chat Completions API, not Codex). Omit `model` so
+      // Codex auto-selects. To override, set `AIOS_CODEX_MODEL` in the env.
+      const codexModelOverride = (process.env.AIOS_CODEX_MODEL || '').trim();
+
+      const { Codex } = await import('@openai/codex-sdk');
+      const codex = new Codex();
+      const thread = codex.startThread({
+        ...(codexModelOverride ? { model: codexModelOverride } : {}),
+        // Lock it down so Codex behaves like chat, not a coding agent:
+        sandboxMode: 'read-only',
+        skipGitRepoCheck: true,
+        networkAccessEnabled: false,
+        webSearchEnabled: false,
+        approvalPolicy: 'never',
+      });
+
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('x-vercel-ai-data-stream', 'v1');
+      res.setHeader('Cache-Control', 'no-cache');
+
+      const streamed = await thread.runStreamed(prompt);
+
+      // Codex emits agent_message items whose `text` accumulates over events.
+      // Track prev length per item id to emit only the new delta to the client.
+      const itemSent = new Map();
+
+      for await (const event of streamed.events) {
+        if (event.type === 'item.updated' || event.type === 'item.completed') {
+          const item = event.item;
+          if (item && item.type === 'agent_message' && typeof item.text === 'string') {
+            const prev = itemSent.get(item.id) || 0;
+            if (item.text.length > prev) {
+              res.write(streamPart('text', item.text.slice(prev)));
+              itemSent.set(item.id, item.text.length);
+            }
+          }
+        } else if (event.type === 'turn.completed') {
+          break;
+        } else if (event.type === 'turn.failed') {
+          throw new Error(event.error?.message || 'Codex turn failed.');
+        } else if (event.type === 'error') {
+          throw new Error(event.message || 'Codex stream error.');
+        }
+      }
+
+      res.write(streamPart('finish_message', {
+        finishReason: 'stop',
+        usage: { promptTokens: 0, completionTokens: 0 },
+      }));
+      res.end();
+    } catch (err) {
+      console.error('Codex SDK error:', err);
+      const message = err?.message || 'Codex SDK request failed.';
+      if (!res.headersSent) {
+        res.status(500).json({ error: message });
+      } else {
+        try { res.write(streamPart('error', message)); } catch {}
+        res.end();
+      }
+    }
+  });
+
   // --- Deepgram key fetch (renderer needs the key to talk to Deepgram directly) ---
   app.get('/api/deepgram', (_req, res) => {
     res.json({ key: getProviderKey('deepgram') || '' });
