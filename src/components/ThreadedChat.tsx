@@ -1,6 +1,12 @@
 import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { useChat } from 'ai/react';
 import React from 'react';
+import {
+  Search, Link2, Video, FileText, Target, MessageSquare, Scissors, Brain,
+  RotateCw, Maximize2, Minimize2, ChevronLeft, ChevronRight, X,
+  Eye, EyeOff, Palette, ClipboardList, FileX2, Lightbulb, Sparkles, RefreshCw,
+  ChevronsUp, ChevronsDown,
+} from 'lucide-react';
 import { apiUrl } from '../lib/apiBase';
 import { getCachedModels, onModelsChange, type ModelSlot } from '../lib/models';
 
@@ -515,7 +521,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       const mainResponseCount = mainChat.messages.filter(msg => msg.role === 'assistant').length;
       console.log('All AI responses copied to clipboard!');
       
-      const expandMessage = hadCollapsedRows ? '\n\n✨ Auto-expanded all collapsed rows to access all responses!' : '';
+      const expandMessage = hadCollapsedRows ? '\n\nNote: auto-expanded all collapsed rows to access all responses.' : '';
       alert(`Copied to clipboard!\n- Main chat: ${mainResponseCount} responses\n- Threads: ${threadCount} threads${expandMessage}`);
       
     } catch (error) {
@@ -875,17 +881,17 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     if (context.includes('Please explain this in the simplest terms possible')) {
       const match = context.match(/"([^"]+)"/);
       if (match) {
-        title = `🎯 Simplify: ${match[1].substring(0, 40)}${match[1].length > 40 ? '...' : ''}`;
+        title = `Simplify: ${match[1].substring(0, 40)}${match[1].length > 40 ? '...' : ''}`;
       }
     } else if (context.includes('Please provide 3-5 concrete, practical examples')) {
       const match = context.match(/"([^"]+)"/);
       if (match) {
-        title = `📝 Examples: ${match[1].substring(0, 40)}${match[1].length > 40 ? '...' : ''}`;
+        title = `Examples: ${match[1].substring(0, 40)}${match[1].length > 40 ? '...' : ''}`;
       }
     } else if (context.includes('Please provide more details about')) {
       const match = context.match(/"([^"]+)"/);
       if (match) {
-        title = `🔍 Details: ${match[1].substring(0, 40)}${match[1].length > 40 ? '...' : ''}`;
+        title = `Details: ${match[1].substring(0, 40)}${match[1].length > 40 ? '...' : ''}`;
       }
     } else {
       // If it's a question or statement, try to extract the key topic
@@ -1014,49 +1020,49 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     const menuItems = [
       {
         action: 'details',
-        icon: '🔍',
+        icon: <Search className="w-3.5 h-3.5 text-white" />,
         label: 'Get more details',
         onClick: () => createNewThread(selectedText, true, false, 'details'),
         colorScheme: getActionColorScheme('details')
       },
       {
         action: 'links',
-        icon: '🔗',
+        icon: <Link2 className="w-3.5 h-3.5 text-white" />,
         label: 'Get links',
         onClick: () => createNewThread(`Please provide relevant links and resources related to: "${selectedText}". Include authoritative sources, documentation, articles, and useful websites that would help someone learn more about this topic.`, false, true, 'links'),
         colorScheme: getActionColorScheme('links')
       },
       {
         action: 'videos',
-        icon: '🎥',
+        icon: <Video className="w-3.5 h-3.5 text-white" />,
         label: 'Get videos',
         onClick: () => createNewThread(`Please suggest relevant YouTube videos, tutorials, and video content related to: "${selectedText}". Include educational videos, tutorials, documentaries, and other video resources that would help understand this topic better.`, false, true, 'videos'),
         colorScheme: getActionColorScheme('videos')
       },
       {
         action: 'examples',
-        icon: '📝',
+        icon: <FileText className="w-3.5 h-3.5 text-white" />,
         label: 'Give examples',
         onClick: () => createNewThread(`Please provide 3-5 concrete, practical examples that illustrate or relate to: "${selectedText}". Make the examples diverse and easy to understand.`, false, true, 'examples'),
         colorScheme: getActionColorScheme('examples')
       },
       {
         action: 'simplify',
-        icon: '🎯',
+        icon: <Target className="w-3.5 h-3.5 text-white" />,
         label: 'Simplify this',
         onClick: () => createNewThread(`Please explain this in the simplest terms possible, as if you're teaching it to someone who is completely new to the topic: "${selectedText}"`, false, true, 'simplify'),
         colorScheme: getActionColorScheme('simplify')
       },
       {
         action: 'ask',
-        icon: '💬',
+        icon: <MessageSquare className="w-3.5 h-3.5 text-white" />,
         label: 'Ask about this',
         onClick: () => createNewThread(selectedText, false, true, 'ask'),
         colorScheme: getActionColorScheme('ask')
       },
       {
         action: 'snippet',
-        icon: '✂️',
+        icon: <Scissors className="w-3.5 h-3.5 text-white" />,
         label: 'Save to Vault',
         onClick: () => saveSelectionAsSnippet(selectedText),
         colorScheme: getActionColorScheme('learning')
@@ -1068,7 +1074,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     return (
       <div 
         data-context-menu
-        className="fixed bg-slate-800 border border-slate-600 rounded-lg shadow-2xl py-2 min-w-[240px]"
+        className="fixed bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl py-2 min-w-[240px]"
         style={{ 
           left: contextMenuPosition.x - 120, // Center horizontally (240px width / 2)
           top: contextMenuPosition.y - 140,  // Center vertically (approximate menu height / 2)
@@ -1079,7 +1085,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.preventDefault()} // Prevent text selection from being cleared
       >
-        <div className="px-3 py-2 text-xs text-muted border-b border-custom">
+        <div className="px-3 py-2 text-xs text-zinc-500 border-b border-zinc-800">
           Create new thread from selection
         </div>
         <div className="py-1">
@@ -1099,10 +1105,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             </button>
           ))}
         </div>
-        <div className="border-t border-custom mt-1 pt-1">
+        <div className="border-t border-zinc-800 mt-1 pt-1">
           <button
             onClick={() => setShowContextMenu(false)}
-            className="w-full px-4 py-2 text-left hover:bg-hover text-sm text-muted font-medium transition-colors duration-200"
+            className="w-full px-4 py-2 text-left hover:bg-zinc-800 text-sm text-zinc-500 font-medium transition-colors duration-200"
           >
             Cancel
           </button>
@@ -1118,10 +1124,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const ModelSelector = () => (
     <div className="flex flex-wrap gap-2">
       {[
-        { value: 'openai' as ModelProvider,    label: labelFor('openai', 'GPT-4o'),              emoji: '🧠', color: 'green'  },
-        { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.7'),     emoji: '🤖', color: 'blue'   },
-        { value: 'anthropic' as ModelProvider, label: labelFor('anthropic', 'Claude Sonnet 4.6'),emoji: '🎯', color: 'purple' },
-        { value: 'grok' as ModelProvider,      label: labelFor('grok', 'Grok 4'),                emoji: '⚡', color: 'orange' }
+        { value: 'openai' as ModelProvider,    label: labelFor('openai', 'GPT-4o'),              color: 'green'  },
+        { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.7'),     color: 'blue'   },
+        { value: 'anthropic' as ModelProvider, label: labelFor('anthropic', 'Claude Sonnet 4.6'),color: 'purple' },
+        { value: 'grok' as ModelProvider,      label: labelFor('grok', 'Grok 4'),                color: 'orange' }
       ].map((model) => (
         <button
           key={model.value}
@@ -1129,16 +1135,16 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 border backdrop-blur-sm ${
             selectedModel === model.value
               ? model.color === 'green' 
-                ? 'bg-accent-green/20 text-accent-green border-accent-green/50 shadow-lg' 
+                ? 'bg-emerald-500/20 text-emerald-500 border-emerald-500/50 shadow-lg' 
                 : model.color === 'blue'
-                ? 'bg-accent-blue/20 text-accent-blue border-accent-blue/50 shadow-lg'
+                ? 'bg-indigo-500/20 text-indigo-500 border-indigo-500/50 shadow-lg'
                 : model.color === 'purple'
-                ? 'bg-accent-purple/20 text-accent-purple border-accent-purple/50 shadow-lg'
-                : 'bg-accent-orange/20 text-accent-orange border-accent-orange/50 shadow-lg'
-              : 'bg-card/60 text-muted hover:bg-hover hover:text-white border-custom'
+                ? 'bg-indigo-400/20 text-indigo-400 border-indigo-400/50 shadow-lg'
+                : 'bg-orange-500/20 text-orange-500 border-orange-500/50 shadow-lg'
+              : 'bg-zinc-900/60 text-zinc-500 hover:bg-zinc-800 hover:text-white border-zinc-800'
           }`}
         >
-          {model.emoji} {model.label}
+          {model.label}
         </button>
       ))}
     </div>
@@ -1208,8 +1214,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                   onClick={() => setGrokMode(mode as 'normal' | 'fun' | 'creative' | 'precise')}
                   className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 border ${
                     grokMode === mode
-                      ? 'bg-accent-blue/20 text-accent-blue border-accent-blue/50'
-                      : 'bg-card/40 text-muted hover:bg-hover hover:text-white border-custom'
+                      ? 'bg-indigo-500/20 text-indigo-500 border-indigo-500/50'
+                      : 'bg-zinc-900/40 text-zinc-500 hover:bg-zinc-800 hover:text-white border-zinc-800'
                   }`}
                 >
                   {mode.charAt(0).toUpperCase() + mode.slice(1)}
@@ -1223,8 +1229,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
               onClick={() => setShowReasoning(!showReasoning)}
               className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all duration-200 ${
                 showReasoning 
-                  ? 'bg-accent-blue/20 text-accent-blue border border-accent-blue/50' 
-                  : 'bg-card/40 text-muted border border-custom hover:bg-card/60'
+                  ? 'bg-indigo-500/20 text-indigo-500 border border-indigo-500/50' 
+                  : 'bg-zinc-900/40 text-zinc-500 border border-zinc-800 hover:bg-zinc-900/60'
               }`}
               title="Toggle reasoning mode (like grok.com Think Mode)"
             >
@@ -1242,7 +1248,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             type="text"
             value={localInput}
             onChange={(e) => setLocalInput(e.target.value)}
-            className="flex-1 px-4 py-3 bg-white text-black border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent-blue/50 focus:border-accent-blue transition-all duration-200"
+            className="flex-1 px-4 py-3 bg-white text-black border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 transition-all duration-200"
             placeholder={isThread ? "Ask about the selected context..." : "Type a message"}
             disabled={isLoading}
           />
@@ -1251,10 +1257,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             onClick={handleButtonClick}
             className={`w-12 h-12 rounded-lg flex items-center justify-center transition-all duration-200 ${
               isLoading 
-                ? 'bg-accent-orange/20 hover:bg-accent-orange/30 border-accent-orange/50 text-accent-orange' 
+                ? 'bg-orange-500/20 hover:bg-orange-500/30 border-orange-500/50 text-orange-500' 
                 : localInput.trim() 
-                  ? 'bg-accent-blue/20 hover:bg-accent-blue/30 border-accent-blue/50 text-accent-blue hover:scale-105' 
-                  : 'bg-card/40 border-custom text-muted cursor-not-allowed'
+                  ? 'bg-indigo-500/20 hover:bg-indigo-500/30 border-indigo-500/50 text-indigo-500 hover:scale-105' 
+                  : 'bg-zinc-900/40 border-zinc-800 text-zinc-500 cursor-not-allowed'
             } border backdrop-blur-sm`}
             disabled={isLoading || !localInput.trim()}
             title={isLoading ? "AI is thinking..." : "Send message"}
@@ -1274,8 +1280,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
         {/* Status indicator */}
         {selectedModel === 'grok' && showReasoning && (
-          <div className="text-xs text-accent-blue/70 text-center">
-            💭 Reasoning mode enabled - AI will show its thinking process
+          <div className="text-xs text-indigo-500/70 text-center">
+            Reasoning mode enabled — AI will show its thinking process.
           </div>
         )}
       </div>
@@ -1323,67 +1329,67 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     switch (actionType) {
       case 'ask':
         return {
-          bg: 'bg-accent-blue',
-          border: 'border-accent-blue',
+          bg: 'bg-indigo-500',
+          border: 'border-indigo-500',
           badgeText: 'text-white',
-          badgeBg: 'bg-accent-blue',
-          badgeBorder: 'border-accent-blue'
+          badgeBg: 'bg-indigo-500',
+          badgeBorder: 'border-indigo-500'
         };
       case 'details':
         return {
-          bg: 'bg-accent-green',
-          border: 'border-accent-green',
+          bg: 'bg-emerald-500',
+          border: 'border-emerald-500',
           badgeText: 'text-white',
-          badgeBg: 'bg-accent-green',
-          badgeBorder: 'border-accent-green'
+          badgeBg: 'bg-emerald-500',
+          badgeBorder: 'border-emerald-500'
         };
       case 'simplify':
         return {
-          bg: 'bg-accent-yellow',
-          border: 'border-accent-yellow',
+          bg: 'bg-amber-400',
+          border: 'border-amber-400',
           badgeText: 'text-black',
-          badgeBg: 'bg-accent-yellow',
-          badgeBorder: 'border-accent-yellow'
+          badgeBg: 'bg-amber-400',
+          badgeBorder: 'border-amber-400'
         };
       case 'examples':
         return {
-          bg: 'bg-accent-orange',
-          border: 'border-accent-orange',
+          bg: 'bg-orange-500',
+          border: 'border-orange-500',
           badgeText: 'text-white',
-          badgeBg: 'bg-accent-orange',
-          badgeBorder: 'border-accent-orange'
+          badgeBg: 'bg-orange-500',
+          badgeBorder: 'border-orange-500'
         };
       case 'learning':
         return {
-          bg: 'bg-accent-purple',
-          border: 'border-accent-purple',
+          bg: 'bg-indigo-400',
+          border: 'border-indigo-400',
           badgeText: 'text-white',
-          badgeBg: 'bg-accent-purple',
-          badgeBorder: 'border-accent-purple'
+          badgeBg: 'bg-indigo-400',
+          badgeBorder: 'border-indigo-400'
         };
       case 'links':
         return {
-          bg: 'bg-accent-red',
-          border: 'border-accent-red',
+          bg: 'bg-red-500',
+          border: 'border-red-500',
           badgeText: 'text-white',
-          badgeBg: 'bg-accent-red',
-          badgeBorder: 'border-accent-red'
+          badgeBg: 'bg-red-500',
+          badgeBorder: 'border-red-500'
         };
       case 'videos':
         return {
-          bg: 'bg-accent-purple',
-          border: 'border-accent-purple',
+          bg: 'bg-indigo-400',
+          border: 'border-indigo-400',
           badgeText: 'text-white',
-          badgeBg: 'bg-accent-purple',
-          badgeBorder: 'border-accent-purple'
+          badgeBg: 'bg-indigo-400',
+          badgeBorder: 'border-indigo-400'
         };
       default:
         return {
-          bg: 'bg-slate-600',
-          border: 'border-slate-600',
+          bg: 'bg-zinc-800',
+          border: 'border-zinc-800',
           badgeText: 'text-white',
-          badgeBg: 'bg-slate-600',
-          badgeBorder: 'border-slate-600'
+          badgeBg: 'bg-zinc-800',
+          badgeBorder: 'border-zinc-800'
         };
     }
   };
@@ -1409,7 +1415,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             href={href}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-blue-400 hover:text-blue-300 underline transition-colors duration-200"
+            className="text-indigo-400 hover:text-indigo-300 underline transition-colors duration-200"
             onClick={(e) => e.stopPropagation()} // Prevent text selection when clicking links
           >
             {part}
@@ -1440,8 +1446,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         <div
           className={`max-w-4xl px-4 py-3 rounded-lg border ${
             isUser
-              ? 'bg-accent-blue/20 text-white border-accent-blue/30 backdrop-blur-sm'
-              : 'bg-card/80 text-white cursor-text select-text border-custom backdrop-blur-sm'
+              ? 'bg-indigo-500/20 text-white border-indigo-500/30 backdrop-blur-sm'
+              : 'bg-zinc-900/80 text-white cursor-text select-text border-zinc-800 backdrop-blur-sm'
           }`}
           onMouseUp={handleMouseUp}
           onTouchStart={handleTouchStartMessage}
@@ -1451,7 +1457,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             {linkifyText(message.content)}
           </div>
           {!isUser && (
-            <div className="mt-2 text-xs text-muted opacity-60">
+            <div className="mt-2 text-xs text-zinc-500 opacity-60">
               {isMobileDevice ? 'Double-tap and hold to select text and create a new thread' : 'Select text to create a new thread'}
             </div>
           )}
@@ -1549,11 +1555,11 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     
     return (
       <div 
-        className={`${threadPanelWidth} bg-card/60 backdrop-blur border-l-2 border-accent-blue/40 border-r border-custom shadow-lg flex flex-col h-full transition-all duration-300 ${isCollapsed || isMainExpanded ? 'min-w-80' : ''} rounded-lg overflow-hidden`}
+        className={`${threadPanelWidth} bg-zinc-900/60 backdrop-blur border-l-2 border-indigo-500/40 border-r border-zinc-800 shadow-lg flex flex-col h-full transition-all duration-300 ${isCollapsed || isMainExpanded ? 'min-w-80' : ''} rounded-lg overflow-hidden`}
         data-thread-id={thread.id}
       >
         {/* Thread Header - Improved Readability */}
-        <div className={`flex-shrink-0 ${compactThreadHeaders ? 'py-0 px-1' : 'py-0.5 px-1.5'} border-b-2 ${threadHeaderColorsEnabled ? colorScheme.border : 'border-custom'} ${threadHeaderColorsEnabled ? colorScheme.bg : 'bg-card/80'} shadow-sm transition-all duration-200`}>
+        <div className={`flex-shrink-0 ${compactThreadHeaders ? 'py-0 px-1' : 'py-0.5 px-1.5'} border-b-2 ${threadHeaderColorsEnabled ? colorScheme.border : 'border-zinc-800'} ${threadHeaderColorsEnabled ? colorScheme.bg : 'bg-zinc-900/80'} shadow-sm transition-all duration-200`}>
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0 flex-1">
               {/* Thread number badge - always visible */}
@@ -1580,7 +1586,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
               {!compactThreadHeaders && thread.selectedContext && !isCollapsed && (!rowThreadCount || rowThreadCount < 4) && (
                 <button
                   onClick={() => toggleContextCollapse(thread.id)}
-                  className="flex items-center gap-2 bg-accent-yellow/20 text-accent-yellow hover:bg-accent-yellow/30 px-3 py-1 rounded-lg border border-accent-yellow/30 transition-all text-sm font-medium flex-shrink-0"
+                  className="flex items-center gap-2 bg-amber-400/20 text-amber-400 hover:bg-amber-400/30 px-3 py-1 rounded-lg border border-amber-400/30 transition-all text-sm font-medium flex-shrink-0"
                   title="Toggle context"
                 >
                   <span>Context</span>
@@ -1600,46 +1606,47 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             <div className="flex items-center gap-1 flex-shrink-0">
               <button
                 onClick={() => toggleThreadFullscreen(thread.id)}
-                className={`${compactThreadHeaders ? 'p-1' : 'p-2'} rounded-lg hover:bg-hover transition-colors ${
-                  fullscreenThread === thread.id ? 'bg-accent-green/20 text-accent-green' : 'text-gray-400 hover:text-white'
+                className={`${compactThreadHeaders ? 'p-1' : 'p-2'} rounded-lg hover:bg-zinc-800 transition-colors ${
+                  fullscreenThread === thread.id ? 'bg-emerald-500/20 text-emerald-500' : 'text-zinc-400 hover:text-white'
                 }`}
                 title={fullscreenThread === thread.id ? 'Exit fullscreen' : 'Fullscreen thread'}
               >
-                <span className={`${compactThreadHeaders ? 'text-sm' : 'text-lg'} font-bold`}>
-                  {fullscreenThread === thread.id ? '⊡' : '⊞'}
-                </span>
+                {fullscreenThread === thread.id
+                  ? <Minimize2 className={compactThreadHeaders ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
+                  : <Maximize2 className={compactThreadHeaders ? 'w-3.5 h-3.5' : 'w-4 h-4'} />}
               </button>
               <button
                 onClick={() => rerunThreadContext(thread)}
-                className={`${compactThreadHeaders ? 'p-1' : 'p-2'} rounded-lg hover:bg-hover transition-colors text-gray-400 hover:text-accent-orange`}
+                className={`${compactThreadHeaders ? 'p-1' : 'p-2'} rounded-lg hover:bg-zinc-800 transition-colors text-zinc-400 hover:text-orange-500`}
                 title={`Rerun original ${getActionLabel(thread.actionType)} action`}
               >
-                <span className={`${compactThreadHeaders ? 'text-sm' : 'text-lg'} font-bold`}>↻</span>
+                <RotateCw className={compactThreadHeaders ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
               </button>
               <button
                 onClick={() => toggleThreadExpansion(thread.id)}
-                className={`${compactThreadHeaders ? 'p-1' : 'p-2'} rounded-lg hover:bg-hover transition-colors ${
-                  isExpanded ? 'bg-accent-blue/20 text-accent-blue' : 'text-gray-400 hover:text-white'
+                className={`${compactThreadHeaders ? 'p-1' : 'p-2'} rounded-lg hover:bg-zinc-800 transition-colors ${
+                  isExpanded ? 'bg-indigo-500/20 text-indigo-500' : 'text-zinc-400 hover:text-white'
                 }`}
                 title={isExpanded ? 'Collapse thread' : 'Expand thread'}
               >
-                <span className={`${compactThreadHeaders ? 'text-sm' : 'text-lg'} font-bold`}>
-                  {isExpanded ? '←' : '→'}
-                </span>
+                {isExpanded
+                  ? <ChevronLeft className={compactThreadHeaders ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
+                  : <ChevronRight className={compactThreadHeaders ? 'w-3.5 h-3.5' : 'w-4 h-4'} />}
               </button>
               <button
                 onClick={() => closeThread(thread.id)}
-                className={`text-gray-400 hover:text-accent-red ${compactThreadHeaders ? 'text-sm' : 'text-lg'} transition-colors p-1`}
+                className={`text-zinc-400 hover:text-red-500 transition-colors p-1`}
+                title="Close thread"
               >
-                ×
+                <X className={compactThreadHeaders ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
               </button>
             </div>
           </div>
           
           {/* Context content with better styling */}
           {thread.selectedContext && !collapsedContexts.has(thread.id) && (
-            <div className="mt-3 bg-gradient-to-r from-accent-yellow/10 to-accent-yellow/5 border-l-4 border-accent-yellow/50 rounded-r-lg p-3">
-              <div className="text-accent-yellow/90 italic text-sm leading-relaxed">
+            <div className="mt-3 bg-gradient-to-r from-amber-400/10 to-amber-400/5 border-l-4 border-amber-400/50 rounded-r-lg p-3">
+              <div className="text-amber-400/90 italic text-sm leading-relaxed">
                 &quot;{thread.selectedContext.length > 150 ? thread.selectedContext.substring(0, 150) + '...' : thread.selectedContext}&quot;
               </div>
             </div>
@@ -1647,13 +1654,13 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         </div>
 
         {/* Thread Messages */}
-        <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-gradient-to-b from-transparent to-slate-900/10 min-h-0">
+        <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-gradient-to-b from-transparent to-zinc-900/10 min-h-0">
           {threadChat.messages.length === 0 && (
-            <div className="text-center text-muted text-sm py-8">
-              <div className="mb-2">💭</div>
+            <div className="text-center text-zinc-500 text-sm py-8">
+              <MessageSquare className="w-5 h-5 mx-auto mb-2 text-zinc-600" />
               <div className="text-white">Ask a question about the selected context above</div>
-              <div className="text-xs text-accent-green mt-3 bg-accent-green/10 px-3 py-2 rounded-lg border border-accent-green/20">
-                ✓ Context will be automatically included with your questions
+              <div className="text-xs text-emerald-500 mt-3 bg-emerald-500/10 px-3 py-2 rounded-lg border border-emerald-500/20">
+                Context will be automatically included with your questions.
               </div>
             </div>
           )}
@@ -1669,22 +1676,22 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
         {/* Thread Input */}
         <div 
-          className={`flex-shrink-0 transition-all duration-300 ease-in-out border-t border-custom ${
+          className={`flex-shrink-0 transition-all duration-300 ease-in-out border-t border-zinc-800 ${
             hideInputFields
               ? hoveredThreadId === thread.id
-                ? 'p-3 bg-gradient-to-t from-slate-900/40 to-transparent h-auto'
-                : 'p-1 bg-gradient-to-t from-slate-900/60 to-slate-900/20 h-3'
-              : 'p-3 bg-gradient-to-t from-slate-900/40 to-transparent h-auto'
+                ? 'p-3 bg-gradient-to-t from-zinc-900/40 to-transparent h-auto'
+                : 'p-1 bg-gradient-to-t from-zinc-900/60 to-zinc-900/20 h-3'
+              : 'p-3 bg-gradient-to-t from-zinc-900/40 to-transparent h-auto'
           }`}
         >
           {hideInputFields && hoveredThreadId !== thread.id ? (
             // Collapsed state - thin bar with visual indicator
             <div 
-              className="flex items-center justify-center h-full cursor-pointer hover:bg-gradient-to-t hover:from-slate-900/80 hover:to-slate-900/40 transition-all duration-200"
+              className="flex items-center justify-center h-full cursor-pointer hover:bg-gradient-to-t hover:from-zinc-900/80 hover:to-zinc-900/40 transition-all duration-200"
               onMouseEnter={() => setHoveredThreadId(thread.id)}
               onMouseLeave={() => setHoveredThreadId(null)}
             >
-              <div className="w-12 h-1 bg-accent-orange/40 rounded-full transition-all duration-200 hover:bg-accent-orange/60 hover:w-16"></div>
+              <div className="w-12 h-1 bg-orange-500/40 rounded-full transition-all duration-200 hover:bg-orange-500/60 hover:w-16"></div>
             </div>
           ) : (
             // Expanded state - full input area
@@ -1927,12 +1934,12 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     if (isCollapsed) {
       // Collapsed view - thin horizontal bar with color indicators and context previews
       return (
-        <div className="flex-shrink-0 h-16 bg-card/40 border border-custom rounded-lg transition-all duration-300">
+        <div className="flex-shrink-0 h-16 bg-zinc-900/40 border border-zinc-800 rounded-lg transition-all duration-300">
           <div className="flex items-center justify-between h-full px-4">
             <div className="flex items-center gap-3">
               <button
                 onClick={() => toggleRowCollapse(rowIndex)}
-                className="text-accent-blue hover:text-accent-blue/80 transition-colors"
+                className="text-indigo-500 hover:text-indigo-500/80 transition-colors"
                 title="Expand row"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1959,13 +1966,13 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                           {contextPreview}
                         </span>
                       </div>
-                      {idx < rowThreads.length - 1 && <span className="text-muted">•</span>}
+                      {idx < rowThreads.length - 1 && <span className="text-zinc-500">•</span>}
                     </div>
                   );
                 })}
               </div>
             </div>
-            <div className="text-xs text-muted">
+            <div className="text-xs text-zinc-500">
               {rowThreads.length} thread{rowThreads.length !== 1 ? 's' : ''}
             </div>
           </div>
@@ -1977,11 +1984,11 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     return (
       <div className="h-full flex flex-col relative">
         {/* Row header with collapse button */}
-        <div className="flex-shrink-0 flex items-center justify-between p-2 bg-card/30 backdrop-blur-sm rounded-t-lg border border-custom mb-2">
+        <div className="flex-shrink-0 flex items-center justify-between p-2 bg-zinc-900/30 backdrop-blur-sm rounded-t-lg border border-zinc-800 mb-2">
           <div className="flex items-center gap-2">
             <button
               onClick={() => toggleRowCollapse(rowIndex)}
-              className="text-accent-blue hover:text-accent-blue/80 transition-colors"
+              className="text-indigo-500 hover:text-indigo-500/80 transition-colors"
               title="Collapse row"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1990,7 +1997,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             </button>
             <button
               onClick={() => expandRow(rowIndex)}
-              className="text-accent-green hover:text-accent-green/80 transition-colors"
+              className="text-emerald-500 hover:text-emerald-500/80 transition-colors"
               title="Expand this row and collapse others"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1999,7 +2006,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             </button>
             <button
               onClick={() => expandAllRows()}
-              className="text-accent-yellow hover:text-accent-yellow/80 transition-colors"
+              className="text-amber-400 hover:text-amber-400/80 transition-colors"
               title="Expand all rows"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2011,12 +2018,12 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             </span>
           </div>
           <div className="flex items-center gap-4">
-            <div className="text-xs text-muted">
+            <div className="text-xs text-zinc-500">
               {rowThreads.length} thread{rowThreads.length !== 1 ? 's' : ''}
             </div>
             <button
               onClick={() => closeRow(rowThreads)}
-              className="text-gray-400 hover:text-accent-red transition-colors"
+              className="text-zinc-400 hover:text-red-500 transition-colors"
               title="Close all threads in this row"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2050,14 +2057,14 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     
     return (
       <div
-        className={`w-2 bg-accent-blue/20 hover:bg-accent-blue/40 cursor-col-resize transition-colors duration-200 relative group border-l border-r border-accent-blue/30 ${
-          isResizing ? 'bg-accent-blue/60' : ''
+        className={`w-2 bg-indigo-500/20 hover:bg-indigo-500/40 cursor-col-resize transition-colors duration-200 relative group border-l border-r border-indigo-500/30 ${
+          isResizing ? 'bg-indigo-500/60' : ''
         }`}
         onMouseDown={handleMouseDown}
       >
         {/* Visual indicator */}
         <div className="absolute inset-0 flex items-center justify-center">
-          <div className="w-0.5 h-12 bg-accent-blue/60 group-hover:bg-accent-blue transition-colors duration-200 rounded-full"></div>
+          <div className="w-0.5 h-12 bg-indigo-500/60 group-hover:bg-indigo-500 transition-colors duration-200 rounded-full"></div>
         </div>
         {/* Hover area for easier grabbing */}
         <div className="absolute -left-2 -right-2 inset-y-0"></div>
@@ -2105,18 +2112,18 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         userSelect: showContextMenu ? 'none' : 'auto'
       }}
     >
-      <div className={`mx-auto h-full ${hasActiveThreads ? 'max-w-none w-full' : 'max-w-4xl'} bg-slate-800/50 backdrop-blur-sm rounded-xl border border-slate-700/50 shadow-2xl overflow-hidden flex`}>
+      <div className={`mx-auto h-full ${hasActiveThreads ? 'max-w-none w-full' : 'max-w-4xl'} bg-zinc-900/50 backdrop-blur-sm rounded-xl border border-zinc-800/50 shadow-2xl overflow-hidden flex`}>
         {/* Main chat area - dynamic width based on expansion state */}
-        <div className={`${hasActiveThreads ? mainWidth : 'w-full'} flex flex-col transition-all duration-300 ${hasActiveThreads ? 'border-r-2 border-accent-blue/30 shadow-lg' : 'border-r border-transparent'} ${!hasActiveThreads ? 'rounded-xl' : 'rounded-l-xl'}`}>
+        <div className={`${hasActiveThreads ? mainWidth : 'w-full'} flex flex-col transition-all duration-300 ${hasActiveThreads ? 'border-r-2 border-indigo-500/30 shadow-lg' : 'border-r border-transparent'} ${!hasActiveThreads ? 'rounded-xl' : 'rounded-l-xl'}`}>
           {/* Header with model selector */}
-          <div className="border-b border-custom bg-card/80 backdrop-blur-sm p-4">
+          <div className="border-b border-zinc-800 bg-zinc-900/80 backdrop-blur-sm p-4">
             <div className="mx-auto max-w-full px-4">
               {hasActiveThreads && (
                 <div className="flex items-center justify-end gap-2 mb-4">
                   <button
                     onClick={() => setIsSplitScreenMode(!isSplitScreenMode)}
-                    className={`p-2 rounded-lg hover:bg-hover transition-colors ${
-                      isSplitScreenMode ? 'bg-accent-green/20 text-accent-green' : 'text-gray-400 hover:text-white'
+                    className={`p-2 rounded-lg hover:bg-zinc-800 transition-colors ${
+                      isSplitScreenMode ? 'bg-emerald-500/20 text-emerald-500' : 'text-zinc-400 hover:text-white'
                     }`}
                     title={isSplitScreenMode ? 'Exit split screen mode' : 'Enter split screen mode (50/50)'}
                   >
@@ -2127,23 +2134,22 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                   {!isSplitScreenMode && (
                     <button
                       onClick={() => toggleThreadExpansion('main')}
-                      className={`p-2 rounded-lg hover:bg-hover transition-colors ${
-                        expandedThread === 'main' ? 'bg-accent-blue/20 text-accent-blue' : 'text-gray-400 hover:text-white'
+                      className={`p-2 rounded-lg hover:bg-zinc-800 transition-colors ${
+                        expandedThread === 'main' ? 'bg-indigo-500/20 text-indigo-500' : 'text-zinc-400 hover:text-white'
                       }`}
                       title={expandedThread === 'main' ? 'Collapse main chat' : 'Expand main chat'}
                     >
-                      <span className="text-xl font-bold">
-                        {expandedThread === 'main' ? '←' : '→'}
-                      </span>
+                      {expandedThread === 'main' ? <ChevronLeft className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
                     </button>
                   )}
                   {!isSplitScreenMode && manualMainWidth !== null && (
                     <button
                       onClick={() => setManualMainWidth(null)}
-                      className="p-1 text-xs bg-accent-orange/20 text-accent-orange hover:bg-accent-orange/30 rounded-lg transition-colors"
+                      className="flex items-center gap-1 px-2 py-1 text-xs bg-orange-500/20 text-orange-500 hover:bg-orange-500/30 rounded-lg transition-colors"
                       title="Reset to automatic sizing"
                     >
-                      🔄 Reset
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Reset</span>
                     </button>
                   )}
                 </div>
@@ -2156,23 +2162,28 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
               
                               <ModelSelector />
                 {hasActiveThreads && (
-                <div className="mt-2 text-sm text-muted">
-                  💡 Select text in any AI response to create contextual threads - drill deeper into topics!
+                <div className="mt-2 text-sm text-zinc-500 flex items-center justify-center gap-2">
+                  <Lightbulb className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>Select text in any AI response to create contextual threads — drill deeper into topics.</span>
                 </div>
               )}
             </div>
           </div>
 
           {/* Messages area */}
-          <div className="flex-1 overflow-y-auto bg-gradient-to-b from-transparent to-slate-900/20">
+          <div className="flex-1 overflow-y-auto bg-gradient-to-b from-transparent to-zinc-900/20">
             {mainChat.messages.length === 0 ? (
               <div className="flex items-center justify-center h-full">
                 <div className="text-center">
-                  <div className="text-6xl mb-4">💬</div>
+                  <div className="flex items-center justify-center mb-4">
+                    <div className="w-20 h-20 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center">
+                      <MessageSquare className="w-8 h-8 text-indigo-500" />
+                    </div>
+                  </div>
                   <h2 className="text-xl font-semibold text-white mb-2">Start a conversation</h2>
-                  <p className="text-muted mb-4">Type a message below to begin chatting with AI</p>
-                  <div className="text-sm text-gray-400 max-w-md bg-card/40 p-4 rounded-lg border border-custom">
-                    <strong className="text-accent-blue">Pro tip:</strong> After getting an AI response, you can select any part of the text and create a new threaded conversation about that specific context!
+                  <p className="text-zinc-500 mb-4">Type a message below to begin chatting with AI</p>
+                  <div className="text-sm text-zinc-400 max-w-md bg-zinc-900/40 p-4 rounded-lg border border-zinc-800">
+                    <strong className="text-indigo-500">Pro tip:</strong> After getting an AI response, you can select any part of the text and create a new threaded conversation about that specific context!
                   </div>
                 </div>
               </div>
@@ -2183,11 +2194,11 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                 ))}
                 {mainChat.isLoading && (
                   <div className="flex justify-start">
-                    <div className="bg-card/80 backdrop-blur-sm p-4 rounded-lg max-w-xs border border-custom">
+                    <div className="bg-zinc-900/80 backdrop-blur-sm p-4 rounded-lg max-w-xs border border-zinc-800">
                       <div className="flex space-x-1">
-                        <div className="w-2 h-2 bg-accent-blue rounded-full animate-bounce"></div>
-                        <div className="w-2 h-2 bg-accent-blue rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                        <div className="w-2 h-2 bg-accent-blue rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                        <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></div>
+                        <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                        <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
                       </div>
                     </div>
                   </div>
@@ -2197,7 +2208,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           </div>
           
           {/* Chat Input */}
-          <div className="border-t border-custom bg-card/60 backdrop-blur-sm p-6">
+          <div className="border-t border-zinc-800 bg-zinc-900/60 backdrop-blur-sm p-6">
             <div className="mx-auto max-w-full">
               <ChatInput 
                 onSubmit={handleMainSubmit}
@@ -2217,9 +2228,9 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
         {/* Thread Container */}
         {hasActiveThreads && (
-          <div className={`${threadWidth} bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 overflow-hidden flex flex-col transition-all duration-300 rounded-r-xl`}>
+          <div className={`${threadWidth} bg-gradient-to-br from-zinc-900 via-zinc-900 to-zinc-900 overflow-hidden flex flex-col transition-all duration-300 rounded-r-xl`}>
             {/* Thread Header */}
-            <div className="flex-shrink-0 bg-card/40 backdrop-blur-sm border-b border-custom">
+            <div className="flex-shrink-0 bg-zinc-900/40 backdrop-blur-sm border-b border-zinc-800">
               <div className="p-4">
                 <div className="flex items-center justify-between">
                   <h2 className="text-lg font-semibold text-white">Threads</h2>
@@ -2229,16 +2240,14 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                       onClick={() => setCompactThreadHeaders(!compactThreadHeaders)}
                       className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all duration-200 ${
                         compactThreadHeaders 
-                          ? 'bg-accent-green/20 text-accent-green border-accent-green/50 hover:bg-accent-green/30' 
-                          : 'bg-card/60 text-muted border-custom hover:bg-hover hover:text-white'
+                          ? 'bg-emerald-500/20 text-emerald-500 border-emerald-500/50 hover:bg-emerald-500/30' 
+                          : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:bg-zinc-800 hover:text-white'
                       }`}
                       title={compactThreadHeaders ? 'Disable compact thread headers' : 'Enable compact thread headers'}
                     >
-                      <span className="text-xs font-medium">
-                        {compactThreadHeaders ? '⬆️' : '⬇️'}
-                      </span>
+                      {compactThreadHeaders ? <ChevronsUp className="w-3.5 h-3.5" /> : <ChevronsDown className="w-3.5 h-3.5" />}
                       <div className={`w-8 h-4 rounded-full transition-all duration-200 ${
-                        compactThreadHeaders ? 'bg-accent-green' : 'bg-gray-600'
+                        compactThreadHeaders ? 'bg-emerald-500' : 'bg-zinc-700'
                       }`}>
                         <div className={`w-3 h-3 bg-white rounded-full mt-0.5 transition-transform duration-200 ${
                           compactThreadHeaders ? 'translate-x-4' : 'translate-x-0.5'
@@ -2251,16 +2260,14 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                       onClick={() => setThreadHeaderColorsEnabled(!threadHeaderColorsEnabled)}
                       className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all duration-200 ${
                         threadHeaderColorsEnabled 
-                          ? 'bg-accent-purple/20 text-accent-purple border-accent-purple/50 hover:bg-accent-purple/30' 
-                          : 'bg-card/60 text-muted border-custom hover:bg-hover hover:text-white'
+                          ? 'bg-indigo-400/20 text-indigo-400 border-indigo-400/50 hover:bg-indigo-400/30' 
+                          : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:bg-zinc-800 hover:text-white'
                       }`}
                       title={threadHeaderColorsEnabled ? 'Disable thread header colors' : 'Enable thread header colors'}
                     >
-                      <span className="text-xs font-medium">
-                        {threadHeaderColorsEnabled ? '🎨' : '⚫'}
-                      </span>
+                      <Palette className="w-3.5 h-3.5" />
                       <div className={`w-8 h-4 rounded-full transition-all duration-200 ${
-                        threadHeaderColorsEnabled ? 'bg-accent-purple' : 'bg-gray-600'
+                        threadHeaderColorsEnabled ? 'bg-indigo-400' : 'bg-zinc-700'
                       }`}>
                         <div className={`w-3 h-3 bg-white rounded-full mt-0.5 transition-transform duration-200 ${
                           threadHeaderColorsEnabled ? 'translate-x-4' : 'translate-x-0.5'
@@ -2273,16 +2280,14 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                       onClick={() => setHideInputFields(!hideInputFields)}
                       className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all duration-200 ${
                         hideInputFields 
-                          ? 'bg-accent-orange/20 text-accent-orange border-accent-orange/50 hover:bg-accent-orange/30' 
-                          : 'bg-card/60 text-muted border-custom hover:bg-hover hover:text-white'
+                          ? 'bg-orange-500/20 text-orange-500 border-orange-500/50 hover:bg-orange-500/30' 
+                          : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:bg-zinc-800 hover:text-white'
                       }`}
                       title={hideInputFields ? 'Show input fields by default' : 'Hide input fields (show on hover)'}
                     >
-                      <span className="text-xs font-medium">
-                        {hideInputFields ? '👁️' : '✏️'}
-                      </span>
+                      {hideInputFields ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                       <div className={`w-8 h-4 rounded-full transition-all duration-200 ${
-                        hideInputFields ? 'bg-accent-orange' : 'bg-gray-600'
+                        hideInputFields ? 'bg-orange-500' : 'bg-zinc-700'
                       }`}>
                         <div className={`w-3 h-3 bg-white rounded-full mt-0.5 transition-transform duration-200 ${
                           hideInputFields ? 'translate-x-4' : 'translate-x-0.5'
@@ -2295,16 +2300,14 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                       onClick={toggleAllContextsVisibility}
                       className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all duration-200 ${
                         showAllContexts 
-                          ? 'bg-accent-blue/20 text-accent-blue border-accent-blue/50 hover:bg-accent-blue/30' 
-                          : 'bg-card/60 text-muted border-custom hover:bg-hover hover:text-white'
+                          ? 'bg-indigo-500/20 text-indigo-500 border-indigo-500/50 hover:bg-indigo-500/30' 
+                          : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:bg-zinc-800 hover:text-white'
                       }`}
                       title={showAllContexts ? 'Hide all thread contexts' : 'Show all thread contexts'}
                     >
-                      <span className="text-xs font-medium">
-                        {showAllContexts ? '📋' : '📄'}
-                      </span>
+                      {showAllContexts ? <ClipboardList className="w-3.5 h-3.5" /> : <FileX2 className="w-3.5 h-3.5" />}
                       <div className={`w-8 h-4 rounded-full transition-all duration-200 ${
-                        showAllContexts ? 'bg-accent-blue' : 'bg-gray-600'
+                        showAllContexts ? 'bg-indigo-500' : 'bg-zinc-700'
                       }`}>
                         <div className={`w-3 h-3 bg-white rounded-full mt-0.5 transition-transform duration-200 ${
                           showAllContexts ? 'translate-x-4' : 'translate-x-0.5'
@@ -2317,12 +2320,12 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                       onClick={() => setShowLearningModal(!showLearningModal)}
                       className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all duration-200 ${
                         learningSnippets.length > 0
-                          ? 'bg-violet-500/20 text-violet-400 border-violet-500/50 hover:bg-violet-500/30' 
-                          : 'bg-card/60 text-muted border-custom hover:bg-hover hover:text-white'
+                          ? 'bg-indigo-500/20 text-indigo-400 border-indigo-500/50 hover:bg-indigo-500/30' 
+                          : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:bg-zinc-800 hover:text-white'
                       }`}
                       title={`Learning snippets (${learningSnippets.length})`}
                     >
-                      <span className="text-xs font-medium">🧠</span>
+                      <Brain className="w-3.5 h-3.5" />
                       <span className="text-xs font-medium">{learningSnippets.length}</span>
                     </button>
                   </div>
@@ -2388,24 +2391,24 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           className="fixed inset-0 z-[99998] pointer-events-none"
         >
           {/* Selection Adjustment UI */}
-          <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-slate-800 border border-slate-600 rounded-lg shadow-2xl p-4 pointer-events-auto">
+          <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl p-4 pointer-events-auto">
             <div className="text-center mb-3">
               <div className="text-sm text-white font-semibold mb-1">Selected Text</div>
-              <div className="text-xs text-gray-300 max-w-sm overflow-hidden">
+              <div className="text-xs text-zinc-300 max-w-sm overflow-hidden">
                 &quot;{mobileSelection.text.length > 100 ? mobileSelection.text.substring(0, 100) + '...' : mobileSelection.text}&quot;
               </div>
             </div>
             <div className="flex gap-3 justify-center">
               <button
                 onClick={commitMobileSelection}
-                className="px-4 py-2 bg-accent-blue text-white rounded-lg text-sm font-medium hover:bg-accent-blue/80 transition-colors"
+                className="px-4 py-2 bg-indigo-500 text-white rounded-lg text-sm font-medium hover:bg-indigo-500/80 transition-colors"
                 disabled={mobileSelection.text.length < 10}
               >
                 Create Thread
               </button>
               <button
                 onClick={cancelMobileSelection}
-                className="px-4 py-2 bg-gray-600 text-white rounded-lg text-sm font-medium hover:bg-gray-500 transition-colors"
+                className="px-4 py-2 bg-zinc-700 text-white rounded-lg text-sm font-medium hover:bg-zinc-500 transition-colors"
               >
                 Cancel
               </button>
@@ -2423,7 +2426,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       {showContextMenu && (
         <div 
           data-context-preview
-          className="fixed bg-slate-800 border border-slate-600 rounded-lg shadow-2xl min-w-[300px] max-w-[500px] z-[100000]"
+          className="fixed bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl min-w-[300px] max-w-[500px] z-[100000]"
           style={{ 
             left: '50%',
             top: isMobileDevice ? '20%' : '30%', // Position higher on mobile to avoid keyboard
@@ -2433,7 +2436,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           onClick={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.preventDefault()} // Prevent text selection from being cleared
         >
-          <div className="px-3 py-2 text-xs text-muted border-b border-slate-600">
+          <div className="px-3 py-2 text-xs text-zinc-500 border-b border-zinc-800">
             Selected Context
           </div>
           <div className="py-2 px-3 max-h-32 overflow-y-auto">
@@ -2441,7 +2444,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
               &quot;{selectedText}&quot;
             </div>
           </div>
-          <div className="px-3 py-2 text-xs text-muted text-center border-t border-slate-600">
+          <div className="px-3 py-2 text-xs text-zinc-500 text-center border-t border-zinc-800">
             Choose an action below to create a thread with this context
           </div>
         </div>
@@ -2451,7 +2454,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       {showContextMenu && (
         <div 
           data-context-menu
-          className="fixed bg-slate-800 border border-slate-600 rounded-lg shadow-2xl py-2 min-w-[240px] z-[99999]"
+          className="fixed bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl py-2 min-w-[240px] z-[99999]"
           style={{ 
             left: '50%',
             top: isMobileDevice ? '50%' : '60%', // Position higher on mobile to avoid keyboard
@@ -2461,63 +2464,63 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           onClick={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.preventDefault()} // Prevent text selection from being cleared
         >
-          <div className="px-3 py-2 text-xs text-muted border-b border-custom">
+          <div className="px-3 py-2 text-xs text-zinc-500 border-b border-zinc-800">
             Create new thread from selection
           </div>
           <div className="py-1">
             {[
               {
                 action: 'ask',
-                icon: '💬',
+                icon: <MessageSquare className="w-3.5 h-3.5 text-white" />,
                 label: 'Ask about this',
                 onClick: () => createNewThread(selectedText, false, true, 'ask'),
                 colorScheme: getActionColorScheme('ask')
               },
               {
                 action: 'details',
-                icon: '🔍',
+                icon: <Search className="w-3.5 h-3.5 text-white" />,
                 label: 'Get more details',
                 onClick: () => createNewThread(selectedText, true, false, 'details'),
                 colorScheme: getActionColorScheme('details')
               },
               {
                 action: 'simplify',
-                icon: '🎯',
+                icon: <Target className="w-3.5 h-3.5 text-white" />,
                 label: 'Simplify this',
                 onClick: () => createNewThread(`Please explain this in the simplest terms possible, as if you're teaching it to someone who is completely new to the topic: &quot;${selectedText}&quot;`, false, true, 'simplify'),
                 colorScheme: getActionColorScheme('simplify')
               },
               {
                 action: 'examples',
-                icon: '📝',
+                icon: <FileText className="w-3.5 h-3.5 text-white" />,
                 label: 'Give examples',
                 onClick: () => createNewThread(`Please provide 3-5 concrete, practical examples that illustrate or relate to: &quot;${selectedText}&quot;. Make the examples diverse and easy to understand.`, false, true, 'examples'),
                 colorScheme: getActionColorScheme('examples')
               },
               {
                 action: 'links',
-                icon: '🔗',
+                icon: <Link2 className="w-3.5 h-3.5 text-white" />,
                 label: 'Get links',
                 onClick: () => createNewThread(`Please provide relevant links and resources related to: "${selectedText}". Include authoritative sources, documentation, articles, and useful websites that would help someone learn more about this topic.`, false, true, 'links'),
                 colorScheme: getActionColorScheme('links')
               },
               {
                 action: 'videos',
-                icon: '🎥',
+                icon: <Video className="w-3.5 h-3.5 text-white" />,
                 label: 'Get videos',
                 onClick: () => createNewThread(`Please suggest relevant YouTube videos, tutorials, and video content related to: "${selectedText}". Include educational videos, tutorials, documentaries, and other video resources that would help understand this topic better.`, false, true, 'videos'),
                 colorScheme: getActionColorScheme('videos')
               },
               {
                 action: 'learning',
-                icon: '🧠',
+                icon: <Brain className="w-3.5 h-3.5 text-white" />,
                 label: 'Include in Learning Tools',
                 onClick: () => addToLearningSnippets(selectedText),
                 colorScheme: getActionColorScheme('learning')
               },
               {
                 action: 'snippet',
-                icon: '✂️',
+                icon: <Scissors className="w-3.5 h-3.5 text-white" />,
                 label: 'Save to Vault',
                 onClick: () => saveSelectionAsSnippet(selectedText),
                 colorScheme: getActionColorScheme('learning')
@@ -2539,10 +2542,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
               </button>
             ))}
           </div>
-          <div className="border-t border-custom mt-1 pt-1">
+          <div className="border-t border-zinc-800 mt-1 pt-1">
             <button
               onClick={() => setShowContextMenu(false)}
-              className="w-full px-4 py-2 text-left hover:bg-hover text-sm text-muted font-medium transition-colors duration-200"
+              className="w-full px-4 py-2 text-left hover:bg-zinc-800 text-sm text-zinc-500 font-medium transition-colors duration-200"
             >
               Cancel
             </button>
@@ -2554,18 +2557,18 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       {showLearningModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100001]" onClick={() => setShowLearningModal(false)}>
           <div 
-            className="bg-slate-800 border border-slate-600 rounded-xl shadow-2xl max-w-4xl max-h-[80vh] w-full mx-4 flex flex-col"
+            className="bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl max-w-4xl max-h-[80vh] w-full mx-4 flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Modal Header */}
-            <div className="flex items-center justify-between p-6 border-b border-slate-600">
+            <div className="flex items-center justify-between p-6 border-b border-zinc-800">
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 bg-violet-500 rounded-full flex items-center justify-center">
-                  🧠
+                <div className="w-8 h-8 bg-indigo-500 rounded-full flex items-center justify-center">
+                  <Brain className="w-4 h-4 text-white" />
                 </div>
                 <div>
                   <h2 className="text-xl font-semibold text-white">Learning Snippets</h2>
-                  <p className="text-sm text-gray-400">
+                  <p className="text-sm text-zinc-400">
                     {learningSnippets.length} snippet{learningSnippets.length !== 1 ? 's' : ''} collected for enhanced learning tool generation
                   </p>
                 </div>
@@ -2581,9 +2584,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                 )}
                 <button
                   onClick={() => setShowLearningModal(false)}
-                  className="text-gray-400 hover:text-white text-2xl transition-colors p-1"
+                  className="text-zinc-400 hover:text-white transition-colors p-1"
+                  title="Close"
                 >
-                  ×
+                  <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
@@ -2592,13 +2596,18 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             <div className="flex-1 overflow-y-auto p-6">
               {learningSnippets.length === 0 ? (
                 <div className="text-center py-12">
-                  <div className="text-6xl mb-4">🧠</div>
+                  <div className="flex items-center justify-center mb-4">
+                    <div className="w-20 h-20 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center">
+                      <Brain className="w-8 h-8 text-indigo-500" />
+                    </div>
+                  </div>
                   <h3 className="text-xl font-semibold text-white mb-2">No Learning Snippets Yet</h3>
-                  <p className="text-gray-400 mb-4">
+                  <p className="text-zinc-400 mb-4">
                     Select text in AI responses and choose &quot;Include in Learning Tools&quot; to build your learning collection.
                   </p>
-                  <div className="text-sm text-violet-400 bg-violet-500/10 p-4 rounded-lg border border-violet-500/20 max-w-md mx-auto">
-                    <strong>💡 Pro tip:</strong> These snippets will be automatically included when generating learning tools to provide more comprehensive and personalized results.
+                  <div className="flex items-start gap-2 text-sm text-indigo-400 bg-indigo-500/10 p-4 rounded-lg border border-indigo-500/20 max-w-md mx-auto text-left">
+                    <Lightbulb className="w-4 h-4 mt-0.5 shrink-0 text-amber-400" />
+                    <span><strong>Pro tip:</strong> These snippets will be automatically included when generating learning tools to provide more comprehensive and personalized results.</span>
                   </div>
                 </div>
               ) : (
@@ -2606,16 +2615,16 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                   {learningSnippets.map((snippet, index) => (
                     <div
                       key={snippet.id}
-                      className="bg-slate-700/50 border border-slate-600 rounded-lg p-4 hover:bg-slate-700/70 transition-colors"
+                      className="bg-zinc-800/50 border border-zinc-800 rounded-lg p-4 hover:bg-zinc-800/70 transition-colors"
                     >
                       <div className="flex items-start justify-between gap-4">
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-2">
-                            <span className="text-xs font-medium text-violet-400 bg-violet-500/20 px-2 py-1 rounded">
+                            <span className="text-xs font-medium text-indigo-400 bg-indigo-500/20 px-2 py-1 rounded">
                               #{index + 1}
                             </span>
-                            <span className="text-xs text-gray-400">{snippet.source}</span>
-                            <span className="text-xs text-gray-500">
+                            <span className="text-xs text-zinc-400">{snippet.source}</span>
+                            <span className="text-xs text-zinc-500">
                               {new Date(snippet.timestamp).toLocaleString()}
                             </span>
                           </div>
@@ -2625,7 +2634,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                         </div>
                         <button
                           onClick={() => removeLearningSnippet(snippet.id)}
-                          className="text-gray-400 hover:text-red-400 transition-colors p-1 flex-shrink-0"
+                          className="text-zinc-400 hover:text-red-400 transition-colors p-1 flex-shrink-0"
                           title="Remove snippet"
                         >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2641,12 +2650,12 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
             {/* Modal Footer */}
             {learningSnippets.length > 0 && (
-              <div className="border-t border-slate-600 p-6">
+              <div className="border-t border-zinc-800 p-6">
                 <div className="text-center">
-                  <div className="text-sm text-gray-400 mb-2">
+                  <div className="text-sm text-zinc-400 mb-2">
                     These snippets will be automatically included in your next learning tool generation
                   </div>
-                  <div className="text-xs text-violet-400">
+                  <div className="text-xs text-indigo-400">
                     Navigate to <strong>/learn</strong> and generate learning tools to see these snippets in action
                   </div>
                 </div>

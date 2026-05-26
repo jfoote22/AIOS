@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Save, FolderOpen, Plus, Copy, X, AlertCircle } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { Save, FolderOpen, Plus, Copy, X, AlertCircle, MessageSquare, Trash2, Clock, Bot, Layers, BookOpen } from 'lucide-react';
 import ThreadedChat from '../components/ThreadedChat';
 import * as db from '../lib/db';
-import { isConfigured, onConfiguredChange, getConfigured, type ProviderId } from '../lib/providers';
+import { onConfiguredChange, getConfigured, type ProviderId } from '../lib/providers';
 
 export interface DeepDiveRecord {
   id: string;
@@ -28,11 +29,7 @@ export default function DeepDivesTab() {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [configured, setConfigured] = useState<Set<ProviderId>>(getConfigured());
 
-  useEffect(() => {
-    const unsub = onConfiguredChange(setConfigured);
-    return unsub;
-  }, []);
-
+  useEffect(() => onConfiguredChange(setConfigured), []);
   useEffect(() => { refresh(); }, []);
 
   const refresh = async () => {
@@ -125,46 +122,51 @@ export default function DeepDivesTab() {
     try { return new Date(ts).toLocaleString(); } catch { return ''; }
   };
 
-  // Warn if no chat-capable provider is configured
   const chatProviders: ProviderId[] = ['openai', 'anthropic', 'grok'];
   const hasAnyChatProvider = chatProviders.some(p => configured.has(p));
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800">
-      <header className="h-14 border-b border-slate-700/50 px-6 flex items-center justify-between bg-slate-900/80 backdrop-blur-sm shrink-0">
-        <div className="flex items-center gap-3">
-          <h1 className="text-base font-bold text-white">DeepDives</h1>
-          {currentId && (
-            <span className="bg-emerald-600/20 text-emerald-400 px-2.5 py-0.5 rounded-full text-[11px] border border-emerald-600/30 font-medium">
-              Saved
-            </span>
-          )}
+    <div className="flex-1 flex flex-col overflow-hidden relative">
+      {/* Tab header — matches SnippingTab rhythm */}
+      <header className="h-16 border-b border-zinc-800 px-6 flex items-center justify-between bg-zinc-900/10 backdrop-blur-md shrink-0">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 bg-zinc-800 rounded-md"><MessageSquare className="w-4 h-4 text-indigo-400" /></div>
+            <h1 className="text-sm font-bold uppercase tracking-widest text-zinc-100">DeepDives</h1>
+            {currentId && (
+              <span className="ml-1 text-[10px] px-2 py-0.5 bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 rounded-full font-bold uppercase tracking-widest">
+                Saved
+              </span>
+            )}
+          </div>
         </div>
+
         <div className="flex items-center gap-2">
-          <button onClick={handleNewChat}
-            className="bg-indigo-600/90 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-md text-xs font-bold border border-indigo-500/60 flex items-center gap-1.5 transition-colors uppercase tracking-wider"
-            title="Start a new chat (clears current conversation)">
-            <Plus className="w-3.5 h-3.5" />New Chat
-          </button>
-          <button onClick={() => { if (!saveTitle) setSaveTitle(`DeepDive ${new Date().toLocaleDateString()}`); setShowSave(true); }}
-            className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-1.5 rounded-md text-xs font-medium border border-slate-700 flex items-center gap-1.5 transition-colors">
-            <Save className="w-3.5 h-3.5" />Save
-          </button>
           <button onClick={() => setShowLoad(true)}
-            className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-1.5 rounded-md text-xs font-medium border border-slate-700 flex items-center gap-1.5 transition-colors">
-            <FolderOpen className="w-3.5 h-3.5" />Load ({saved.length})
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900/60 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white text-[11px] font-bold uppercase tracking-wider rounded-lg transition-colors">
+            <FolderOpen className="w-3.5 h-3.5" />Load
+            <span className="text-[10px] bg-zinc-800 px-1.5 rounded-full text-zinc-500">{saved.length}</span>
           </button>
           <button onClick={handleCopy}
-            className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-1.5 rounded-md text-xs font-medium border border-slate-700 flex items-center gap-1.5 transition-colors">
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900/60 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white text-[11px] font-bold uppercase tracking-wider rounded-lg transition-colors">
             <Copy className="w-3.5 h-3.5" />Copy All
+          </button>
+          <button onClick={() => { if (!saveTitle) setSaveTitle(`DeepDive ${new Date().toLocaleDateString()}`); setShowSave(true); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900/60 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white text-[11px] font-bold uppercase tracking-wider rounded-lg transition-colors">
+            <Save className="w-3.5 h-3.5" />Save
+          </button>
+          <button onClick={handleNewChat}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold rounded-lg transition-all active:scale-95 shadow-lg shadow-indigo-600/10 uppercase tracking-wider"
+            title="Start a new chat (clears current conversation)">
+            <Plus className="w-3.5 h-3.5" />New Chat
           </button>
         </div>
       </header>
 
       {!hasAnyChatProvider && (
-        <div className="px-6 py-2.5 bg-amber-600/10 border-b border-amber-500/20 text-amber-300 text-xs flex items-center gap-2 shrink-0">
-          <AlertCircle className="w-4 h-4" />
-          No chat provider configured. Add an OpenAI, Anthropic, or Grok key in the <b>Models</b> tab to enable AI replies.
+        <div className="px-6 py-2.5 bg-amber-500/10 border-b border-amber-500/20 text-amber-400 text-[11px] flex items-center gap-2 shrink-0 uppercase tracking-wider font-bold">
+          <AlertCircle className="w-3.5 h-3.5" />
+          No chat provider configured — open the <b className="text-amber-300">Models</b> tab to add an OpenAI, Anthropic, or Grok key.
         </div>
       )}
 
@@ -172,82 +174,129 @@ export default function DeepDivesTab() {
         <ThreadedChat ref={threadedChatRef} />
       </div>
 
-      {showSave && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-slate-800 rounded-lg p-6 w-96 border border-slate-600">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-bold text-white">{currentId ? 'Update DeepDive' : 'Save DeepDive'}</h2>
-              <button onClick={() => setShowSave(false)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="text-white text-xs font-medium mb-1 block">Title *</label>
-                <input type="text" value={saveTitle} onChange={(e) => setSaveTitle(e.target.value)} autoFocus
-                  className="w-full bg-slate-900 text-white border border-slate-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
-                  placeholder="Title for your DeepDive..." />
-              </div>
-              <div>
-                <label className="text-white text-xs font-medium mb-1 block">Description</label>
-                <textarea value={saveDescription} onChange={(e) => setSaveDescription(e.target.value)}
-                  className="w-full bg-slate-900 text-white border border-slate-700 rounded-md px-3 py-2 h-16 text-sm resize-none focus:outline-none focus:border-blue-500"
-                  placeholder="Optional description..." />
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-5">
-              <button onClick={() => setShowSave(false)} disabled={isSaving}
-                className="px-3 py-1.5 text-sm text-slate-400 hover:text-white">Cancel</button>
-              <button onClick={handleSave} disabled={isSaving || !saveTitle.trim()}
-                className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-600 text-white px-4 py-1.5 rounded-md text-sm font-medium transition-colors">
-                {isSaving ? 'Saving…' : currentId ? 'Update' : 'Save'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Save modal */}
+      <AnimatePresence>
+        {showSave && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-xl overflow-y-auto"
+            onClick={() => !isSaving && setShowSave(false)}>
+            <div className="min-h-full flex items-start justify-center p-8">
+              <div className="max-w-md w-full my-auto bg-zinc-900/50 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl relative" onClick={(e) => e.stopPropagation()}>
+                <button onClick={() => !isSaving && setShowSave(false)} className="absolute top-6 right-6 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-10"><X className="w-5 h-5" /></button>
 
-      {showLoad && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-slate-800 rounded-lg p-6 w-[600px] max-h-[80vh] border border-slate-600 flex flex-col">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-bold text-white">Load Saved DeepDive</h2>
-              <button onClick={() => setShowLoad(false)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
-            </div>
-            {saved.length === 0 ? (
-              <div className="text-center py-12">
-                <p className="text-slate-400">No saved DeepDives yet.</p>
-                <p className="text-xs text-slate-500 mt-1">Start a conversation and click Save.</p>
+                <div className="p-8 space-y-6">
+                  <header>
+                    <div className="px-3 py-1 inline-block bg-indigo-600/20 border border-indigo-500/30 rounded-lg text-indigo-400 font-bold text-[10px] uppercase tracking-widest mb-3">
+                      {currentId ? 'Update DeepDive' : 'Save DeepDive'}
+                    </div>
+                    <h2 className="text-xl font-bold text-zinc-100 leading-tight">Snapshot this conversation</h2>
+                    <p className="text-sm text-zinc-400 mt-1">Persist the main thread, side threads, and snippets so you can return later.</p>
+                  </header>
+
+                  <section className="space-y-4">
+                    <div>
+                      <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Title *</p>
+                      <input type="text" value={saveTitle} onChange={(e) => setSaveTitle(e.target.value)} autoFocus
+                        placeholder="Title for your DeepDive…"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all" />
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Description</p>
+                      <textarea value={saveDescription} onChange={(e) => setSaveDescription(e.target.value)}
+                        placeholder="Optional description…" rows={3}
+                        className="w-full resize-none bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all" />
+                    </div>
+                  </section>
+
+                  <div className="flex justify-end gap-2 pt-2 border-t border-zinc-800">
+                    <button onClick={() => setShowSave(false)} disabled={isSaving}
+                      className="px-4 py-2 text-[11px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white transition-colors">
+                      Cancel
+                    </button>
+                    <button onClick={handleSave} disabled={isSaving || !saveTitle.trim()}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-[11px] font-bold rounded-lg transition-all active:scale-95 shadow-lg shadow-indigo-600/10 uppercase tracking-wider">
+                      {isSaving ? 'Saving…' : currentId ? 'Update' : 'Save'}
+                    </button>
+                  </div>
+                </div>
               </div>
-            ) : (
-              <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-                {saved.map(dd => (
-                  <div key={dd.id} className="bg-slate-900 border border-slate-700 rounded-md p-3 hover:border-slate-500 transition-colors">
-                    <div className="flex justify-between items-start gap-3">
-                      <div className="flex-1 min-w-0">
-                        <h3 className="text-white text-sm font-medium truncate">{dd.title}</h3>
-                        {dd.description && <p className="text-slate-400 text-xs mt-0.5 line-clamp-2">{dd.description}</p>}
-                        <div className="flex items-center gap-3 mt-1.5 text-[10px] text-slate-500">
-                          <span>📝 {dd.mainMessages?.length ?? 0} msgs</span>
-                          <span>🧵 {dd.threads?.length ?? 0} threads</span>
-                          <span>📚 {dd.learningSnippets?.length ?? 0} snippets</span>
-                          <span>🤖 {dd.selectedModel}</span>
-                          <span>🕒 {formatDate(dd.updatedAt ?? dd.timestamp)}</span>
-                        </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Load modal */}
+      <AnimatePresence>
+        {showLoad && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-xl overflow-y-auto"
+            onClick={() => setShowLoad(false)}>
+            <div className="min-h-full flex items-start justify-center p-8">
+              <div className="max-w-3xl w-full my-auto bg-zinc-900/50 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl relative" onClick={(e) => e.stopPropagation()}>
+                <button onClick={() => setShowLoad(false)} className="absolute top-6 right-6 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-10"><X className="w-5 h-5" /></button>
+
+                <div className="p-8 space-y-6">
+                  <header>
+                    <div className="px-3 py-1 inline-block bg-indigo-600/20 border border-indigo-500/30 rounded-lg text-indigo-400 font-bold text-[10px] uppercase tracking-widest mb-3">Saved DeepDives</div>
+                    <h2 className="text-xl font-bold text-zinc-100 leading-tight">Load a previous session</h2>
+                    <p className="text-sm text-zinc-400 mt-1">{saved.length} saved DeepDive{saved.length === 1 ? '' : 's'} in your vault.</p>
+                  </header>
+
+                  {saved.length === 0 ? (
+                    <div className="py-16 flex flex-col items-center justify-center text-center space-y-4">
+                      <div className="w-20 h-20 bg-zinc-900 rounded-full flex items-center justify-center border border-zinc-800 relative">
+                        <FolderOpen className="w-8 h-8 text-zinc-800" />
+                        <div className="absolute inset-0 border-2 border-indigo-500/20 rounded-full animate-ping" />
                       </div>
-                      <div className="flex gap-1.5 shrink-0">
-                        <button onClick={() => handleLoad(dd)}
-                          className="bg-purple-600 hover:bg-purple-700 text-white px-2.5 py-1 rounded text-xs font-medium transition-colors">Load</button>
-                        <button onClick={() => handleDelete(dd.id, dd.title)}
-                          className="bg-red-600/80 hover:bg-red-600 text-white px-2.5 py-1 rounded text-xs font-medium transition-colors">Delete</button>
+                      <div className="max-w-xs">
+                        <p className="text-sm font-bold text-zinc-400 mb-1">No saved DeepDives yet</p>
+                        <p className="text-xs text-zinc-600 leading-relaxed">Start a conversation and click Save to keep it.</p>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ) : (
+                    <div className="max-h-[55vh] overflow-y-auto scrollbar-hide space-y-3 pr-1">
+                      {saved.map(dd => (
+                        <motion.div key={dd.id} layout initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }}
+                          className="group bg-zinc-900 border border-zinc-800 rounded-2xl p-4 hover:border-indigo-500/50 transition-all">
+                          <div className="flex justify-between items-start gap-3">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1">
+                                <h3 className="text-sm font-bold text-zinc-100 truncate">{dd.title}</h3>
+                                {currentId === dd.id && (
+                                  <span className="text-[9px] px-1.5 py-0.5 bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 rounded-full font-bold uppercase tracking-widest">Current</span>
+                                )}
+                              </div>
+                              {dd.description && <p className="text-xs text-zinc-400 mt-0.5 line-clamp-2 leading-relaxed">{dd.description}</p>}
+                              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2.5 text-[10px] text-zinc-500">
+                                <span className="flex items-center gap-1"><MessageSquare className="w-3 h-3" />{dd.mainMessages?.length ?? 0} msgs</span>
+                                <span className="flex items-center gap-1"><Layers className="w-3 h-3" />{dd.threads?.length ?? 0} threads</span>
+                                <span className="flex items-center gap-1"><BookOpen className="w-3 h-3" />{dd.learningSnippets?.length ?? 0} snippets</span>
+                                <span className="flex items-center gap-1"><Bot className="w-3 h-3" />{dd.selectedModel}</span>
+                                <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDate(dd.updatedAt ?? dd.timestamp)}</span>
+                              </div>
+                            </div>
+                            <div className="flex gap-1.5 shrink-0">
+                              <button onClick={() => handleLoad(dd)}
+                                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold rounded-lg uppercase tracking-wider transition-colors">
+                                Load
+                              </button>
+                              <button onClick={() => handleDelete(dd.id, dd.title)}
+                                className="p-1.5 bg-zinc-900 hover:bg-red-600/20 border border-zinc-800 hover:border-red-500/40 rounded-lg text-zinc-500 hover:text-red-400 transition-colors"
+                                title="Delete DeepDive">
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        </motion.div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-            )}
-          </div>
-        </div>
-      )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
-
