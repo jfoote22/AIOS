@@ -103,6 +103,7 @@ export interface PlanResult {
 }
 
 export async function planTasks(req: PlanRequest): Promise<PlanResult> {
+  const authMode = await getAnthropicAuthMode();
   const res = await fetch(apiUrl('/api/kanban/plan'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -110,7 +111,7 @@ export async function planTasks(req: PlanRequest): Promise<PlanResult> {
       goal: req.goal,
       context: req.context,
       desiredCount: req.desiredCount,
-      authMode: getAnthropicAuthMode(),
+      authMode,
     }),
   });
   if (!res.ok) {

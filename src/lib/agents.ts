@@ -162,10 +162,11 @@ export interface DraftResult {
 }
 
 export async function draftAgentField(req: DraftRequest): Promise<DraftResult> {
+  const authMode = await getAnthropicAuthMode();
   const res = await fetch(apiUrl('/api/agents/draft'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...req, authMode: getAnthropicAuthMode() }),
+    body: JSON.stringify({ ...req, authMode }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
