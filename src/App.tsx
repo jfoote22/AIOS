@@ -4,8 +4,7 @@ import SnippingTab from './tabs/SnippingTab';
 import DeepDivesTab from './tabs/DeepDivesTab';
 import SecondBrainTab from './tabs/SecondBrainTab';
 import HermesTab from './tabs/HermesTab';
-import ModelsTab from './tabs/ModelsTab';
-import SubscriptionsTab from './tabs/SubscriptionsTab';
+import SettingsTab from './tabs/SettingsTab';
 import { refreshConfigured, isConfigured } from './lib/providers';
 import { setGeminiKey } from './lib/ai';
 import { initApiBase } from './lib/apiBase';
@@ -61,8 +60,7 @@ export default function App() {
         <TabPanel active={active === 'snipping'}><SnippingTab /></TabPanel>
         <TabPanel active={active === 'secondbrain'}><SecondBrainTab /></TabPanel>
         <TabPanel active={active === 'hermes'}><HermesTab /></TabPanel>
-        <TabPanel active={active === 'models'}><ModelsTab /></TabPanel>
-        <TabPanel active={active === 'subscriptions'}><SubscriptionsTab /></TabPanel>
+        <TabPanel active={active === 'settings'}><SettingsTab /></TabPanel>
       </main>
     </div>
   );
