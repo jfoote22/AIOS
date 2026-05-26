@@ -109,6 +109,91 @@ function start() {
     }
   ));
 
+  // --- Claude Agent SDK chat (uses local `claude` CLI subscription auth, not API key) ---
+  // Requires Claude Code installed and logged in: `claude /login`.
+  // The renderer routes here when the user picks "Claude subscription" auth in Models tab.
+  //
+  // We emit the Vercel AI data-stream protocol manually so we don't pull in
+  // @ai-sdk/ui-utils (which transitively depends on zod-to-json-schema):
+  //   `0:<json-string>\n` = text delta
+  //   `d:<json-object>\n` = finish_message
+  //   `3:<json-string>\n` = error
+  const streamPart = (type, value) => {
+    const code = { text: '0', finish_message: 'd', error: '3' }[type];
+    return `${code}:${JSON.stringify(value)}\n`;
+  };
+
+  app.post('/api/claude-agent/chat', async (req, res) => {
+    try {
+      const { messages = [], variant } = req.body || {};
+      const last = messages[messages.length - 1];
+      if (!last || last.role !== 'user') {
+        return res.status(400).json({ error: 'Last message must be from user.' });
+      }
+
+      // The Agent SDK takes a single prompt; encode prior turns inline so it
+      // has conversational context. (We disable tools so it behaves like chat.)
+      const history = messages.slice(0, -1).map(m =>
+        `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`
+      ).join('\n\n');
+      const prompt = history ? `${history}\n\nUser: ${last.content}` : last.content;
+
+      const slot = variant === 'sonnet' ? 'anthropic' : 'claude';
+      const modelId = getModelId(slot);
+
+      const { query } = await import('@anthropic-ai/claude-agent-sdk');
+
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('x-vercel-ai-data-stream', 'v1');
+      res.setHeader('Cache-Control', 'no-cache');
+
+      const stream = query({
+        prompt,
+        options: {
+          model: modelId,
+          systemPrompt: 'You are a helpful AI assistant. Respond conversationally and concisely.',
+          allowedTools: [],
+          permissionMode: 'bypassPermissions',
+        },
+      });
+
+      // The SDK emits each assistant message with the full accumulated text so far.
+      // Track previously-sent length to convert to deltas for the AI data stream.
+      let prevLen = 0;
+      for await (const msg of stream) {
+        if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
+          let full = '';
+          for (const block of msg.message.content) {
+            if (block && block.type === 'text' && typeof block.text === 'string') {
+              full += block.text;
+            }
+          }
+          if (full.length > prevLen) {
+            res.write(streamPart('text', full.slice(prevLen)));
+            prevLen = full.length;
+          }
+        } else if (msg.type === 'result') {
+          break;
+        }
+      }
+
+      res.write(streamPart('finish_message', {
+        finishReason: 'stop',
+        usage: { promptTokens: 0, completionTokens: 0 },
+      }));
+      res.end();
+    } catch (err) {
+      console.error('Claude Agent SDK error:', err);
+      const message = err?.message || 'Claude Agent SDK request failed.';
+      if (!res.headersSent) {
+        res.status(500).json({ error: message });
+      } else {
+        try { res.write(streamPart('error', message)); } catch {}
+        res.end();
+      }
+    }
+  });
+
   // --- Deepgram key fetch (renderer needs the key to talk to Deepgram directly) ---
   app.get('/api/deepgram', (_req, res) => {
     res.json({ key: getProviderKey('deepgram') || '' });

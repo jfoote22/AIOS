@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Sliders, KeyRound, Check, Trash2, ExternalLink, Lock, Cpu, RotateCcw } from 'lucide-react';
+import { Sliders, KeyRound, Check, Trash2, ExternalLink, Lock, Cpu, RotateCcw, ShieldCheck, Terminal } from 'lucide-react';
 import { PROVIDERS, type ProviderId, refreshConfigured, getConfigured, onConfiguredChange } from '../lib/providers';
 import { setGeminiKey } from '../lib/ai';
 import { type ModelSlot, SLOT_LABELS, getCachedModels, getDefaults, onModelsChange, refreshModels, saveModel, resetModel } from '../lib/models';
+import { getAnthropicAuthMode, setAnthropicAuthMode, onAnthropicAuthModeChange, type AnthropicAuthMode } from '../lib/authMode';
 
 function maskKey(key: string): string {
   if (!key) return '';
@@ -170,8 +171,94 @@ export default function ModelsTab() {
           Credentials are stored encrypted at rest via Electron's safeStorage (Windows DPAPI). They're decrypted in the main process only and never exposed to the renderer in plaintext beyond the moment you paste them. AIOS never bundles or transmits your keys.
         </p>
 
+        <AnthropicAuthEditor />
+
         <ModelIdEditor />
       </div>
+    </div>
+  );
+}
+
+function AnthropicAuthEditor() {
+  const [mode, setMode] = useState<AnthropicAuthMode>('api');
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    getAnthropicAuthMode().then(setMode).catch(() => {});
+    return onAnthropicAuthModeChange(setMode);
+  }, []);
+
+  const choose = async (next: AnthropicAuthMode) => {
+    if (next === mode) return;
+    setSaving(true); setMsg(null);
+    try {
+      await setAnthropicAuthMode(next);
+      setMsg({ kind: 'ok', text: next === 'subscription' ? 'Switched to Claude Pro / Max subscription auth.' : 'Switched to API key auth.' });
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: e?.message || 'Failed to save.' });
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="mt-10">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="p-2 bg-zinc-900 border border-zinc-800 rounded-lg"><ShieldCheck className="w-4 h-4 text-indigo-400" /></div>
+        <div>
+          <h3 className="text-lg font-bold">Claude auth mode</h3>
+          <p className="text-[11px] text-zinc-500">How AIOS authenticates the Claude Opus and Sonnet buttons in DeepDives.</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <button
+          onClick={() => choose('api')}
+          disabled={saving}
+          className={`text-left p-4 rounded-2xl border transition-colors ${
+            mode === 'api'
+              ? 'bg-indigo-600/10 border-indigo-500/40'
+              : 'bg-zinc-900/50 border-zinc-800 hover:border-zinc-700'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <KeyRound className={`w-4 h-4 ${mode === 'api' ? 'text-indigo-400' : 'text-zinc-500'}`} />
+            <p className={`text-sm font-bold ${mode === 'api' ? 'text-indigo-300' : 'text-zinc-200'}`}>API key</p>
+            {mode === 'api' && <span className="ml-auto text-[10px] uppercase tracking-widest text-indigo-400 font-bold">Active</span>}
+          </div>
+          <p className="text-[11px] text-zinc-500 leading-relaxed">
+            Uses the Anthropic API key above. Pay-per-token billing via <span className="font-mono">console.anthropic.com</span>. Works without Claude Code installed.
+          </p>
+        </button>
+
+        <button
+          onClick={() => choose('subscription')}
+          disabled={saving}
+          className={`text-left p-4 rounded-2xl border transition-colors ${
+            mode === 'subscription'
+              ? 'bg-indigo-600/10 border-indigo-500/40'
+              : 'bg-zinc-900/50 border-zinc-800 hover:border-zinc-700'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <Terminal className={`w-4 h-4 ${mode === 'subscription' ? 'text-indigo-400' : 'text-zinc-500'}`} />
+            <p className={`text-sm font-bold ${mode === 'subscription' ? 'text-indigo-300' : 'text-zinc-200'}`}>Claude subscription</p>
+            {mode === 'subscription' && <span className="ml-auto text-[10px] uppercase tracking-widest text-indigo-400 font-bold">Active</span>}
+          </div>
+          <p className="text-[11px] text-zinc-500 leading-relaxed">
+            Uses your local <span className="font-mono">claude</span> CLI auth (Claude Pro / Max). No API key needed; rate-limited by your subscription. Requires Claude Code installed and signed in (<span className="font-mono">claude /login</span>).
+          </p>
+        </button>
+      </div>
+
+      {msg && (
+        <p className={`mt-3 text-[11px] ${msg.kind === 'err' ? 'text-red-400' : 'text-emerald-400'}`}>{msg.text}</p>
+      )}
+
+      {mode === 'subscription' && (
+        <p className="mt-3 text-[10px] text-zinc-600 leading-relaxed">
+          AIOS routes Claude Opus and Sonnet messages through the Claude Agent SDK, which picks up the auth from your <span className="font-mono">claude</span> CLI login. If responses fail, check that <span className="font-mono">claude --version</span> works in your terminal and that you're signed into a plan that includes Claude Code.
+        </p>
+      )}
     </div>
   );
 }

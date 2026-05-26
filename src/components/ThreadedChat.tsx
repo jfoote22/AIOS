@@ -9,6 +9,8 @@ import {
 } from 'lucide-react';
 import { apiUrl } from '../lib/apiBase';
 import { getCachedModels, onModelsChange, type ModelSlot } from '../lib/models';
+import { getConfigured, onConfiguredChange, type ProviderId } from '../lib/providers';
+import { getAnthropicAuthMode, onAnthropicAuthModeChange, type AnthropicAuthMode } from '../lib/authMode';
 
 export interface Message {
   id: string;
@@ -43,7 +45,7 @@ interface MobileSelection {
 type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'grok';
 
 // Custom hook for thread chat instances - creates isolated chat for each thread
-function useThreadChat(selectedModel: ModelProvider, threadId: string, initialMessages?: Message[], grokMode: string = 'normal') {
+function useThreadChat(selectedModel: ModelProvider, threadId: string, initialMessages?: Message[], grokMode: string = 'normal', anthropicAuthMode: AnthropicAuthMode = 'api') {
   const [showReasoning, setShowReasoning] = useState(false);
 
   const getApiEndpoint = (model: ModelProvider) => {
@@ -51,9 +53,8 @@ function useThreadChat(selectedModel: ModelProvider, threadId: string, initialMe
       case 'openai':
         return apiUrl('/api/openai/chat');
       case 'claude':
-        return apiUrl('/api/anthropic/chat');
       case 'anthropic':
-        return apiUrl('/api/anthropic/chat');
+        return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
       case 'grok':
         return apiUrl('/api/grok/chat');
       default:
@@ -187,14 +188,19 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     }
   }, [threads, showAllContexts]);
 
+  const [anthropicAuthMode, setAnthropicAuthMode] = useState<AnthropicAuthMode>('api');
+  useEffect(() => {
+    getAnthropicAuthMode().then(setAnthropicAuthMode).catch(() => {});
+    return onAnthropicAuthModeChange(setAnthropicAuthMode);
+  }, []);
+
   const getApiEndpoint = (model: ModelProvider) => {
     switch (model) {
       case 'openai':
         return apiUrl('/api/openai/chat');
       case 'claude':
-        return apiUrl('/api/anthropic/chat');
       case 'anthropic':
-        return apiUrl('/api/anthropic/chat');
+        return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
       case 'grok':
         return apiUrl('/api/grok/chat');
       default:
@@ -1119,7 +1125,23 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
   const [configuredModels, setConfiguredModels] = useState<Record<ModelSlot, string>>(getCachedModels());
   useEffect(() => onModelsChange(setConfiguredModels), []);
+  const [configuredProviders, setConfiguredProviders] = useState<Set<ProviderId>>(getConfigured());
+  useEffect(() => onConfiguredChange(setConfiguredProviders), []);
   const labelFor = (slot: ModelSlot, fallback: string) => configuredModels[slot]?.trim() || fallback;
+
+  // Map each model button to the provider whose API key it requires.
+  const providerForModel = (m: ModelProvider): ProviderId => {
+    if (m === 'openai') return 'openai';
+    if (m === 'grok') return 'grok';
+    return 'anthropic'; // 'claude' (Opus) and 'anthropic' (Sonnet) both use the Anthropic key
+  };
+
+  const isModelReady = (m: ModelProvider) => {
+    // Claude/Anthropic in subscription mode don't need an API key — the local
+    // Claude Code CLI provides auth via the user's Claude Pro/Max subscription.
+    if ((m === 'claude' || m === 'anthropic') && anthropicAuthMode === 'subscription') return true;
+    return configuredProviders.has(providerForModel(m));
+  };
 
   const ModelSelector = () => (
     <div className="flex flex-wrap gap-2">
@@ -1128,25 +1150,31 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.7'),     color: 'blue'   },
         { value: 'anthropic' as ModelProvider, label: labelFor('anthropic', 'Claude Sonnet 4.6'),color: 'purple' },
         { value: 'grok' as ModelProvider,      label: labelFor('grok', 'Grok 4'),                color: 'orange' }
-      ].map((model) => (
-        <button
-          key={model.value}
-          onClick={() => setSelectedModel(model.value)}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 border backdrop-blur-sm ${
-            selectedModel === model.value
-              ? model.color === 'green' 
-                ? 'bg-emerald-500/20 text-emerald-500 border-emerald-500/50 shadow-lg' 
-                : model.color === 'blue'
-                ? 'bg-indigo-500/20 text-indigo-500 border-indigo-500/50 shadow-lg'
-                : model.color === 'purple'
-                ? 'bg-indigo-400/20 text-indigo-400 border-indigo-400/50 shadow-lg'
-                : 'bg-orange-500/20 text-orange-500 border-orange-500/50 shadow-lg'
-              : 'bg-zinc-900/60 text-zinc-500 hover:bg-zinc-800 hover:text-white border-zinc-800'
-          }`}
-        >
-          {model.label}
-        </button>
-      ))}
+      ].map((model) => {
+        const ready = isModelReady(model.value);
+        const isActive = selectedModel === model.value;
+        const activeClasses =
+          model.color === 'green'  ? 'bg-emerald-500/20 text-emerald-500 border-emerald-500/50 shadow-lg' :
+          model.color === 'blue'   ? 'bg-indigo-500/20 text-indigo-500 border-indigo-500/50 shadow-lg' :
+          model.color === 'purple' ? 'bg-indigo-400/20 text-indigo-400 border-indigo-400/50 shadow-lg' :
+                                     'bg-orange-500/20 text-orange-500 border-orange-500/50 shadow-lg';
+        return (
+          <button
+            key={model.value}
+            onClick={() => setSelectedModel(model.value)}
+            disabled={!ready}
+            title={ready ? `Use ${model.label}` : `${providerForModel(model.value)} key not configured — add it in the Models tab`}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 border backdrop-blur-sm flex items-center gap-2 ${
+              isActive
+                ? activeClasses
+                : 'bg-zinc-900/60 text-zinc-500 hover:bg-zinc-800 hover:text-white border-zinc-800'
+            } ${!ready ? 'opacity-50 cursor-not-allowed hover:bg-zinc-900/60 hover:text-zinc-500' : ''}`}
+          >
+            <span>{model.label}</span>
+            {!ready && <span className="text-[10px] uppercase tracking-widest text-amber-400">(no key)</span>}
+          </button>
+        );
+      })}
     </div>
   );
 
@@ -1472,7 +1500,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     const initialMessages = threadMessagesToLoad[thread.id] || thread.messages || [];
     
     // Create a dedicated, isolated chat instance for this specific thread with initial messages
-    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode);
+    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode);
     
     // Store the thread chat instance reference for accessing messages during save
     React.useEffect(() => {
@@ -2209,8 +2237,14 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           
           {/* Chat Input */}
           <div className="border-t border-zinc-800 bg-zinc-900/60 backdrop-blur-sm p-6">
+            {mainChat.error && (
+              <div className="mx-auto max-w-full mb-3 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-xs flex items-start gap-2">
+                <span className="font-bold uppercase tracking-widest text-[10px] mt-0.5">Error</span>
+                <span className="flex-1">{mainChat.error.message || 'Chat request failed.'}</span>
+              </div>
+            )}
             <div className="mx-auto max-w-full">
-              <ChatInput 
+              <ChatInput
                 onSubmit={handleMainSubmit}
                 input={mainChat.input}
                 handleInputChange={mainChat.handleInputChange}
