@@ -856,6 +856,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     getCurrentState,
     loadState,
     forceUpdateThreadMessages, // New: ensure all messages are captured before save
+    setMainInput: (text: string) => mainChat.setInput(text),
   }));
 
   const handleTextSelection = React.useCallback((messageId: string, isFromThread: boolean = false, threadId?: string) => {
@@ -1210,6 +1211,16 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const ChatInput = ({ isThread = false, onSubmit, input, handleInputChange, isLoading, threadChat, showReasoning, setShowReasoning }: any) => {
     const [localInput, setLocalInput] = useState('');
 
+    // Accept externally-driven input (e.g. a seed prompt pushed in from Second
+    // Brain via mainChat.setInput). Only mirror when the incoming value is
+    // non-empty and differs — never clobber what the user is mid-typing.
+    useEffect(() => {
+      if (typeof input === 'string' && input.length > 0 && input !== localInput) {
+        setLocalInput(input);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [input]);
+
     const handleSubmit = (e: any) => {
       e.preventDefault();
       if (!localInput.trim()) return;
@@ -1220,12 +1231,14 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           role: 'user',
           content: localInput.trim()
         });
+        mainChat.setInput?.('');
       } else if (isThread && threadChat) {
         // Thread chat submission - use the thread's chat instance
         threadChat.append({
           role: 'user',
           content: localInput.trim()
         });
+        threadChat.setInput?.('');
       }
       setLocalInput('');
     };

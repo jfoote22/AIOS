@@ -4,6 +4,7 @@ import { Save, FolderOpen, Plus, Copy, X, AlertCircle, MessageSquare, Trash2, Cl
 import ThreadedChat from '../components/ThreadedChat';
 import * as db from '../lib/db';
 import { onConfiguredChange, getConfigured, type ProviderId } from '../lib/providers';
+import { consumeSeed, onSeedChange, type DeepDiveSeed } from '../lib/deepdiveSeed';
 
 export interface DeepDiveRecord {
   id: string;
@@ -31,6 +32,18 @@ export default function DeepDivesTab() {
 
   useEffect(() => onConfiguredChange(setConfigured), []);
   useEffect(() => { refresh(); }, []);
+
+  // Consume a pending seed from Second Brain on mount, and listen for new ones.
+  useEffect(() => {
+    const apply = (seed: DeepDiveSeed | null) => {
+      if (!seed) return;
+      const prompt = buildSeedPrompt(seed);
+      // Small delay so the ref is wired up when navigating from another tab
+      setTimeout(() => threadedChatRef.current?.setMainInput?.(prompt), 80);
+    };
+    apply(consumeSeed());
+    return onSeedChange(s => { apply(s); consumeSeed(); });
+  }, []);
 
   const refresh = async () => {
     try {
@@ -299,4 +312,17 @@ export default function DeepDivesTab() {
       </AnimatePresence>
     </div>
   );
+}
+
+function buildSeedPrompt(seed: DeepDiveSeed): string {
+  const body = seed.body.length > 6000 ? seed.body.slice(0, 6000) + '\n\n…(truncated)' : seed.body;
+  return [
+    `I'd like to do a deep dive starting from this ${seed.source}:`,
+    '',
+    `### ${seed.title}`,
+    body,
+    '',
+    '---',
+    'Help me drill into this. What are the most interesting angles to explore?',
+  ].join('\n');
 }

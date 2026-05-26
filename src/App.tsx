@@ -9,6 +9,7 @@ import { refreshConfigured, isConfigured } from './lib/providers';
 import { setGeminiKey } from './lib/ai';
 import { initApiBase } from './lib/apiBase';
 import { refreshModels } from './lib/models';
+import { onNavigate } from './lib/navigate';
 
 function TabPanel({ active, children }: { active: boolean; children: React.ReactNode }) {
   return (
@@ -37,6 +38,8 @@ export default function App() {
       }
     })();
   }, []);
+
+  useEffect(() => onNavigate(setActive), []);
 
   const quickSnip = () => {
     if (window.aios?.isElectron) window.aios.requestCapture();

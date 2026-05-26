@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject, type LinkObject } from 'react-force-graph-2d';
-import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass } from 'lucide-react';
+import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Tag } from 'lucide-react';
 import * as db from '../lib/db';
 import {
   embedText, cosineSimilarity, chatWithVault, isGeminiReady, onGeminiReadyChange,
@@ -8,6 +9,8 @@ import {
 } from '../lib/ai';
 import { buildGraph, nodeAsContextItem, type BrainNode, type BrainLink, type BrainGraph } from '../lib/graph';
 import { listImports, listAllChunks, onImportsChange, type ImportedConversation, type ImportChunk } from '../lib/imports';
+import { setSeed as setDeepDiveSeed } from '../lib/deepdiveSeed';
+import { navigateTo } from '../lib/navigate';
 
 interface ChatMessage extends ChatTurn { citedIds?: string[]; }
 
@@ -302,18 +305,6 @@ export default function SecondBrainTab() {
           </div>
 
           <div className="border-t border-zinc-800 p-3">
-            {focusedNode && (
-              <div className="mb-2 flex items-center justify-between px-2 py-1.5 bg-indigo-500/10 border border-indigo-500/30 rounded-md">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  {focusedNode.kind === 'snippet' ? <Scissors className="w-3 h-3 text-indigo-300 shrink-0" /> : <Compass className="w-3 h-3 text-indigo-300 shrink-0" />}
-                  <span className="text-[10px] text-indigo-200 truncate">{focusedNode.label}</span>
-                </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  <button onClick={askAboutFocused} className="text-[9px] uppercase tracking-widest text-indigo-300 hover:text-white px-1.5">Ask</button>
-                  <button onClick={() => setFocusedNode(null)} className="text-indigo-300/70 hover:text-white"><X className="w-3 h-3" /></button>
-                </div>
-              </div>
-            )}
             <div className="flex gap-1.5 items-end">
               <textarea
                 value={chatInput}
@@ -381,6 +372,24 @@ export default function SecondBrainTab() {
             />
           )}
 
+          <AnimatePresence>
+            {focusedNode && (
+              <NeuronDetailPanel
+                node={focusedNode}
+                allChunks={chunks}
+                onClose={() => setFocusedNode(null)}
+                onAsk={askAboutFocused}
+                onDeepDive={() => {
+                  const seed = nodeToSeed(focusedNode, chunks);
+                  if (!seed) return;
+                  setDeepDiveSeed(seed);
+                  setFocusedNode(null);
+                  navigateTo('deepdives');
+                }}
+              />
+            )}
+          </AnimatePresence>
+
           {/* Legend */}
           {graph.nodes.length > 0 && (
             <div className="absolute bottom-4 left-4 bg-zinc-900/80 backdrop-blur-md border border-zinc-800 rounded-lg p-3 text-[10px] space-y-1.5">
@@ -401,4 +410,218 @@ export default function SecondBrainTab() {
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as any)[c]);
+}
+
+// ── Neuron detail overlay ────────────────────────────────────────────────────
+
+function NeuronDetailPanel({
+  node, allChunks, onClose, onAsk, onDeepDive,
+}: {
+  node: BrainNode;
+  allChunks: ImportChunk[];
+  onClose: () => void;
+  onAsk: () => void;
+  onDeepDive: () => void;
+}) {
+  // Stop propagation on the panel so clicks inside it don't bubble to the
+  // graph background (which would close it).
+  const stop = (e: React.MouseEvent) => e.stopPropagation();
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: 16 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 16 }}
+      transition={{ duration: 0.15 }}
+      onMouseDown={stop}
+      onClick={stop}
+      className="absolute top-4 right-4 bottom-4 w-[400px] max-w-[40vw] bg-zinc-950/95 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-2xl flex flex-col overflow-hidden z-20"
+    >
+      <header className="h-12 px-4 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/40 shrink-0">
+        {node.kind === 'snippet' && <Scissors className="w-3.5 h-3.5 text-indigo-300 shrink-0" />}
+        {node.kind === 'deepdive' && <Compass className="w-3.5 h-3.5 text-indigo-300 shrink-0" />}
+        {node.kind === 'import' && <DownloadIcon className="w-3.5 h-3.5 text-indigo-300 shrink-0" />}
+        <div className="min-w-0 flex-1">
+          <div className="text-[9px] uppercase tracking-widest text-zinc-500">{node.group}</div>
+          <div className="text-[12px] font-semibold text-zinc-100 truncate">{node.label}</div>
+        </div>
+        <button onClick={onClose} className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800">
+          <X className="w-4 h-4" />
+        </button>
+      </header>
+
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 text-[12px] text-zinc-300 space-y-3">
+        {node.kind === 'snippet'  && <SnippetBody data={node.data} />}
+        {node.kind === 'deepdive' && <DeepDiveBody data={node.data} />}
+        {node.kind === 'import'   && <ImportBody data={node.data} allChunks={allChunks} />}
+      </div>
+
+      <footer className="px-3 py-3 border-t border-zinc-800 bg-zinc-900/40 shrink-0 flex items-center gap-2">
+        <button
+          onClick={onDeepDive}
+          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold uppercase tracking-wider transition-colors"
+          title="Send this context into a new DeepDive chat"
+        >
+          <Compass className="w-3.5 h-3.5" />
+          DeepDive
+        </button>
+        <button
+          onClick={onAsk}
+          className="px-3 py-2 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[11px] font-bold uppercase tracking-wider transition-colors"
+          title="Pre-fill the Second Brain chat with a question about this"
+        >
+          Ask
+        </button>
+      </footer>
+    </motion.div>
+  );
+}
+
+function SnippetBody({ data }: { data: any }) {
+  return (
+    <>
+      {data.imageDataUrl && (
+        <img src={data.imageDataUrl} alt="" className="w-full rounded border border-zinc-800" />
+      )}
+      {data.summary && <p className="text-zinc-300 leading-relaxed">{data.summary}</p>}
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        {data.category && <Field label="Category" value={data.category} />}
+        {data.source && <Field label="Source" value={data.source} />}
+      </div>
+      {data.tags?.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {data.tags.map((t: string) => (
+            <span key={t} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-800/80 text-[10px] text-zinc-300">
+              <Tag className="w-2.5 h-2.5 text-zinc-500" />{t}
+            </span>
+          ))}
+        </div>
+      )}
+      {data.entities?.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500">Entities</div>
+          {data.entities.map((e: any, i: number) => (
+            <div key={i} className="text-[11px]">
+              <span className="text-zinc-500">{e.label}:</span>{' '}
+              <span className="text-zinc-200">{e.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {data.extractedText && (
+        <details>
+          <summary className="text-[10px] uppercase tracking-wider text-zinc-500 cursor-pointer hover:text-zinc-300">Extracted text</summary>
+          <pre className="mt-2 text-[11px] text-zinc-400 whitespace-pre-wrap break-words">{data.extractedText.slice(0, 4000)}</pre>
+        </details>
+      )}
+    </>
+  );
+}
+
+function DeepDiveBody({ data }: { data: any }) {
+  const msgCount = (data.mainMessages?.length ?? 0) +
+    (data.threads?.reduce((acc: number, t: any) => acc + (t.messages?.length ?? 0), 0) ?? 0);
+  return (
+    <>
+      {data.description && <p className="text-zinc-300 leading-relaxed">{data.description}</p>}
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <Field label="Model" value={data.selectedModel || '—'} />
+        <Field label="Messages" value={String(msgCount)} />
+        <Field label="Threads" value={String(data.threads?.length ?? 0)} />
+        <Field label="Updated" value={data.updatedAt ? new Date(data.updatedAt).toLocaleDateString() : '—'} />
+      </div>
+      {data.mainMessages?.length > 0 && (
+        <details open>
+          <summary className="text-[10px] uppercase tracking-wider text-zinc-500 cursor-pointer hover:text-zinc-300">Last few turns</summary>
+          <div className="mt-2 space-y-2">
+            {data.mainMessages.slice(-4).map((m: any, i: number) => (
+              <MessageRow key={i} role={m.role} content={m.content} />
+            ))}
+          </div>
+        </details>
+      )}
+    </>
+  );
+}
+
+function ImportBody({ data, allChunks }: { data: any; allChunks: ImportChunk[] }) {
+  const indexed = allChunks.filter(c => c.conversationId === data.id).length;
+  const msgs = data.messages ?? [];
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <Field label="Provider" value={data.provider === 'claude' ? 'Claude' : 'ChatGPT'} />
+        <Field label="Messages" value={String(msgs.length)} />
+        <Field label="Created" value={data.createdAt ? new Date(data.createdAt).toLocaleDateString() : '—'} />
+        <Field label="Indexed" value={indexed ? `${indexed} chunks` : 'no'} />
+      </div>
+      <details open>
+        <summary className="text-[10px] uppercase tracking-wider text-zinc-500 cursor-pointer hover:text-zinc-300">First few turns</summary>
+        <div className="mt-2 space-y-2">
+          {msgs.slice(0, 6).map((m: any, i: number) => (
+            <MessageRow key={i} role={m.role} content={m.content} />
+          ))}
+          {msgs.length > 6 && (
+            <div className="text-[10px] text-zinc-500 italic">…{msgs.length - 6} more</div>
+          )}
+        </div>
+      </details>
+    </>
+  );
+}
+
+function MessageRow({ role, content }: { role: string; content: string }) {
+  const isUser = role === 'user' || role === 'human';
+  return (
+    <div className="flex gap-2">
+      <div className={`shrink-0 mt-0.5 w-5 h-5 rounded flex items-center justify-center border ${
+        isUser ? 'bg-indigo-500/15 border-indigo-500/30 text-indigo-300' : 'bg-zinc-800 border-zinc-700 text-zinc-300'
+      }`}>
+        {isUser ? <UserIcon className="w-3 h-3" /> : <Bot className="w-3 h-3" />}
+      </div>
+      <div className="text-[11px] text-zinc-300 leading-snug whitespace-pre-wrap break-words flex-1 min-w-0">
+        {content.length > 400 ? content.slice(0, 400) + '…' : content}
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="px-2 py-1.5 rounded bg-zinc-900/60 border border-zinc-800">
+      <div className="text-[9px] uppercase tracking-wider text-zinc-500">{label}</div>
+      <div className="text-[11px] text-zinc-200 truncate">{value}</div>
+    </div>
+  );
+}
+
+// Build the seed payload that gets handed to DeepDives.
+function nodeToSeed(node: BrainNode, allChunks: ImportChunk[]) {
+  if (node.kind === 'snippet') {
+    const s = node.data;
+    const body = [
+      s.summary || '',
+      s.extractedText ? `\n---\n${s.extractedText}` : '',
+      s.tags?.length ? `\nTags: ${s.tags.join(', ')}` : '',
+    ].filter(Boolean).join('\n').trim();
+    return { title: s.title || node.label, source: 'snippet', body: body || node.label };
+  }
+  if (node.kind === 'deepdive') {
+    const dd = node.data;
+    const lastTurns = (dd.mainMessages ?? []).slice(-6)
+      .map((m: any) => `${m.role}: ${m.content}`).join('\n\n');
+    const body = [dd.description || '', lastTurns].filter(Boolean).join('\n\n---\n\n');
+    return { title: dd.title || node.label, source: 'saved DeepDive session', body: body || node.label };
+  }
+  if (node.kind === 'import') {
+    const im = node.data;
+    const transcript = (im.messages ?? [])
+      .map((m: any) => `${(m.role || '').toUpperCase()}: ${m.content}`)
+      .join('\n\n');
+    const indexed = allChunks.filter(c => c.conversationId === im.id).length;
+    const header = `Imported ${im.provider === 'claude' ? 'Claude' : 'ChatGPT'} conversation` +
+      (indexed ? ` (${indexed} indexed chunks).` : '.');
+    return { title: im.title || node.label, source: header, body: transcript };
+  }
+  return null;
 }
