@@ -4,6 +4,7 @@ import SnippingTab from './tabs/SnippingTab';
 import DeepDivesTab from './tabs/DeepDivesTab';
 import SecondBrainTab from './tabs/SecondBrainTab';
 import HermesTab from './tabs/HermesTab';
+import KanbanTab from './tabs/KanbanTab';
 import SettingsTab from './tabs/SettingsTab';
 import { refreshConfigured, isConfigured } from './lib/providers';
 import { setGeminiKey } from './lib/ai';
@@ -63,6 +64,7 @@ export default function App() {
         <TabPanel active={active === 'snipping'}><SnippingTab /></TabPanel>
         <TabPanel active={active === 'secondbrain'}><SecondBrainTab /></TabPanel>
         <TabPanel active={active === 'hermes'}><HermesTab /></TabPanel>
+        <TabPanel active={active === 'kanban'}><KanbanTab /></TabPanel>
         <TabPanel active={active === 'settings'}><SettingsTab /></TabPanel>
       </main>
     </div>

@@ -1,13 +1,14 @@
 import { motion } from 'motion/react';
-import { Compass, Scissors, Brain, Feather, Settings, ChevronLeft, ChevronRight, Camera } from 'lucide-react';
+import { Compass, Scissors, Brain, Feather, Settings, ChevronLeft, ChevronRight, Camera, KanbanSquare } from 'lucide-react';
 
-export type TabId = 'deepdives' | 'snipping' | 'secondbrain' | 'hermes' | 'settings';
+export type TabId = 'deepdives' | 'snipping' | 'secondbrain' | 'kanban' | 'hermes' | 'settings';
 
 interface TabDef { id: TabId; label: string; icon: React.ComponentType<{ className?: string }>; }
 const MAIN_TABS: TabDef[] = [
   { id: 'deepdives',     label: 'DeepDives',     icon: Compass },
   { id: 'snipping',      label: 'Snipping',      icon: Scissors },
   { id: 'secondbrain',   label: 'Second Brain',  icon: Brain },
+  { id: 'kanban',        label: 'Kanban',        icon: KanbanSquare },
   { id: 'hermes',        label: 'Hermes',        icon: Feather },
 ];
 

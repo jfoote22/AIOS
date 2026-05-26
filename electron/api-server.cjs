@@ -3,6 +3,8 @@
 // API keys are pulled per-request from the encrypted key store.
 
 const express = require('express');
+const fs = require('node:fs/promises');
+const path = require('node:path');
 const cors = (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
@@ -123,6 +125,35 @@ function start() {
     return `${code}:${JSON.stringify(value)}\n`;
   };
 
+  // Pull the first balanced JSON object out of a string, tolerating leading
+  // commentary, markdown fences, or trailing prose. Returns null on failure.
+  const extractJsonObject = (text) => {
+    if (typeof text !== 'string' || !text.length) return null;
+    const start = text.indexOf('{');
+    if (start < 0) return null;
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          const candidate = text.slice(start, i + 1);
+          try { return JSON.parse(candidate); }
+          catch { return null; }
+        }
+      }
+    }
+    return null;
+  };
+
   app.post('/api/claude-agent/chat', async (req, res) => {
     try {
       const { messages = [], variant } = req.body || {};
@@ -191,6 +222,221 @@ function start() {
         try { res.write(streamPart('error', message)); } catch {}
         res.end();
       }
+    }
+  });
+
+  // --- Kanban task planner (Claude) ---
+  // Takes a high-level goal, returns a list of modular subtasks. Reuses the
+  // user's existing Anthropic auth: subscription (Agent SDK) or API key
+  // (@ai-sdk/anthropic). Returns parsed JSON, never streams.
+  app.post('/api/kanban/plan', async (req, res) => {
+    try {
+      const { goal, context, desiredCount, authMode } = req.body || {};
+      if (!goal || typeof goal !== 'string' || !goal.trim()) {
+        return res.status(400).json({ error: 'Missing or empty `goal`.' });
+      }
+      const target = Math.max(2, Math.min(20, Number(desiredCount) || 7));
+
+      const systemPrompt = [
+        'You are a kanban planning assistant. Given a high-level goal, decompose it into modular, independently actionable subtasks suitable for cards on a kanban board.',
+        'Each subtask must be concrete, has a clear "done" state, and is small enough to complete in one focused work session.',
+        'Avoid generic filler ("plan", "review"). Prefer specific, verb-first titles ("Wire OAuth callback to /api/auth/callback").',
+        `Aim for roughly ${target} tasks. Order them so earlier tasks unblock later ones.`,
+        '',
+        'Return ONLY a JSON object matching this schema, with no surrounding prose or markdown fences:',
+        '{ "tasks": [ { "title": string, "description": string, "estimate"?: string, "tag"?: string } ] }',
+        'estimate is a short free-text size hint like "30 min", "small", "1 day".',
+        'tag is a single lowercase token grouping related tasks (e.g. "backend", "ui", "docs").',
+      ].join('\n');
+
+      const userPrompt = context
+        ? `GOAL:\n${goal.trim()}\n\nADDITIONAL CONTEXT:\n${context}`
+        : `GOAL:\n${goal.trim()}`;
+
+      let raw = '';
+
+      if (authMode === 'subscription') {
+        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const modelId = getModelId('claude') || getModelId('anthropic');
+        const stream = query({
+          prompt: `${systemPrompt}\n\n${userPrompt}`,
+          options: {
+            model: modelId,
+            systemPrompt,
+            allowedTools: [],
+            permissionMode: 'bypassPermissions',
+          },
+        });
+        for await (const msg of stream) {
+          if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
+            for (const block of msg.message.content) {
+              if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
+            }
+          } else if (msg.type === 'result') break;
+        }
+      } else {
+        // API key path via @anthropic-ai/sdk
+        const key = getProviderKey('anthropic');
+        if (!key) {
+          return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
+        }
+        const { default: Anthropic } = await import('@anthropic-ai/sdk');
+        const client = new Anthropic({ apiKey: key });
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-7';
+        const response = await client.messages.create({
+          model: modelId,
+          max_tokens: 4096,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userPrompt }],
+        });
+        for (const block of response.content || []) {
+          if (block.type === 'text') raw += block.text;
+        }
+      }
+
+      // Extract the first JSON object in the response — Claude sometimes wraps
+      // it in fences or commentary even when told not to.
+      const parsed = extractJsonObject(raw);
+      if (!parsed || !Array.isArray(parsed.tasks)) {
+        return res.status(502).json({ error: 'Planner returned no parsable task list.', raw: raw.slice(0, 800) });
+      }
+      const tasks = parsed.tasks
+        .filter(t => t && typeof t === 'object' && typeof t.title === 'string' && t.title.trim())
+        .map(t => ({
+          title: String(t.title).trim(),
+          description: typeof t.description === 'string' ? t.description.trim() : '',
+          estimate: typeof t.estimate === 'string' ? t.estimate.trim() : undefined,
+          tag: typeof t.tag === 'string' ? t.tag.trim().toLowerCase() : undefined,
+        }));
+
+      res.json({ tasks });
+    } catch (err) {
+      console.error('Kanban planner error:', err);
+      const message = err?.message || 'Kanban planner failed.';
+      if (!res.headersSent) res.status(500).json({ error: message });
+    }
+  });
+
+  // --- Agent definitions: write/delete .claude/agents/<slug>.md ---
+  // Persists a Claude Code subagent file inside the agent's working directory
+  // so the same agent works when invoked from the bare `claude` CLI too.
+  app.post('/api/agents/write-md', async (req, res) => {
+    try {
+      const { slug, workingDir, markdown } = req.body || {};
+      if (!slug || !workingDir || typeof markdown !== 'string') {
+        return res.status(400).json({ error: 'Missing slug, workingDir, or markdown.' });
+      }
+      if (!/^[a-z0-9-]+$/.test(slug)) {
+        return res.status(400).json({ error: 'Slug must be lowercase alphanumeric + dashes.' });
+      }
+      const safeSlug = slug.slice(0, 60);
+      const dir = path.resolve(workingDir, '.claude', 'agents');
+      const file = path.join(dir, `${safeSlug}.md`);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(file, markdown, 'utf8');
+      res.json({ path: file });
+    } catch (err) {
+      console.error('write-md error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to write agent file.' });
+    }
+  });
+
+  app.post('/api/agents/delete-md', async (req, res) => {
+    try {
+      const { slug, workingDir } = req.body || {};
+      if (!slug || !workingDir) return res.status(400).json({ error: 'Missing slug or workingDir.' });
+      if (!/^[a-z0-9-]+$/.test(slug)) return res.status(400).json({ error: 'Bad slug.' });
+      const file = path.resolve(workingDir, '.claude', 'agents', `${slug.slice(0, 60)}.md`);
+      try { await fs.unlink(file); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('delete-md error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to delete agent file.' });
+    }
+  });
+
+  // --- Agent Builder: per-field AI assist ---
+  // Asks Claude to fill or refine a single agent field given the rest of the
+  // partial agent as context. Returns plain text (or JSON-stringified array
+  // for the tools field).
+  app.post('/api/agents/draft', async (req, res) => {
+    try {
+      const { field, currentValue = '', hint = '', agent = {}, authMode } = req.body || {};
+      if (!field) return res.status(400).json({ error: 'Missing `field`.' });
+
+      const sysParts = [
+        'You are an expert at defining specialized Claude agents (subagents).',
+        'You are filling in a single field of an agent definition based on the existing partial config.',
+        'Return ONLY the new field value, no commentary, no markdown fences.',
+      ];
+
+      let fieldGuidance = '';
+      if (field === 'description') {
+        fieldGuidance = 'Return a 1-sentence description (under 140 chars) of what this agent does and when to use it. No trailing period needed.';
+      } else if (field === 'systemPrompt') {
+        fieldGuidance = 'Return a focused system prompt (50–250 words). Make the role explicit, list responsibilities, and end with concrete output expectations. Plain prose, no markdown headings.';
+      } else if (field === 'tools') {
+        fieldGuidance = 'Return ONLY a JSON array of tool names this agent needs (subset of: Read, Glob, Grep, Edit, Write, Bash, WebFetch, WebSearch). Be conservative — only include tools genuinely needed for the role. Example: ["Read","Glob","Grep"]';
+      } else if (field === 'all') {
+        fieldGuidance = 'Return a JSON object: { "description": "...", "systemPrompt": "...", "tools": ["..."] }. Same constraints as the individual fields.';
+      } else {
+        return res.status(400).json({ error: `Unknown field "${field}".` });
+      }
+      sysParts.push(fieldGuidance);
+
+      const ctxLines = [
+        `Agent name: ${agent.name || '(unnamed)'}`,
+        agent.description ? `Description: ${agent.description}` : '',
+        agent.systemPrompt ? `System prompt so far: ${agent.systemPrompt}` : '',
+        Array.isArray(agent.allowedTools) && agent.allowedTools.length ? `Allowed tools so far: ${agent.allowedTools.join(', ')}` : '',
+        agent.workingDir ? `Working dir: ${agent.workingDir}` : '',
+        currentValue ? `Current value of this field:\n${currentValue}` : '',
+        hint ? `User hint: ${hint}` : '',
+      ].filter(Boolean);
+      const userPrompt = `Context:\n${ctxLines.join('\n')}\n\nProvide the new value for "${field}" now.`;
+
+      let raw = '';
+      if (authMode === 'subscription') {
+        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const modelId = getModelId('claude') || getModelId('anthropic');
+        const stream = query({
+          prompt: userPrompt,
+          options: {
+            model: modelId,
+            systemPrompt: sysParts.join('\n'),
+            allowedTools: [],
+            permissionMode: 'bypassPermissions',
+          },
+        });
+        for await (const msg of stream) {
+          if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
+            for (const block of msg.message.content) {
+              if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
+            }
+          } else if (msg.type === 'result') break;
+        }
+      } else {
+        const key = getProviderKey('anthropic');
+        if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
+        const { default: Anthropic } = await import('@anthropic-ai/sdk');
+        const client = new Anthropic({ apiKey: key });
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-7';
+        const response = await client.messages.create({
+          model: modelId,
+          max_tokens: 1024,
+          system: sysParts.join('\n'),
+          messages: [{ role: 'user', content: userPrompt }],
+        });
+        for (const block of response.content || []) {
+          if (block.type === 'text') raw += block.text;
+        }
+      }
+
+      const value = raw.trim().replace(/^```[a-z]*\n?|\n?```$/g, '').trim();
+      res.json({ field, value });
+    } catch (err) {
+      console.error('agent draft error:', err);
+      if (!res.headersSent) res.status(500).json({ error: err?.message || 'Agent draft failed.' });
     }
   });
 
