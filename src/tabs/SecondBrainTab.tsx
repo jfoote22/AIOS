@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject, type LinkObject } from 'react-force-graph-2d';
-import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Tag } from 'lucide-react';
+import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Tag, Sliders, RotateCcw } from 'lucide-react';
 import * as db from '../lib/db';
 import {
   embedText, cosineSimilarity, chatWithVault, isGeminiReady, onGeminiReadyChange,
@@ -27,6 +27,33 @@ export default function SecondBrainTab() {
   const [citedIds, setCitedIds] = useState<Set<string>>(new Set());
   const [aiReady, setAiReady] = useState<boolean>(isGeminiReady());
   const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
+
+  // ── Physics controls (persist to db.meta so they survive reloads) ──────────
+  const [physics, setPhysics] = useState<PhysicsSettings>(DEFAULT_PHYSICS);
+  const [showPhysics, setShowPhysics] = useState(false);
+  useEffect(() => {
+    db.getMeta<PhysicsSettings>('second-brain-physics')
+      .then(p => { if (p) setPhysics({ ...DEFAULT_PHYSICS, ...p }); })
+      .catch(() => {});
+  }, []);
+  useEffect(() => { db.setMeta('second-brain-physics', physics).catch(() => {}); }, [physics]);
+
+  // Push the slider values into d3-force whenever they change (or after the
+  // graph is built — d3 forces are reset when react-force-graph rebuilds).
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (!fg) return;
+    const link = fg.d3Force('link') as any;
+    const charge = fg.d3Force('charge') as any;
+    if (link) {
+      link.distance(physics.linkDistance);
+      link.strength(physics.linkStrength);
+    }
+    if (charge) {
+      charge.strength(physics.chargeStrength);
+    }
+    fg.d3ReheatSimulation();
+  }, [physics, graph]);
 
   const fgRef = useRef<ForceGraphMethods | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -390,9 +417,20 @@ export default function SecondBrainTab() {
             )}
           </AnimatePresence>
 
+          {/* Physics controls */}
+          {graph.nodes.length > 0 && (
+            <PhysicsPanel
+              open={showPhysics}
+              onToggle={() => setShowPhysics(o => !o)}
+              physics={physics}
+              setPhysics={setPhysics}
+              onReset={() => setPhysics(DEFAULT_PHYSICS)}
+            />
+          )}
+
           {/* Legend */}
           {graph.nodes.length > 0 && (
-            <div className="absolute bottom-4 left-4 bg-zinc-900/80 backdrop-blur-md border border-zinc-800 rounded-lg p-3 text-[10px] space-y-1.5">
+            <div className="absolute bottom-4 right-4 bg-zinc-900/80 backdrop-blur-md border border-zinc-800 rounded-lg p-3 text-[10px] space-y-1.5">
               <div className="font-bold text-zinc-500 uppercase tracking-widest mb-1">Legend</div>
               <div className="flex items-center gap-2"><span className="inline-block w-2 h-2 rounded-full bg-[#a78bfa]" /><span className="text-zinc-400">DeepDive session</span></div>
               <div className="flex items-center gap-2"><span className="inline-block w-2 h-2 rounded-full bg-[#5ee6b0]" /><span className="text-zinc-400">Snippet (color = category)</span></div>
@@ -410,6 +448,116 @@ export default function SecondBrainTab() {
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as any)[c]);
+}
+
+// ── Physics controls ─────────────────────────────────────────────────────────
+
+interface PhysicsSettings {
+  linkDistance: number;   // d3 link force distance
+  linkStrength: number;   // d3 link force strength (higher = tighter clusters)
+  chargeStrength: number; // d3 charge force; negative = repulsion
+}
+
+const DEFAULT_PHYSICS: PhysicsSettings = {
+  linkDistance: 30,
+  linkStrength: 0.6,
+  chargeStrength: -80,
+};
+
+function PhysicsPanel({
+  open, onToggle, physics, setPhysics, onReset,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  physics: PhysicsSettings;
+  setPhysics: React.Dispatch<React.SetStateAction<PhysicsSettings>>;
+  onReset: () => void;
+}) {
+  if (!open) {
+    return (
+      <button
+        onClick={onToggle}
+        title="Graph physics"
+        className="absolute bottom-4 left-4 flex items-center gap-1.5 px-3 py-2 bg-zinc-900/80 backdrop-blur-md border border-zinc-800 rounded-lg text-[10px] uppercase tracking-widest text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors"
+      >
+        <Sliders className="w-3 h-3" />
+        Physics
+      </button>
+    );
+  }
+  return (
+    <div
+      onMouseDown={e => e.stopPropagation()}
+      onClick={e => e.stopPropagation()}
+      className="absolute bottom-4 left-4 w-64 bg-zinc-900/85 backdrop-blur-md border border-zinc-800 rounded-lg p-3 text-[11px] space-y-3"
+    >
+      <div className="flex items-center gap-1.5">
+        <Sliders className="w-3 h-3 text-indigo-400" />
+        <span className="font-bold text-zinc-300 uppercase tracking-widest text-[10px]">Physics</span>
+        <button
+          onClick={onReset}
+          title="Reset to defaults"
+          className="ml-auto p-0.5 text-zinc-500 hover:text-white"
+        >
+          <RotateCcw className="w-3 h-3" />
+        </button>
+        <button onClick={onToggle} className="p-0.5 text-zinc-500 hover:text-white">
+          <X className="w-3 h-3" />
+        </button>
+      </div>
+
+      <SliderRow
+        label="Distance"
+        hint="how long edges are"
+        value={physics.linkDistance}
+        min={10} max={200} step={1}
+        onChange={v => setPhysics(p => ({ ...p, linkDistance: v }))}
+      />
+      <SliderRow
+        label="Repulsion"
+        hint="how strongly nodes push apart"
+        value={-physics.chargeStrength}      // display as positive
+        min={0} max={400} step={5}
+        onChange={v => setPhysics(p => ({ ...p, chargeStrength: -v }))}
+      />
+      <SliderRow
+        label="Clustering"
+        hint="how tightly connected nodes pull together"
+        value={physics.linkStrength}
+        min={0} max={2} step={0.05}
+        decimals={2}
+        onChange={v => setPhysics(p => ({ ...p, linkStrength: v }))}
+      />
+    </div>
+  );
+}
+
+function SliderRow({
+  label, hint, value, min, max, step, onChange, decimals = 0,
+}: {
+  label: string;
+  hint: string;
+  value: number;
+  min: number; max: number; step: number;
+  decimals?: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between">
+        <span className="text-zinc-300 font-semibold">{label}</span>
+        <span className="text-zinc-500 tabular-nums">{value.toFixed(decimals)}</span>
+      </div>
+      <input
+        type="range"
+        min={min} max={max} step={step}
+        value={value}
+        onChange={e => onChange(parseFloat(e.target.value))}
+        className="w-full mt-1 accent-indigo-500"
+      />
+      <div className="text-[9px] text-zinc-600">{hint}</div>
+    </div>
+  );
 }
 
 // ── Neuron detail overlay ────────────────────────────────────────────────────
