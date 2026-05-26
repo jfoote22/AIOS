@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { Settings as SettingsIcon, Sliders, CreditCard } from 'lucide-react';
+import { Settings as SettingsIcon, Sliders, CreditCard, Download } from 'lucide-react';
 import ModelsTab from './ModelsTab';
 import SubscriptionsTab from './SubscriptionsTab';
+import ImportsTab from './ImportsTab';
 
-type SettingsSection = 'models' | 'subscriptions';
+type SettingsSection = 'models' | 'subscriptions' | 'imports';
 
 interface SectionDef {
   id: SettingsSection;
@@ -14,6 +15,7 @@ interface SectionDef {
 const SECTIONS: SectionDef[] = [
   { id: 'models',        label: 'Models',        icon: Sliders },
   { id: 'subscriptions', label: 'Subscriptions', icon: CreditCard },
+  { id: 'imports',       label: 'Imports',       icon: Download },
 ];
 
 function Panel({ active, children }: { active: boolean; children: React.ReactNode }) {
@@ -60,6 +62,7 @@ export default function SettingsTab() {
             subscription entry) survive switching between Models and Subscriptions. */}
         <Panel active={section === 'models'}><ModelsTab /></Panel>
         <Panel active={section === 'subscriptions'}><SubscriptionsTab /></Panel>
+        <Panel active={section === 'imports'}><ImportsTab /></Panel>
       </div>
     </div>
   );

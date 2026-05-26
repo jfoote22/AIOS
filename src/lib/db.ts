@@ -2,11 +2,12 @@
 // Phase 2 will migrate to SQLite via better-sqlite3 (for FTS5-powered Second Brain).
 
 const DB_NAME = 'aios';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const SNIPS = 'snippets';
 const META = 'meta';
 const THREADS = 'threads';
 const MESSAGES = 'messages';
+const IMPORTS = 'imports';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -32,6 +33,12 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(MESSAGES)) {
         const store = db.createObjectStore(MESSAGES, { keyPath: 'id' });
         store.createIndex('threadId', 'threadId');
+      }
+      if (!db.objectStoreNames.contains(IMPORTS)) {
+        const store = db.createObjectStore(IMPORTS, { keyPath: 'id' });
+        store.createIndex('provider', 'provider');
+        store.createIndex('createdAt', 'createdAt');
+        store.createIndex('updatedAt', 'updatedAt');
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -147,6 +154,57 @@ export async function getMessagesForThread<T>(threadId: string): Promise<T[]> {
 export async function putMessage<T extends { id: string }>(item: T): Promise<void> {
   const { tx, store } = await txStore(MESSAGES, 'readwrite');
   store.put(item);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// --- Imports (Claude / ChatGPT conversation exports) ---
+export async function getAllImports<T>(): Promise<T[]> {
+  const { store } = await txStore(IMPORTS, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.getAll();
+    req.onsuccess = () => {
+      const items = (req.result as T[]) ?? [];
+      items.sort((a: any, b: any) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
+      resolve(items);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function putImports<T extends { id: string }>(items: T[]): Promise<void> {
+  if (!items.length) return;
+  const { tx, store } = await txStore(IMPORTS, 'readwrite');
+  for (const item of items) store.put(item);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function removeImport(id: string): Promise<void> {
+  const { tx, store } = await txStore(IMPORTS, 'readwrite');
+  store.delete(id);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function clearImports(provider?: string): Promise<void> {
+  const { tx, store } = await txStore(IMPORTS, 'readwrite');
+  if (!provider) {
+    store.clear();
+  } else {
+    const idx = store.index('provider');
+    const req = idx.openCursor(IDBKeyRange.only(provider));
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (cur) { cur.delete(); cur.continue(); }
+    };
+  }
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
