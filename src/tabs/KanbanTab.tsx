@@ -2,14 +2,20 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   KanbanSquare, Sparkles, Plus, Trash2, X, Loader2, AlertCircle, Tag as TagIcon,
-  Clock, Wand2, GripVertical, Bot, Play,
+  Clock, Wand2, GripVertical, Bot, Play, CheckCircle2, Square as StopSquare,
 } from 'lucide-react';
 import {
   loadBoard, saveBoard, newCard, planTasks, COLUMNS,
   type KanbanBoard, type KanbanCard, type ColumnId, type Priority,
 } from '../lib/kanban';
 import { type AgentDef } from '../lib/agents';
+import {
+  startRun, cancelRun, recordRun, parseRunStream, triageBacklog,
+  type AgentRun, type TriageProposal,
+} from '../lib/runs';
 import AgentBuilder from '../components/AgentBuilder';
+import AgentRunDrawer from '../components/AgentRunDrawer';
+import TriageModal from '../components/TriageModal';
 
 const PRIORITY_COLOR: Record<Priority, string> = {
   low:    'bg-zinc-700 text-zinc-300',
@@ -60,6 +66,18 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   const [composer, setComposer] = useState<ColumnId | null>(null);
   const [composerText, setComposerText] = useState('');
   const draggedId = useRef<string | null>(null);
+
+  // Run state: one run per card-in-flight. The drawer renders the run for
+  // whichever card is currently focused via openRunCardId.
+  const [runs, setRuns] = useState<Map<string, AgentRun>>(new Map());     // cardId -> latest run
+  const [openRunCardId, setOpenRunCardId] = useState<string | null>(null);
+  const boardRef = useRef<KanbanBoard | null>(null);
+  boardRef.current = board;
+
+  // Triage state
+  const [triaging, setTriaging] = useState(false);
+  const [triageProposals, setTriageProposals] = useState<TriageProposal[] | null>(null);
+  const [triageError, setTriageError] = useState<string | null>(null);
 
   useEffect(() => { loadBoard().then(setBoard); }, []);
 
@@ -116,6 +134,121 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
       ...board,
       cards: [...others, { ...card, column: target, position: newPos, updatedAt: Date.now() }],
     });
+  };
+
+  // Update the runs map + persist
+  const setRun = (cardId: string, next: AgentRun) => {
+    setRuns(prev => { const m = new Map(prev); m.set(cardId, next); return m; });
+    recordRun(next).catch(e => console.error('persist run failed', e));
+  };
+
+  const runAgentOnCard = async (card: KanbanCard) => {
+    if (!card.assignedAgentId) return;
+    const agent = agentById.get(card.assignedAgentId);
+    if (!agent) return;
+
+    // Move card to Running immediately so the board reflects intent
+    if (card.column !== 'running') {
+      updateCard(card.id, { column: 'running' });
+    }
+
+    setOpenRunCardId(card.id);
+
+    let run: AgentRun;
+    try {
+      const result = await startRun({
+        card: { id: card.id, title: card.title, description: card.description },
+        agent,
+      });
+      run = result.run;
+      setRun(card.id, run);
+
+      let acc = '';
+      let finalReason: string | undefined;
+      let streamError: string | undefined;
+      for await (const evt of parseRunStream(result.stream)) {
+        if (evt.type === 'text') {
+          acc += evt.value;
+          run = { ...run, transcript: acc };
+          setRun(card.id, run);
+        } else if (evt.type === 'finish') {
+          finalReason = evt.reason;
+        } else if (evt.type === 'error') {
+          streamError = evt.value;
+        }
+      }
+
+      const ok = !streamError && finalReason !== 'error';
+      const canceled = finalReason === 'canceled';
+      const final: AgentRun = {
+        ...run,
+        status: canceled ? 'canceled' : ok ? 'succeeded' : 'failed',
+        finishedAt: Date.now(),
+        error: streamError,
+      };
+      setRun(card.id, final);
+
+      // Auto-progress: success → Review; canceled or failed → stay in Running
+      // so the user can decide to retry, drag, or open the drawer.
+      if (final.status === 'succeeded') updateCard(card.id, { column: 'review' });
+    } catch (e: any) {
+      console.error('runAgentOnCard error', e);
+      const errMsg = e?.message ?? String(e);
+      setRun(card.id, {
+        id: `run-err-${Date.now()}`,
+        cardId: card.id,
+        agentId: agent.id,
+        agentSlug: agent.slug,
+        status: 'failed',
+        startedAt: Date.now(),
+        finishedAt: Date.now(),
+        transcript: '',
+        error: errMsg,
+      });
+    }
+  };
+
+  const cancelCardRun = async (cardId: string) => {
+    const run = runs.get(cardId);
+    if (!run) return;
+    await cancelRun(run.id);
+  };
+
+  // ── Backlog triage ─────────────────────────────────────────────────────────
+
+  const openTriage = async () => {
+    if (!board) return;
+    const backlog = board.cards.filter(c => c.column === 'backlog');
+    if (!backlog.length) { setTriageError('Nothing in Backlog to triage.'); setTriageProposals([]); return; }
+    if (!agents.length) { setTriageError('Create at least one agent first.'); setTriageProposals([]); return; }
+    setTriaging(true); setTriageError(null); setTriageProposals([]);
+    try {
+      const { proposals } = await triageBacklog({
+        cards: backlog.map(c => ({ id: c.id, title: c.title, description: c.description, tag: c.tag })),
+        agents: agents.map(a => ({ id: a.id, name: a.name, slug: a.slug, description: a.description })),
+      });
+      setTriageProposals(proposals);
+    } catch (e: any) {
+      setTriageError(e?.message ?? String(e));
+    } finally {
+      setTriaging(false);
+    }
+  };
+
+  const applyTriage = (overrides: Record<string, string | null>) => {
+    if (!board) return;
+    const now = Date.now();
+    const next: KanbanBoard = {
+      ...board,
+      cards: board.cards.map(c => {
+        if (c.column !== 'backlog') return c;
+        const agentId = overrides[c.id];
+        if (!agentId) return c; // unassigned stays in backlog
+        return { ...c, assignedAgentId: agentId, column: 'ready', updatedAt: now };
+      }),
+    };
+    persist(next);
+    setTriageProposals(null);
   };
 
   const runPlanner = async () => {
@@ -175,6 +308,7 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
               cards={byColumn[col.id]}
               agents={agents}
               agentById={agentById}
+              runs={runs}
               isComposing={composer === col.id}
               composerText={composerText}
               onStartCompose={() => { setComposer(col.id); setComposerText(''); }}
@@ -188,11 +322,16 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
                   column: agentId && (byColumn.backlog.find(c => c.id === cardId)) ? 'ready' : undefined as any,
                 });
               }}
+              onRun={runAgentOnCard}
+              onCancelRun={cancelCardRun}
+              onOpenRun={setOpenRunCardId}
               onDragStart={(id) => { draggedId.current = id; }}
               onDropOnColumn={(target, beforeId) => {
                 const id = draggedId.current; draggedId.current = null;
                 if (id) moveCard(id, target, beforeId);
               }}
+              onTriage={col.id === 'backlog' ? openTriage : undefined}
+              triaging={col.id === 'backlog' ? triaging : false}
             />
           ))}
         </div>
@@ -217,20 +356,42 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
             onDelete={() => { deleteCard(editing.id); setEditing(null); }}
           />
         )}
+        {openRunCardId && runs.get(openRunCardId) && (
+          <AgentRunDrawer
+            run={runs.get(openRunCardId)!}
+            cardTitle={board.cards.find(c => c.id === openRunCardId)?.title ?? '(unknown card)'}
+            onClose={() => setOpenRunCardId(null)}
+            onCancel={() => cancelCardRun(openRunCardId)}
+          />
+        )}
+        {triageProposals && (
+          <TriageModal
+            proposals={triageProposals}
+            cards={board.cards}
+            agents={agents}
+            busy={triaging}
+            error={triageError}
+            onCancel={() => { setTriageProposals(null); setTriageError(null); }}
+            onApply={applyTriage}
+            onRetry={openTriage}
+          />
+        )}
       </AnimatePresence>
     </div>
   );
 }
 
 function Column({
-  column, cards, agents, agentById, isComposing, composerText,
+  column, cards, agents, agentById, runs, isComposing, composerText,
   onStartCompose, onCancelCompose, onSubmitCompose, onComposerTextChange,
-  onCardClick, onAssign, onDragStart, onDropOnColumn,
+  onCardClick, onAssign, onRun, onCancelRun, onOpenRun,
+  onDragStart, onDropOnColumn, onTriage, triaging,
 }: {
   column: { id: ColumnId; label: string; hint: string };
   cards: KanbanCard[];
   agents: AgentDef[];
   agentById: Map<string, AgentDef>;
+  runs: Map<string, AgentRun>;
   isComposing: boolean;
   composerText: string;
   onStartCompose: () => void;
@@ -239,8 +400,13 @@ function Column({
   onComposerTextChange: (s: string) => void;
   onCardClick: (c: KanbanCard) => void;
   onAssign: (cardId: string, agentId: string) => void;
+  onRun: (card: KanbanCard) => void;
+  onCancelRun: (cardId: string) => void;
+  onOpenRun: (cardId: string) => void;
   onDragStart: (id: string) => void;
   onDropOnColumn: (target: ColumnId, beforeId?: string) => void;
+  onTriage?: () => void;
+  triaging?: boolean;
 }) {
   const [hover, setHover] = useState(false);
   return (
@@ -253,10 +419,21 @@ function Column({
       <header className="px-2.5 py-1.5 flex items-center gap-2 border-b border-zinc-800/60" title={column.hint}>
         <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-300">{column.label}</span>
         <span className="text-[9px] text-zinc-500 px-1 py-0.5 rounded bg-zinc-800">{cards.length}</span>
+        {onTriage && (
+          <button
+            onClick={onTriage}
+            disabled={triaging || cards.length === 0}
+            title="Have the Manager agent assign each backlog card to the best-fit agent"
+            className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 hover:text-indigo-200 border border-indigo-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {triaging ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Wand2 className="w-2.5 h-2.5" />}
+            Triage
+          </button>
+        )}
         <button
           onClick={onStartCompose}
           title="Add card"
-          className="ml-auto p-0.5 rounded text-zinc-500 hover:text-white hover:bg-zinc-800"
+          className={`${onTriage ? '' : 'ml-auto'} p-0.5 rounded text-zinc-500 hover:text-white hover:bg-zinc-800`}
         >
           <Plus className="w-3 h-3" />
         </button>
@@ -269,8 +446,12 @@ function Column({
             card={card}
             agents={agents}
             agent={card.assignedAgentId ? agentById.get(card.assignedAgentId) : undefined}
+            run={runs.get(card.id)}
             onClick={() => onCardClick(card)}
             onAssign={(agentId) => onAssign(card.id, agentId)}
+            onRun={() => onRun(card)}
+            onCancelRun={() => onCancelRun(card.id)}
+            onOpenRun={() => onOpenRun(card.id)}
             onDragStart={() => onDragStart(card.id)}
             onDropBefore={() => onDropOnColumn(column.id, card.id)}
           />
@@ -309,16 +490,22 @@ function Column({
 }
 
 function CardItem({
-  card, agents, agent, onClick, onAssign, onDragStart, onDropBefore,
+  card, agents, agent, run, onClick, onAssign, onRun, onCancelRun, onOpenRun, onDragStart, onDropBefore,
 }: {
   card: KanbanCard;
   agents: AgentDef[];
   agent?: AgentDef;
+  run?: AgentRun;
   onClick: () => void;
   onAssign: (agentId: string) => void;
+  onRun: () => void;
+  onCancelRun: () => void;
+  onOpenRun: () => void;
   onDragStart: () => void;
   onDropBefore: () => void;
 }) {
+  const running = run?.status === 'running';
+  const canRun = !!card.assignedAgentId && !running;
   return (
     <div
       draggable
@@ -347,14 +534,38 @@ function CardItem({
                 <option key={a.id} value={a.id}>{a.name || a.slug}</option>
               ))}
             </select>
-            <button
-              disabled
-              title="Run agent on this card — coming in Phase 1C"
-              className="p-0.5 rounded text-zinc-700 cursor-not-allowed"
-            >
-              <Play className="w-3 h-3" />
-            </button>
+            {running ? (
+              <button
+                onClick={onCancelRun}
+                title="Cancel run"
+                className="p-0.5 rounded text-red-300 hover:bg-red-500/10"
+              >
+                <StopSquare className="w-3 h-3" />
+              </button>
+            ) : (
+              <button
+                onClick={onRun}
+                disabled={!canRun}
+                title={!card.assignedAgentId ? 'Assign an agent first' : 'Run agent on this card'}
+                className={`p-0.5 rounded ${canRun ? 'text-emerald-400 hover:text-white hover:bg-emerald-500/10' : 'text-zinc-700 cursor-not-allowed'}`}
+              >
+                <Play className="w-3 h-3" />
+              </button>
+            )}
           </div>
+
+          {/* Run status row */}
+          {run && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onOpenRun(); }}
+              className="mt-1.5 w-full flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider border bg-zinc-950 hover:bg-zinc-900 transition-colors"
+              title="Open run output"
+            >
+              <RunBadgeIcon status={run.status} />
+              <span className={runStatusColor(run.status)}>{run.status}</span>
+              {run.transcript && <span className="text-zinc-600 truncate normal-case tracking-normal text-[10px] ml-1">{transcriptPreview(run.transcript)}</span>}
+            </button>
+          )}
 
           {(card.tag || card.estimate || card.priority) && (
             <div className="flex flex-wrap items-center gap-1 mt-1.5">
@@ -589,4 +800,25 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </div>
   );
+}
+
+function RunBadgeIcon({ status }: { status: AgentRun['status'] }) {
+  if (status === 'running')   return <Loader2 className="w-2.5 h-2.5 animate-spin text-indigo-300" />;
+  if (status === 'succeeded') return <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />;
+  if (status === 'failed')    return <AlertCircle className="w-2.5 h-2.5 text-red-400" />;
+  if (status === 'canceled')  return <StopSquare className="w-2.5 h-2.5 text-amber-400" />;
+  return <Clock className="w-2.5 h-2.5 text-zinc-500" />;
+}
+
+function runStatusColor(status: AgentRun['status']) {
+  if (status === 'running')   return 'text-indigo-300';
+  if (status === 'succeeded') return 'text-emerald-300';
+  if (status === 'failed')    return 'text-red-300';
+  if (status === 'canceled')  return 'text-amber-300';
+  return 'text-zinc-400';
+}
+
+function transcriptPreview(t: string): string {
+  const lastLine = t.split('\n').reverse().find(l => l.trim()) ?? '';
+  return lastLine.length > 36 ? lastLine.slice(0, 36) + '…' : lastLine;
 }

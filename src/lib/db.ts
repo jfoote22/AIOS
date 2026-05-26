@@ -2,7 +2,7 @@
 // Phase 2 will migrate to SQLite via better-sqlite3 (for FTS5-powered Second Brain).
 
 const DB_NAME = 'aios';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const SNIPS = 'snippets';
 const META = 'meta';
 const THREADS = 'threads';
@@ -10,6 +10,7 @@ const MESSAGES = 'messages';
 const IMPORTS = 'imports';
 const IMPORT_CHUNKS = 'import_chunks';
 const AGENTS = 'agents';
+const RUNS = 'runs';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -51,6 +52,12 @@ function openDb(): Promise<IDBDatabase> {
         const store = db.createObjectStore(AGENTS, { keyPath: 'id' });
         store.createIndex('slug', 'slug', { unique: true });
         store.createIndex('updatedAt', 'updatedAt');
+      }
+      if (!db.objectStoreNames.contains(RUNS)) {
+        const store = db.createObjectStore(RUNS, { keyPath: 'id' });
+        store.createIndex('cardId', 'cardId');
+        store.createIndex('agentId', 'agentId');
+        store.createIndex('startedAt', 'startedAt');
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -231,6 +238,43 @@ export async function putAgent<T extends { id: string }>(item: T): Promise<void>
 export async function removeAgent(id: string): Promise<void> {
   const { tx, store } = await txStore(AGENTS, 'readwrite');
   store.delete(id);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// --- Runs (each Play of an agent on a card creates one run) ---
+export async function getAllRuns<T>(): Promise<T[]> {
+  const { store } = await txStore(RUNS, 'readonly');
+  return new Promise((resolve, reject) => {
+    const req = store.getAll();
+    req.onsuccess = () => {
+      const items = (req.result as T[]) ?? [];
+      items.sort((a: any, b: any) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+      resolve(items);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function getRunsForCard<T>(cardId: string): Promise<T[]> {
+  const { store } = await txStore(RUNS, 'readonly');
+  const idx = store.index('cardId');
+  return new Promise((resolve, reject) => {
+    const req = idx.getAll(cardId);
+    req.onsuccess = () => {
+      const items = (req.result as T[]) ?? [];
+      items.sort((a: any, b: any) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+      resolve(items);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function putRun<T extends { id: string }>(item: T): Promise<void> {
+  const { tx, store } = await txStore(RUNS, 'readwrite');
+  store.put(item);
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);

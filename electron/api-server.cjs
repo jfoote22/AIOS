@@ -440,6 +440,249 @@ function start() {
     }
   });
 
+  // --- Agent runs: actually execute an agent against a card ---
+  // Streams the Vercel AI data-stream protocol so the renderer can chunk text
+  // into the card's transcript live. Tool calls and tool results are formatted
+  // inline as plain text deltas (no separate stream channel) to keep the UI
+  // simple. The Manager / per-card Cancel button hits /api/agents/run/cancel
+  // which signals the AbortController held in `activeRuns`.
+
+  const activeRuns = new Map(); // runId -> AbortController
+
+  app.post('/api/agents/run', async (req, res) => {
+    const { runId, card, agent, authMode } = req.body || {};
+    if (!runId || !card || !agent) {
+      return res.status(400).json({ error: 'Missing runId, card, or agent.' });
+    }
+    if (!agent.systemPrompt || !agent.systemPrompt.trim()) {
+      return res.status(400).json({ error: 'Agent has no system prompt — fill it in the Agent Builder first.' });
+    }
+
+    const controller = new AbortController();
+    activeRuns.set(runId, controller);
+
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('x-vercel-ai-data-stream', 'v1');
+    res.setHeader('Cache-Control', 'no-cache');
+
+    const writeText = (text) => {
+      if (!text || res.writableEnded) return;
+      try { res.write(streamPart('text', text)); } catch {}
+    };
+    const writeError = (msg) => {
+      if (res.writableEnded) return;
+      try { res.write(streamPart('error', String(msg))); } catch {}
+    };
+    const writeFinish = (reason) => {
+      if (res.writableEnded) return;
+      try {
+        res.write(streamPart('finish_message', {
+          finishReason: reason,
+          usage: { promptTokens: 0, completionTokens: 0 },
+        }));
+      } catch {}
+    };
+
+    const taskPrompt = [
+      `# Task`,
+      card.title,
+      '',
+      card.description ? `## Details\n${card.description}` : '',
+      '',
+      `When you're done, summarize what you did and stop.`,
+    ].filter(Boolean).join('\n');
+
+    try {
+      // Both paths use the Claude Agent SDK so the agent gets real tool access.
+      // API-key path also goes through Agent SDK (it picks up ANTHROPIC_API_KEY
+      // from process env if no subscription is logged in).
+      const prevEnvKey = process.env.ANTHROPIC_API_KEY;
+      if (authMode !== 'subscription') {
+        const key = getProviderKey('anthropic');
+        if (!key) {
+          activeRuns.delete(runId);
+          if (!res.headersSent) return res.status(400).json({ error: 'No Anthropic API key configured. Add one in Models or switch to subscription auth.' });
+          writeError('No Anthropic API key configured.');
+          writeFinish('error');
+          return res.end();
+        }
+        process.env.ANTHROPIC_API_KEY = key;
+      }
+
+      const { query } = await import('@anthropic-ai/claude-agent-sdk');
+      const modelOverride = (agent.model && agent.model !== 'inherit') ? agent.model : (getModelId('claude') || getModelId('anthropic'));
+      const allowed = Array.isArray(agent.allowedTools) ? agent.allowedTools : [];
+      const cwd = (agent.workingDir && typeof agent.workingDir === 'string') ? agent.workingDir : undefined;
+
+      writeText(`• Agent: ${agent.name || agent.slug}\n• Model: ${modelOverride || 'inherit'}\n• Tools: ${allowed.join(', ') || '(none)'}\n• Cwd: ${cwd || '(default)'}\n\n`);
+
+      const stream = query({
+        prompt: taskPrompt,
+        options: {
+          model: modelOverride,
+          systemPrompt: agent.systemPrompt,
+          allowedTools: allowed,
+          permissionMode: 'bypassPermissions',
+          cwd,
+          abortController: controller,
+        },
+      });
+
+      let assistantPrevLen = 0;
+      for await (const msg of stream) {
+        if (controller.signal.aborted) break;
+
+        if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
+          // Accumulate text blocks and emit deltas; also inline tool_use blocks.
+          let full = '';
+          for (const block of msg.message.content) {
+            if (block && block.type === 'text' && typeof block.text === 'string') {
+              full += block.text;
+            } else if (block && block.type === 'tool_use') {
+              const inputStr = (() => {
+                try { return JSON.stringify(block.input).slice(0, 240); }
+                catch { return ''; }
+              })();
+              full += `\n→ ${block.name}(${inputStr})\n`;
+            }
+          }
+          if (full.length > assistantPrevLen) {
+            writeText(full.slice(assistantPrevLen));
+            assistantPrevLen = full.length;
+          }
+        } else if (msg.type === 'user' && msg.message && Array.isArray(msg.message.content)) {
+          // Tool results come back as user-role messages with tool_result blocks.
+          for (const block of msg.message.content) {
+            if (block && block.type === 'tool_result') {
+              const text = typeof block.content === 'string'
+                ? block.content
+                : Array.isArray(block.content)
+                  ? block.content.map(c => (c?.type === 'text' ? c.text : '')).filter(Boolean).join('\n')
+                  : '';
+              const trimmed = text.length > 600 ? text.slice(0, 600) + '\n…(truncated)' : text;
+              if (trimmed) writeText(`← ${trimmed}\n`);
+            }
+          }
+          // Reset assistant counter so the next assistant message starts fresh
+          assistantPrevLen = 0;
+        } else if (msg.type === 'result') {
+          break;
+        }
+      }
+
+      if (authMode !== 'subscription') {
+        if (prevEnvKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+        else process.env.ANTHROPIC_API_KEY = prevEnvKey;
+      }
+
+      writeFinish(controller.signal.aborted ? 'canceled' : 'stop');
+      res.end();
+    } catch (err) {
+      console.error('agent run error:', err);
+      const msg = err?.message || 'Agent run failed.';
+      if (!res.headersSent) {
+        res.status(500).json({ error: msg });
+      } else {
+        writeError(msg);
+        writeFinish('error');
+        res.end();
+      }
+    } finally {
+      activeRuns.delete(runId);
+    }
+  });
+
+  app.post('/api/agents/run/cancel', (req, res) => {
+    const { runId } = req.body || {};
+    const c = runId ? activeRuns.get(runId) : null;
+    if (c) { try { c.abort(); } catch {} }
+    res.json({ canceled: !!c });
+  });
+
+  // --- Backlog triage: Manager agent picks an agent per card ---
+  app.post('/api/agents/triage', async (req, res) => {
+    try {
+      const { cards = [], agents = [], authMode } = req.body || {};
+      if (!Array.isArray(cards) || cards.length === 0) {
+        return res.status(400).json({ error: 'No cards to triage.' });
+      }
+      if (!Array.isArray(agents) || agents.length === 0) {
+        return res.status(400).json({ error: 'No agents available. Create at least one agent first.' });
+      }
+
+      const systemPrompt = [
+        'You are the Manager agent of a kanban board. Given a list of unassigned cards and a roster of specialized agents, decide which agent best fits each card.',
+        'Prefer assigning over leaving unassigned, but if no agent is a reasonable fit, set agentId to null and say so in the rationale.',
+        'Each agent has a description that captures its specialty and when to use it. Match on that.',
+        '',
+        'Return ONLY a JSON object matching this schema, with no surrounding prose or markdown fences:',
+        '{ "proposals": [ { "cardId": string, "agentId": string | null, "rationale": string } ] }',
+        'rationale is one short sentence (<140 chars) explaining the choice.',
+      ].join('\n');
+
+      const userPrompt = [
+        '## Available agents',
+        ...agents.map((a, i) => `${i + 1}. id="${a.id}" name="${a.name || a.slug}" — ${a.description || '(no description)'}`),
+        '',
+        '## Backlog cards',
+        ...cards.map((c, i) => `${i + 1}. id="${c.id}" title="${c.title}"${c.tag ? ` tag="${c.tag}"` : ''}${c.description ? `\n   ${c.description.slice(0, 240)}` : ''}`),
+        '',
+        'Assign each card now.',
+      ].join('\n');
+
+      let raw = '';
+      if (authMode === 'subscription') {
+        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const modelId = getModelId('claude') || getModelId('anthropic');
+        const stream = query({
+          prompt: userPrompt,
+          options: { model: modelId, systemPrompt, allowedTools: [], permissionMode: 'bypassPermissions' },
+        });
+        for await (const msg of stream) {
+          if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
+            for (const block of msg.message.content) {
+              if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
+            }
+          } else if (msg.type === 'result') break;
+        }
+      } else {
+        const key = getProviderKey('anthropic');
+        if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models or switch to subscription auth.' });
+        const { default: Anthropic } = await import('@anthropic-ai/sdk');
+        const client = new Anthropic({ apiKey: key });
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-7';
+        const response = await client.messages.create({
+          model: modelId, max_tokens: 4096, system: systemPrompt,
+          messages: [{ role: 'user', content: userPrompt }],
+        });
+        for (const block of response.content || []) {
+          if (block.type === 'text') raw += block.text;
+        }
+      }
+
+      const parsed = extractJsonObject(raw);
+      if (!parsed || !Array.isArray(parsed.proposals)) {
+        return res.status(502).json({ error: 'Triage returned no parsable proposals.', raw: raw.slice(0, 800) });
+      }
+
+      // Validate proposals against the input ids; drop unknowns silently.
+      const cardIds = new Set(cards.map(c => c.id));
+      const agentIds = new Set(agents.map(a => a.id));
+      const proposals = parsed.proposals
+        .filter(p => p && cardIds.has(p.cardId))
+        .map(p => ({
+          cardId: String(p.cardId),
+          agentId: p.agentId && agentIds.has(p.agentId) ? String(p.agentId) : null,
+          rationale: typeof p.rationale === 'string' ? p.rationale.trim() : '',
+        }));
+
+      res.json({ proposals });
+    } catch (err) {
+      console.error('triage error:', err);
+      if (!res.headersSent) res.status(500).json({ error: err?.message || 'Triage failed.' });
+    }
+  });
+
   // --- OpenAI Codex SDK chat (uses local `codex` CLI ChatGPT-subscription auth) ---
   // Requires Codex CLI installed and signed in: `codex login` (Plus/Pro/Business).
   // The renderer routes here when the user picks "ChatGPT subscription" auth in Models tab.
