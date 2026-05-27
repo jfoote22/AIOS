@@ -9,7 +9,7 @@ const MAIN_TABS: TabDef[] = [
   { id: 'snipping',      label: 'Snipping',      icon: Scissors },
   { id: 'secondbrain',   label: 'Second Brain',  icon: Brain },
   { id: 'terminal',      label: 'Terminal',      icon: TerminalIcon },
-  { id: 'kanban',        label: 'Orchestrator',  icon: KanbanSquare },
+  { id: 'kanban',        label: 'Orchestra',     icon: KanbanSquare },
   { id: 'hermes',        label: 'Hermes',        icon: Feather },
 ];
 

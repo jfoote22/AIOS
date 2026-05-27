@@ -13,9 +13,14 @@ import {
   startRun, cancelRun, recordRun, parseRunStream, triageBacklog,
   type AgentRun, type TriageProposal,
 } from '../lib/runs';
+import {
+  loadMaestroState, saveMaestroState, ensureMaestroAgent, tick as maestroTick,
+  reviewCard, DEFAULT_MAESTRO, type MaestroState,
+} from '../lib/maestro';
 import AgentBuilder from '../components/AgentBuilder';
 import AgentRunDrawer from '../components/AgentRunDrawer';
 import TriageModal from '../components/TriageModal';
+import MaestroControls from '../components/MaestroControls';
 
 const PRIORITY_COLOR: Record<Priority, string> = {
   low:    'bg-zinc-700 text-zinc-300',
@@ -36,9 +41,9 @@ export default function KanbanTab() {
       <header className="h-16 border-b border-zinc-800 px-6 flex items-center gap-4 bg-zinc-900/10 backdrop-blur-md shrink-0">
         <div className="flex items-center gap-2">
           <div className="p-1.5 bg-zinc-800 rounded-md"><KanbanSquare className="w-4 h-4 text-indigo-400" /></div>
-          <h1 className="text-sm font-bold uppercase tracking-widest text-zinc-100">Orchestrator</h1>
+          <h1 className="text-sm font-bold uppercase tracking-widest text-zinc-100">Orchestra</h1>
         </div>
-        <span className="text-[11px] text-zinc-500">Agent builder · task board</span>
+        <span className="text-[11px] text-zinc-500">Agent builder · task board · Maestro</span>
       </header>
 
       <div className="flex-1 min-h-0 flex">
@@ -79,7 +84,32 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   const [triageProposals, setTriageProposals] = useState<TriageProposal[] | null>(null);
   const [triageError, setTriageError] = useState<string | null>(null);
 
+  // Maestro state
+  const [maestro, setMaestro] = useState<MaestroState>(DEFAULT_MAESTRO);
+  const maestroRef = useRef<MaestroState>(maestro);
+  maestroRef.current = maestro;
+  const [selectedReviewIds, setSelectedReviewIds] = useState<Set<string>>(new Set());
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [maestroBootstrapped, setMaestroBootstrapped] = useState(false);
+  const reviewedRef = useRef<Set<string>>(new Set()); // run ids we've already auto-reviewed
+
   useEffect(() => { loadBoard().then(setBoard); }, []);
+  useEffect(() => { loadMaestroState().then(setMaestro); }, []);
+  // Bootstrap Maestro agent record once agents have loaded
+  useEffect(() => {
+    if (maestroBootstrapped || !agents) return;
+    ensureMaestroAgent(agents).catch(e => console.warn('ensureMaestroAgent', e)).finally(() => setMaestroBootstrapped(true));
+  }, [agents, maestroBootstrapped]);
+
+  const updateMaestro = (next: MaestroState) => {
+    setMaestro(next);
+    saveMaestroState(next).catch(e => console.error('maestro save failed', e));
+  };
+
+  // Workers only — Maestro & Reviewer agents are hidden from card assignment.
+  const workerAgents = useMemo(() => agents.filter(a => a.role !== 'maestro' && a.role !== 'reviewer'), [agents]);
+  const agentsRef = useRef(agents); agentsRef.current = agents;
+  const runsRef = useRef(runs); runsRef.current = runs;
 
   const persist = (next: KanbanBoard) => {
     setBoard(next);
@@ -214,18 +244,118 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
     await cancelRun(run.id);
   };
 
+  // ── Maestro tick controller ────────────────────────────────────────────────
+  // Runs the deterministic state machine and applies whatever actions it
+  // emits. Reads through refs so we always see the latest board/runs even
+  // when triggered from a useEffect that runs in a slightly stale closure.
+
+  const runTick = async () => {
+    const b = boardRef.current;
+    const s = maestroRef.current;
+    if (!b || !s.enabled) return;
+    const actions = maestroTick({ board: b, agents: agentsRef.current, runs: runsRef.current, state: s });
+    for (const action of actions) {
+      if (action.type === 'promote-to-ready') {
+        updateCard(action.cardId, { column: 'ready' });
+      } else if (action.type === 'start-run') {
+        // Fire and forget — runAgentOnCard handles its own state.
+        runAgentOnCard(action.card);
+      } else if (action.type === 'request-review') {
+        // Self-approve only fires here; reviewer-agent mode is batch-driven.
+        const runId = runsRef.current.get(action.cardId)?.id;
+        if (runId && reviewedRef.current.has(runId)) continue;
+        if (runId) reviewedRef.current.add(runId);
+        const card = b.cards.find(c => c.id === action.cardId);
+        if (!card) continue;
+        try {
+          const verdict = await reviewCard({
+            card: { id: card.id, title: card.title, description: card.description },
+            transcript: action.transcript,
+          });
+          if (verdict.pass) updateCard(card.id, { column: 'done' });
+          // On fail, leave it in Review so the user can intervene.
+        } catch (e) {
+          console.warn('self-review failed', e);
+        }
+      }
+    }
+  };
+
+  // Approve selected Review cards using the chosen reviewer agent.
+  const approveSelectedReview = async () => {
+    if (reviewBusy) return;
+    const s = maestroRef.current;
+    if (s.reviewMode !== 'reviewer-agent') return;
+    const reviewer = agentsRef.current.find(a => a.id === s.reviewerAgentId);
+    if (!reviewer) return;
+    const ids = Array.from(selectedReviewIds);
+    if (!ids.length) return;
+    setReviewBusy(true);
+    try {
+      for (const id of ids) {
+        const card = boardRef.current?.cards.find(c => c.id === id);
+        const run = runsRef.current.get(id);
+        if (!card || !run?.transcript) continue;
+        try {
+          const verdict = await reviewCard({
+            card: { id: card.id, title: card.title, description: card.description },
+            transcript: run.transcript,
+            reviewer,
+          });
+          if (verdict.pass) updateCard(card.id, { column: 'done' });
+        } catch (e) {
+          console.warn('reviewer-agent review failed for', id, e);
+        }
+      }
+      setSelectedReviewIds(new Set());
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
+  // ── Tick triggers ──────────────────────────────────────────────────────────
+  // Cadence: manual = button only; on-change = board+run terminal events;
+  // heartbeat = interval.
+
+  const runTerminalSignature = useMemo(() => {
+    const parts: string[] = [];
+    for (const r of runs.values()) {
+      if (r.status !== 'running') parts.push(`${r.id}:${r.status}`);
+    }
+    return parts.sort().join(',');
+  }, [runs]);
+  const cardSignature = useMemo(() => {
+    if (!board) return '';
+    return board.cards.map(c => `${c.id}:${c.column}:${c.assignedAgentId ?? ''}`).sort().join('|');
+  }, [board]);
+
+  useEffect(() => {
+    if (!maestro.enabled || maestro.cadence !== 'on-change') return;
+    runTick();
+    // runTick reads refs; safe to depend only on signatures + cadence.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cardSignature, runTerminalSignature, maestro.enabled, maestro.cadence]);
+
+  useEffect(() => {
+    if (!maestro.enabled || maestro.cadence !== 'heartbeat') return;
+    const ms = Math.max(5, maestro.heartbeatSec) * 1000;
+    const id = setInterval(runTick, ms);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [maestro.enabled, maestro.cadence, maestro.heartbeatSec]);
+
   // ── Backlog triage ─────────────────────────────────────────────────────────
 
   const openTriage = async () => {
     if (!board) return;
     const backlog = board.cards.filter(c => c.column === 'backlog');
     if (!backlog.length) { setTriageError('Nothing in Backlog to triage.'); setTriageProposals([]); return; }
-    if (!agents.length) { setTriageError('Create at least one agent first.'); setTriageProposals([]); return; }
+    if (!workerAgents.length) { setTriageError('Create at least one worker agent first.'); setTriageProposals([]); return; }
     setTriaging(true); setTriageError(null); setTriageProposals([]);
     try {
       const { proposals } = await triageBacklog({
         cards: backlog.map(c => ({ id: c.id, title: c.title, description: c.description, tag: c.tag })),
-        agents: agents.map(a => ({ id: a.id, name: a.name, slug: a.slug, description: a.description })),
+        agents: workerAgents.map(a => ({ id: a.id, name: a.name, slug: a.slug, description: a.description })),
       });
       setTriageProposals(proposals);
     } catch (e: any) {
@@ -299,6 +429,13 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
         </div>
       </header>
 
+      <MaestroControls
+        state={maestro}
+        agents={agents}
+        onChange={updateMaestro}
+        onTickNow={runTick}
+      />
+
       <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden">
         <div className="h-full flex gap-2 px-3 py-3 min-w-max">
           {COLUMNS.map(col => (
@@ -306,9 +443,16 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
               key={col.id}
               column={col}
               cards={byColumn[col.id]}
-              agents={agents}
+              agents={workerAgents}
               agentById={agentById}
               runs={runs}
+              reviewerMode={maestro.enabled && maestro.reviewMode === 'reviewer-agent' && col.id === 'review'}
+              selectedReviewIds={selectedReviewIds}
+              onToggleReviewSelect={(id) => setSelectedReviewIds(prev => {
+                const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next;
+              })}
+              onApproveSelected={col.id === 'review' ? approveSelectedReview : undefined}
+              reviewBusy={reviewBusy}
               isComposing={composer === col.id}
               composerText={composerText}
               onStartCompose={() => { setComposer(col.id); setComposerText(''); }}
@@ -350,7 +494,7 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
         {editing && (
           <CardModal
             card={editing}
-            agents={agents}
+            agents={workerAgents}
             onClose={() => setEditing(null)}
             onSave={patch => { updateCard(editing.id, patch); setEditing({ ...editing, ...patch }); }}
             onDelete={() => { deleteCard(editing.id); setEditing(null); }}
@@ -368,7 +512,7 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
           <TriageModal
             proposals={triageProposals}
             cards={board.cards}
-            agents={agents}
+            agents={workerAgents}
             busy={triaging}
             error={triageError}
             onCancel={() => { setTriageProposals(null); setTriageError(null); }}
@@ -386,6 +530,7 @@ function Column({
   onStartCompose, onCancelCompose, onSubmitCompose, onComposerTextChange,
   onCardClick, onAssign, onRun, onCancelRun, onOpenRun,
   onDragStart, onDropOnColumn, onTriage, triaging,
+  reviewerMode, selectedReviewIds, onToggleReviewSelect, onApproveSelected, reviewBusy,
 }: {
   column: { id: ColumnId; label: string; hint: string };
   cards: KanbanCard[];
@@ -407,6 +552,11 @@ function Column({
   onDropOnColumn: (target: ColumnId, beforeId?: string) => void;
   onTriage?: () => void;
   triaging?: boolean;
+  reviewerMode?: boolean;
+  selectedReviewIds?: Set<string>;
+  onToggleReviewSelect?: (id: string) => void;
+  onApproveSelected?: () => void;
+  reviewBusy?: boolean;
 }) {
   const [hover, setHover] = useState(false);
   return (
@@ -428,6 +578,17 @@ function Column({
           >
             {triaging ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Wand2 className="w-2.5 h-2.5" />}
             Triage
+          </button>
+        )}
+        {reviewerMode && onApproveSelected && (
+          <button
+            onClick={onApproveSelected}
+            disabled={reviewBusy || !selectedReviewIds || selectedReviewIds.size === 0}
+            title="Run the reviewer agent on all selected cards"
+            className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600/30 hover:text-emerald-200 border border-emerald-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {reviewBusy ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <CheckCircle2 className="w-2.5 h-2.5" />}
+            Approve ({selectedReviewIds?.size ?? 0})
           </button>
         )}
         <button
@@ -454,6 +615,9 @@ function Column({
             onOpenRun={() => onOpenRun(card.id)}
             onDragStart={() => onDragStart(card.id)}
             onDropBefore={() => onDropOnColumn(column.id, card.id)}
+            selectable={!!reviewerMode}
+            selected={!!selectedReviewIds?.has(card.id)}
+            onToggleSelect={() => onToggleReviewSelect?.(card.id)}
           />
         ))}
         {isComposing && (
@@ -491,6 +655,7 @@ function Column({
 
 function CardItem({
   card, agents, agent, run, onClick, onAssign, onRun, onCancelRun, onOpenRun, onDragStart, onDropBefore,
+  selectable, selected, onToggleSelect,
 }: {
   card: KanbanCard;
   agents: AgentDef[];
@@ -503,6 +668,9 @@ function CardItem({
   onOpenRun: () => void;
   onDragStart: () => void;
   onDropBefore: () => void;
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
 }) {
   const running = run?.status === 'running';
   const canRun = !!card.assignedAgentId && !running;
@@ -516,7 +684,18 @@ function CardItem({
       className="group rounded-md bg-zinc-900 hover:bg-zinc-900/80 border border-zinc-800 hover:border-zinc-700 p-2 cursor-pointer transition-colors"
     >
       <div className="flex items-start gap-1">
-        <GripVertical className="w-3 h-3 text-zinc-600 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
+        {selectable ? (
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onClick={e => e.stopPropagation()}
+            onChange={() => onToggleSelect?.()}
+            title="Select for reviewer agent"
+            className="mt-0.5 shrink-0 accent-emerald-500"
+          />
+        ) : (
+          <GripVertical className="w-3 h-3 text-zinc-600 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
+        )}
         <div className="flex-1 min-w-0">
           <div className="text-[11px] text-zinc-100 leading-snug">{card.title}</div>
 

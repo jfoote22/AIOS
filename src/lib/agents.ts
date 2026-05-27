@@ -25,6 +25,12 @@ export interface AgentDef {
   workingDir: string;          // absolute path; .md file lands in <workingDir>/.claude/agents/
   /** Color hint for board cards / pickers; falls back to a hash of the slug. */
   color?: string;
+  /**
+   * Orchestra role. 'worker' (default) = assignable to cards. 'maestro' = the
+   * board conductor agent (special — filtered out of worker dropdowns).
+   * 'reviewer' = used for the Reviewer-agent review mode.
+   */
+  role?: 'worker' | 'maestro' | 'reviewer';
   createdAt: number;
   updatedAt: number;
 }

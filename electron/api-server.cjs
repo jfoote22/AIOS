@@ -683,6 +683,83 @@ function start() {
     }
   });
 
+  // --- Review (Maestro self-approve OR a chosen reviewer agent grades a run) ---
+  app.post('/api/agents/review', async (req, res) => {
+    try {
+      const { card, transcript, reviewer, authMode } = req.body || {};
+      if (!card || typeof transcript !== 'string') {
+        return res.status(400).json({ error: 'card and transcript are required.' });
+      }
+
+      const reviewerName = reviewer?.name || 'Maestro';
+      const reviewerExtra = reviewer?.systemPrompt
+        ? `\n\nReviewer character: ${reviewer.systemPrompt.slice(0, 1200)}`
+        : '';
+
+      const systemPrompt = [
+        `You are ${reviewerName}, reviewing a finished agent run on a kanban card.`,
+        'Decide whether the work meets the bar for "Done". Be fair but discerning — partial work, planning-only, or errors should NOT pass.',
+        '',
+        'Return ONLY a JSON object — no prose, no fences:',
+        '{ "pass": boolean, "rationale": "one short sentence (<200 chars)" }',
+        reviewerExtra,
+      ].join('\n');
+
+      const userPrompt = [
+        `## Card`,
+        `Title: ${card.title}`,
+        card.description ? `Description: ${card.description}` : '',
+        '',
+        `## Agent transcript`,
+        transcript.slice(0, 12000),
+        '',
+        'Verdict?',
+      ].filter(Boolean).join('\n');
+
+      let raw = '';
+      if (authMode === 'subscription') {
+        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const modelId = getModelId('claude') || getModelId('anthropic');
+        const stream = query({
+          prompt: userPrompt,
+          options: { model: modelId, systemPrompt, allowedTools: [], permissionMode: 'bypassPermissions' },
+        });
+        for await (const msg of stream) {
+          if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
+            for (const block of msg.message.content) {
+              if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
+            }
+          } else if (msg.type === 'result') break;
+        }
+      } else {
+        const key = getProviderKey('anthropic');
+        if (!key) return res.status(400).json({ error: 'Anthropic key not configured.' });
+        const { default: Anthropic } = await import('@anthropic-ai/sdk');
+        const client = new Anthropic({ apiKey: key });
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-7';
+        const response = await client.messages.create({
+          model: modelId, max_tokens: 1024, system: systemPrompt,
+          messages: [{ role: 'user', content: userPrompt }],
+        });
+        for (const block of response.content || []) {
+          if (block.type === 'text') raw += block.text;
+        }
+      }
+
+      const parsed = extractJsonObject(raw);
+      if (!parsed || typeof parsed.pass !== 'boolean') {
+        return res.status(502).json({ error: 'Reviewer returned no parsable verdict.', raw: raw.slice(0, 800) });
+      }
+      res.json({
+        pass: !!parsed.pass,
+        rationale: typeof parsed.rationale === 'string' ? parsed.rationale.trim() : '',
+      });
+    } catch (err) {
+      console.error('review error:', err);
+      if (!res.headersSent) res.status(500).json({ error: err?.message || 'Review failed.' });
+    }
+  });
+
   // --- OpenAI Codex SDK chat (uses local `codex` CLI ChatGPT-subscription auth) ---
   // Requires Codex CLI installed and signed in: `codex login` (Plus/Pro/Business).
   // The renderer routes here when the user picks "ChatGPT subscription" auth in Models tab.
