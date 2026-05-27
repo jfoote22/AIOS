@@ -65,7 +65,7 @@ export default function App() {
         <TabPanel active={active === 'snipping'}><SnippingTab /></TabPanel>
         <TabPanel active={active === 'secondbrain'}><SecondBrainTab /></TabPanel>
         <TabPanel active={active === 'hermes'}><HermesTab /></TabPanel>
-        <TabPanel active={active === 'terminal'}><TerminalTab /></TabPanel>
+        <TabPanel active={active === 'terminal'}><TerminalTab active={active === 'terminal'} /></TabPanel>
         <TabPanel active={active === 'kanban'}><KanbanTab /></TabPanel>
         <TabPanel active={active === 'settings'}><SettingsTab /></TabPanel>
       </main>

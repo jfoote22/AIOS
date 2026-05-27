@@ -3,9 +3,10 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
   KanbanSquare, Sparkles, Plus, Trash2, X, Loader2, AlertCircle, Tag as TagIcon,
   Clock, Wand2, GripVertical, Bot, Play, CheckCircle2, Square as StopSquare,
+  FolderOpen, Folder, Music, MousePointer2,
 } from 'lucide-react';
 import {
-  loadBoard, saveBoard, newCard, planTasks, COLUMNS,
+  loadBoard, saveBoard, newCard, planTasks, resolveWorkingDir, COLUMNS,
   type KanbanBoard, type KanbanCard, type ColumnId, type Priority,
 } from '../lib/kanban';
 import { type AgentDef } from '../lib/agents';
@@ -32,6 +33,18 @@ const SOURCE_BADGE: Record<'ai' | 'manual', string> = {
   ai:     'bg-indigo-500/20 text-indigo-300 border-indigo-500/30',
   manual: 'bg-zinc-800 text-zinc-400 border-zinc-700',
 };
+
+const COLUMN_IDS = new Set<ColumnId>(COLUMNS.map(c => c.id));
+
+function normalizeBoard(board: KanbanBoard): KanbanBoard {
+  let changed = false;
+  const cards = board.cards.map(card => {
+    if (COLUMN_IDS.has(card.column)) return card;
+    changed = true;
+    return { ...card, column: 'backlog' as ColumnId, updatedAt: Date.now() };
+  });
+  return changed ? { ...board, cards } : board;
+}
 
 export default function KanbanTab() {
   const [agents, setAgents] = useState<AgentDef[]>([]);
@@ -93,7 +106,13 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   const [maestroBootstrapped, setMaestroBootstrapped] = useState(false);
   const reviewedRef = useRef<Set<string>>(new Set()); // run ids we've already auto-reviewed
 
-  useEffect(() => { loadBoard().then(setBoard); }, []);
+  useEffect(() => {
+    loadBoard().then(loaded => {
+      const normalized = normalizeBoard(loaded);
+      setBoard(normalized);
+      if (normalized !== loaded) saveBoard(normalized).catch(e => console.error('kanban repair save failed', e));
+    });
+  }, []);
   useEffect(() => { loadMaestroState().then(setMaestro); }, []);
   // Bootstrap Maestro agent record once agents have loaded
   useEffect(() => {
@@ -175,7 +194,27 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   const runAgentOnCard = async (card: KanbanCard) => {
     if (!card.assignedAgentId) return;
     const agent = agentById.get(card.assignedAgentId);
-    if (!agent) return;
+    if (!agent || !board) return;
+
+    // Resolve effective working dir (card override → agent → board project root).
+    // Refuse the run if nothing is set, rather than silently leaking files into
+    // whatever folder AIOS was launched from.
+    const effectiveCwd = resolveWorkingDir(card, agent, board);
+    if (!effectiveCwd) {
+      setRun(card.id, {
+        id: `run-no-cwd-${Date.now()}`,
+        cardId: card.id,
+        agentId: agent.id,
+        agentSlug: agent.slug,
+        status: 'failed',
+        startedAt: Date.now(),
+        finishedAt: Date.now(),
+        transcript: '',
+        error: 'No working directory. Set a project root in the Orchestra header (📁), give the agent a working dir, or add a card override.',
+      });
+      setOpenRunCardId(card.id);
+      return;
+    }
 
     // Move card to Running immediately so the board reflects intent
     if (card.column !== 'running') {
@@ -188,7 +227,7 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
     try {
       const result = await startRun({
         card: { id: card.id, title: card.title, description: card.description },
-        agent,
+        agent: { ...agent, workingDir: effectiveCwd },
       });
       run = result.run;
       setRun(card.id, run);
@@ -415,10 +454,44 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
       <header className="h-10 px-3 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/40 shrink-0">
         <KanbanSquare className="w-3.5 h-3.5 text-indigo-400" />
         <span className="text-[11px] uppercase tracking-widest text-zinc-300">Board</span>
+
+        {/* Project root inline */}
+        <button
+          onClick={async () => {
+            const picked = await window.aios?.pickFolder({ title: 'Pick the project folder for this board', defaultPath: board.projectRoot });
+            if (picked) persist({ ...board, projectRoot: picked });
+          }}
+          title={board.projectRoot ? `Project root: ${board.projectRoot} — click to change` : 'No project root set — agents will refuse to run. Click to pick.'}
+          className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] min-w-0 max-w-[44ch] border transition-colors ${
+            board.projectRoot
+              ? 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-700'
+              : 'bg-amber-500/10 border-amber-500/40 text-amber-300 hover:bg-amber-500/15'
+          }`}
+        >
+          <Folder className="w-3 h-3 shrink-0" />
+          <span className="font-mono truncate">
+            {board.projectRoot ? board.projectRoot.replace(/\\/g, '/') : 'Pick project folder'}
+          </span>
+          <FolderOpen className="w-3 h-3 shrink-0 opacity-60" />
+        </button>
+
         <span className="text-[10px] text-zinc-500">
           {totals} card{totals === 1 ? '' : 's'} · {unassignedCount} unassigned · {doneCount} done
         </span>
+
         <div className="ml-auto flex items-center gap-1.5">
+          <button
+            onClick={() => updateMaestro({ ...maestro, enabled: !maestro.enabled })}
+            title={maestro.enabled ? 'Maestro is on — autonomous mode. Click to switch to manual.' : 'Manual mode — you assign and run cards. Click to enable Maestro.'}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider border transition-colors ${
+              maestro.enabled
+                ? 'bg-indigo-500/25 text-indigo-100 border-indigo-400/60 shadow-[0_0_0_1px_rgba(99,102,241,0.25)_inset]'
+                : 'bg-zinc-900 text-zinc-400 border-zinc-700 hover:text-zinc-200 hover:border-zinc-600'
+            }`}
+          >
+            {maestro.enabled ? <Music className="w-3 h-3" /> : <MousePointer2 className="w-3 h-3" />}
+            {maestro.enabled ? 'Maestro' : 'Manual'}
+          </button>
           <button
             onClick={() => setPlanOpen(true)}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold uppercase tracking-wider transition-colors"
@@ -429,12 +502,14 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
         </div>
       </header>
 
-      <MaestroControls
-        state={maestro}
-        agents={agents}
-        onChange={updateMaestro}
-        onTickNow={runTick}
-      />
+      {maestro.enabled && (
+        <MaestroControls
+          state={maestro}
+          agents={agents}
+          onChange={updateMaestro}
+          onTickNow={runTick}
+        />
+      )}
 
       <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden">
         <div className="h-full flex gap-2 px-3 py-3 min-w-max">
@@ -461,9 +536,15 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
               onComposerTextChange={setComposerText}
               onCardClick={setEditing}
               onAssign={(cardId, agentId) => {
-                updateCard(cardId, {
+                const card = board.cards.find(c => c.id === cardId);
+                const patch: Partial<KanbanCard> = {
                   assignedAgentId: agentId || undefined,
-                  column: agentId && (byColumn.backlog.find(c => c.id === cardId)) ? 'ready' : undefined as any,
+                };
+                if (agentId && card?.column === 'backlog') {
+                  patch.column = 'ready';
+                }
+                updateCard(cardId, {
+                  ...patch,
                 });
               }}
               onRun={runAgentOnCard}
@@ -856,6 +937,7 @@ function CardModal({
   const [estimate, setEstimate] = useState(card.estimate ?? '');
   const [priority, setPriority] = useState<Priority | ''>(card.priority ?? '');
   const [assignedAgentId, setAssignedAgentId] = useState(card.assignedAgentId ?? '');
+  const [workingDirOverride, setWorkingDirOverride] = useState(card.workingDirOverride ?? '');
 
   const dirty =
     title !== card.title ||
@@ -863,7 +945,8 @@ function CardModal({
     (tag || '') !== (card.tag || '') ||
     (estimate || '') !== (card.estimate || '') ||
     (priority || '') !== (card.priority || '') ||
-    (assignedAgentId || '') !== (card.assignedAgentId || '');
+    (assignedAgentId || '') !== (card.assignedAgentId || '') ||
+    (workingDirOverride || '') !== (card.workingDirOverride || '');
 
   const apply = () => onSave({
     title: title.trim() || card.title,
@@ -872,6 +955,7 @@ function CardModal({
     estimate: estimate.trim() || undefined,
     priority: priority || undefined,
     assignedAgentId: assignedAgentId || undefined,
+    workingDirOverride: workingDirOverride.trim() || undefined,
   });
 
   return (
@@ -948,6 +1032,27 @@ function CardModal({
                   <option value="high">High</option>
                 </select>
               </Field>
+            </div>
+            <div>
+              <div className="text-[9px] uppercase tracking-wider text-zinc-500 mb-1">Working dir override (optional)</div>
+              <div className="flex gap-1">
+                <input
+                  value={workingDirOverride}
+                  onChange={e => setWorkingDirOverride(e.target.value)}
+                  placeholder="Leave blank to inherit from agent / board project root"
+                  className="flex-1 min-w-0 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-[11px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/60 font-mono"
+                />
+                <button
+                  onClick={async () => {
+                    const picked = await window.aios?.pickFolder({ title: 'Pick a subfolder for this card', defaultPath: workingDirOverride || undefined });
+                    if (picked) setWorkingDirOverride(picked);
+                  }}
+                  title="Pick a folder"
+                  className="px-2 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
             {card.parentGoal && (
               <div className="text-[11px] text-zinc-500">

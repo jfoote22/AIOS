@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, globalShortcut, nativeImage, desktopCapturer, ipcMain, screen, safeStorage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, globalShortcut, nativeImage, desktopCapturer, ipcMain, screen, safeStorage, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { getProviderKey, setProviderKey, listConfiguredProviders } = require('./keystore.cjs');
@@ -200,6 +200,18 @@ app.on('will-quit', () => {
 
 ipcMain.handle('app:get-version', () => app.getVersion());
 ipcMain.handle('app:get-api-port', () => apiPort);
+
+// Native folder picker (used by Orchestra: project root, agent working dir, card overrides)
+ipcMain.handle('dialog:pick-folder', async (_e, opts = {}) => {
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  const result = await dialog.showOpenDialog(win, {
+    title: opts.title || 'Select folder',
+    defaultPath: opts.defaultPath || undefined,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
 
 // Multi-provider key handlers
 ipcMain.handle('keys:get', (_e, providerId) => {

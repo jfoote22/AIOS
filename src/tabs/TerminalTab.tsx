@@ -50,7 +50,7 @@ const THEME = {
   brightCyan: '#a5f3fc', brightWhite: '#fafafa',
 };
 
-export default function TerminalTab() {
+export default function TerminalTab({ active }: { active: boolean }) {
   const [layout, setLayout] = useState<LayoutId>('single');
   // slotIndex (0..MAX_SLOTS-1) → Session | null
   const [slots, setSlots] = useState<Array<Session | null>>(() => new Array(MAX_SLOTS).fill(null));
@@ -68,11 +68,11 @@ export default function TerminalTab() {
       .catch(() => setAvailable(false));
   }, []);
 
-  // Auto-spawn the first session once available
+  // Auto-spawn the first session once the terminal tab is visible.
   useEffect(() => {
-    if (available === true && !slotsRef.current[0]) spawnInSlot(0);
+    if (active && available === true && !slotsRef.current[0]) spawnInSlot(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [available]);
+  }, [active, available]);
 
   // Refit all visible terminals on window resize
   useEffect(() => {

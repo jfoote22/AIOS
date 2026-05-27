@@ -1,4 +1,4 @@
-import { Music, Power, UserCheck, Sparkles, ShieldCheck, MousePointer2, Zap, Timer, Play } from 'lucide-react';
+import { UserCheck, Sparkles, ShieldCheck, MousePointer2, Zap, Timer, Play } from 'lucide-react';
 import type { MaestroState, ReviewMode, Cadence } from '../lib/maestro';
 import type { AgentDef } from '../lib/agents';
 
@@ -14,22 +14,6 @@ export default function MaestroControls({
 
   return (
     <div className="flex items-center gap-3 px-3 py-1.5 border-b border-zinc-800 bg-zinc-900/30 shrink-0 flex-wrap">
-      {/* Master toggle */}
-      <button
-        onClick={() => onChange({ ...state, enabled: !state.enabled })}
-        title={state.enabled ? 'Disable Maestro (return to manual mode)' : 'Enable Maestro (autonomous mode)'}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider border transition-colors ${
-          state.enabled
-            ? 'bg-indigo-500/20 text-indigo-200 border-indigo-500/40 hover:bg-indigo-500/30'
-            : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300'
-        }`}
-      >
-        <Music className="w-3 h-3" />
-        Maestro {state.enabled ? 'On' : 'Off'}
-      </button>
-
-      {state.enabled && (
-        <>
           {/* Review mode */}
           <Segmented
             label="Review"
@@ -98,15 +82,6 @@ export default function MaestroControls({
             <Play className="w-3 h-3" />
             Tick now
           </button>
-        </>
-      )}
-
-      {!state.enabled && (
-        <span className="text-[10px] text-zinc-500 inline-flex items-center gap-1">
-          <Power className="w-3 h-3" />
-          Manual mode — assign and run cards by hand.
-        </span>
-      )}
     </div>
   );
 }

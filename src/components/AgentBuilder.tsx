@@ -264,15 +264,25 @@ export default function AgentBuilder({ onAgentsChange }: Props) {
                     <input
                       value={draft.workingDir}
                       onChange={e => onChange('workingDir', e.target.value)}
-                      placeholder="absolute path"
+                      placeholder="Leave blank to inherit from board's project root"
                       className="flex-1 min-w-0 bg-zinc-900 border border-zinc-800 rounded px-2 py-1.5 text-[12px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/60 font-mono"
                     />
                     <button
-                      title="Working dir is where the .claude/agents/<slug>.md file gets written"
-                      className="p-1.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-500"
+                      onClick={async () => {
+                        const picked = await window.aios?.pickFolder({
+                          title: `Working dir for ${draft.name || 'agent'}`,
+                          defaultPath: draft.workingDir || undefined,
+                        });
+                        if (picked) onChange('workingDir', picked);
+                      }}
+                      title="Pick a folder. Overrides the board's project root for this agent."
+                      className="p-1.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 hover:bg-zinc-800"
                     >
                       <FolderOpen className="w-3.5 h-3.5" />
                     </button>
+                  </div>
+                  <div className="text-[10px] text-zinc-600 mt-1">
+                    Empty = inherit board project root. Card-level overrides win over both.
                   </div>
                 </Row>
               </div>

@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('aios', {
   // App info
   getVersion: () => ipcRenderer.invoke('app:get-version'),
   getApiPort: () => ipcRenderer.invoke('app:get-api-port'),
+  // Native folder picker
+  pickFolder: (opts) => ipcRenderer.invoke('dialog:pick-folder', opts || {}),
   // Multi-provider keys
   getProviderKey: (providerId) => ipcRenderer.invoke('keys:get', providerId),
   setProviderKey: (providerId, key) => ipcRenderer.invoke('keys:set', providerId, key),

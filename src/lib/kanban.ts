@@ -34,6 +34,11 @@ export interface KanbanCard {
   source: CardSource;
   parentGoal?: string;       // for AI-generated cards, the goal they came from
   assignedAgentId?: string;  // id of the agent that owns this card
+  /**
+   * Per-card override for where the agent runs. If set, beats agent.workingDir
+   * and board.projectRoot. Use for "this card should be scoped to subfolder X".
+   */
+  workingDirOverride?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -43,6 +48,28 @@ export interface KanbanBoard {
   title: string;
   cards: KanbanCard[];
   updatedAt: number;
+  /**
+   * Default working directory for any agent run on this board. Agents inherit
+   * this when their own workingDir is blank. Card-level workingDirOverride
+   * beats both. Without this set, runs are refused (no implicit AIOS folder).
+   */
+  projectRoot?: string;
+}
+
+/**
+ * Pick the effective working directory for a run, in priority order:
+ *   1. card.workingDirOverride
+ *   2. agent.workingDir
+ *   3. board.projectRoot
+ * Returns null if none are set — caller should refuse to run.
+ */
+export function resolveWorkingDir(
+  card: Pick<KanbanCard, 'workingDirOverride'>,
+  agent: { workingDir?: string },
+  board: Pick<KanbanBoard, 'projectRoot'>,
+): string | null {
+  const pick = card.workingDirOverride?.trim() || agent.workingDir?.trim() || board.projectRoot?.trim() || '';
+  return pick || null;
 }
 
 const BOARD_KEY = 'kanban:default';

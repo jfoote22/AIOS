@@ -10,10 +10,12 @@
 const { ipcMain } = require('electron');
 
 let pty;
+let ptyLoadError = null;
 try {
   pty = require('node-pty');
 } catch (e) {
   console.error('[terminal] node-pty failed to load:', e?.message);
+  ptyLoadError = e;
   pty = null;
 }
 
@@ -38,7 +40,7 @@ function registerTerminalIpc() {
   // for "term:data" / "term:exit" events filtered on that id.
   ipcMain.handle('term:spawn', (event, opts = {}) => {
     if (!pty) {
-      throw new Error('node-pty is not available. The native module failed to load.');
+      throw new Error(`node-pty is not available. ${ptyLoadError?.message ?? 'The native module failed to load.'}`);
     }
     const id = genId();
     const shell = opts.shell || defaultShell();
@@ -48,7 +50,20 @@ function registerTerminalIpc() {
     const cwd = opts.cwd && typeof opts.cwd === 'string' ? opts.cwd : process.env.HOME || process.env.USERPROFILE || process.cwd();
     const env = { ...process.env, ...(opts.env || {}), TERM: 'xterm-256color' };
 
-    const p = pty.spawn(shell, args, { name: 'xterm-256color', cols, rows, cwd, env });
+    let p;
+    try {
+      p = pty.spawn(shell, args, {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd,
+        env,
+        ...(isWindows ? { useConptyDll: true } : {}),
+      });
+    } catch (e) {
+      console.error('[terminal] failed to spawn pty:', e);
+      throw new Error(`Failed to start terminal: ${e?.message ?? String(e)}`);
+    }
     sessions.set(id, { pty: p, cwd, shell });
     ownership.set(id, event.sender);
 
@@ -88,7 +103,7 @@ function registerTerminalIpc() {
     return Array.from(sessions.entries()).map(([id, s]) => ({ id, cwd: s.cwd, shell: s.shell }));
   });
 
-  ipcMain.handle('term:available', () => ({ available: !!pty, platform: process.platform }));
+  ipcMain.handle('term:available', () => ({ available: !!pty, platform: process.platform, error: ptyLoadError?.message ?? null }));
 }
 
 function killSession(id) {

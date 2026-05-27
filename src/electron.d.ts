@@ -9,6 +9,7 @@ declare global {
       onSnipImage: (cb: (payload: { dataUrl: string; targetId: string | null }) => void) => () => void;
       getVersion: () => Promise<string>;
       getApiPort: () => Promise<number>;
+      pickFolder: (opts?: { title?: string; defaultPath?: string }) => Promise<string | null>;
       getProviderKey: (providerId: string) => Promise<string>;
       setProviderKey: (providerId: string, key: string) => Promise<true>;
       clearProviderKey: (providerId: string) => Promise<true>;
