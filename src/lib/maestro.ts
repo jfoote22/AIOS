@@ -1,12 +1,10 @@
 // Maestro: the autonomous conductor for the Orchestra board.
 // When enabled, watches the board and drives cards through their lifecycle.
-// Triage (the one-shot backlog assignment helper) is independent — Maestro
-// respects pre-assigned cards from Triage and never re-assigns them.
 
 import * as db from './db';
 import { apiUrl } from './apiBase';
 import { getAnthropicAuthMode } from './authMode';
-import { newAgent, saveAgent, type AgentDef } from './agents';
+import { BACKLOG_WATCHER_AGENT_SLUG, REVIEW_WATCHER_AGENT_SLUG, newAgent, saveAgent, type AgentDef } from './agents';
 import type { KanbanBoard, KanbanCard } from './kanban';
 import type { AgentRun } from './runs';
 
@@ -83,8 +81,9 @@ export async function ensureMaestroAgent(existing: AgentDef[]): Promise<AgentDef
 
 export type TickAction =
   | { type: 'start-run'; card: KanbanCard; agent: AgentDef }
+  | { type: 'assign-agent'; cardId: string; agentId: string }
   | { type: 'promote-to-ready'; cardId: string }
-  | { type: 'request-review'; cardId: string; transcript: string };
+  | { type: 'request-review'; cardId: string; transcript: string; reviewer?: AgentDef };
 
 export interface TickInput {
   board: KanbanBoard;
@@ -99,11 +98,14 @@ export function tick(input: TickInput): TickAction[] {
 
   const actions: TickAction[] = [];
 
-  // Workers only — Maestro/Reviewer never run cards
+  const hasBacklogWatcher = agents.some(a => a.slug === BACKLOG_WATCHER_AGENT_SLUG);
+
+  // Workers only — Maestro/Reviewer/Watcher agents never run cards
   const workerById = new Map<string, AgentDef>();
   for (const a of agents) {
-    if (a.role !== 'maestro' && a.role !== 'reviewer') workerById.set(a.id, a);
+    if (a.role !== 'maestro' && a.role !== 'reviewer' && a.role !== 'watcher') workerById.set(a.id, a);
   }
+  const workers = Array.from(workerById.values());
 
   // Count what's currently running
   let runningNow = 0;
@@ -114,34 +116,51 @@ export function tick(input: TickInput): TickAction[] {
     }
   }
 
-  // Promote: Backlog (assigned) → Ready
+  // Promote: assigned Backlog cards move to Ready. If the Backlog Watcher
+  // exists, it also keeps unassigned Backlog cards flowing into Ready.
   for (const c of board.cards) {
-    if (c.column === 'backlog' && c.assignedAgentId && workerById.has(c.assignedAgentId)) {
+    if (c.column !== 'backlog') continue;
+    if (c.assignedAgentId && workerById.has(c.assignedAgentId)) {
+      actions.push({ type: 'promote-to-ready', cardId: c.id });
+    } else if (!c.assignedAgentId && hasBacklogWatcher) {
       actions.push({ type: 'promote-to-ready', cardId: c.id });
     }
   }
 
   // Start: Ready → Running, up to parallelism cap
   const ready = board.cards
-    .filter(c => c.column === 'ready' && c.assignedAgentId && workerById.has(c.assignedAgentId))
+    .filter(c => c.column === 'ready')
     .sort((a, b) => a.position - b.position);
   for (const c of ready) {
     if (runningNow >= state.parallelism) break;
-    const agent = workerById.get(c.assignedAgentId!);
+    const agent = c.assignedAgentId && workerById.has(c.assignedAgentId)
+      ? workerById.get(c.assignedAgentId)
+      : chooseWorkerForCard(c, workers);
     if (!agent) continue;
-    actions.push({ type: 'start-run', card: c, agent });
+    if (c.assignedAgentId !== agent.id) {
+      actions.push({ type: 'assign-agent', cardId: c.id, agentId: agent.id });
+    }
+    actions.push({ type: 'start-run', card: { ...c, assignedAgentId: agent.id }, agent });
     runningNow++;
   }
 
-  // Review handling: Self mode auto-approves via LLM (caller drives that flow).
-  // Reviewer-agent mode is batch-driven (user picks cards, clicks button).
-  // Human mode does nothing here.
-  if (state.reviewMode === 'self') {
+  // Review handling: Self mode uses Maestro. Agent mode uses the configured
+  // reviewer, falling back to the built-in Review Watcher when available.
+  const reviewer = state.reviewMode === 'reviewer-agent'
+    ? agents.find(a => a.id === state.reviewerAgentId) || agents.find(a => a.slug === REVIEW_WATCHER_AGENT_SLUG)
+    : undefined;
+  if (state.reviewMode === 'self' || (state.reviewMode === 'reviewer-agent' && reviewer)) {
     for (const c of board.cards) {
       if (c.column === 'review') {
         const r = runs.get(c.id);
-        if (r && r.status === 'succeeded' && r.transcript && !(c as any).maestroReviewed) {
-          actions.push({ type: 'request-review', cardId: c.id, transcript: r.transcript });
+        const reviewedThisRun = c.reviewedRunId === r?.id && (c.reviewState === 'passed' || c.reviewState === 'needs-work');
+        const reviewRecentlyStarted = c.reviewState === 'reviewing' && !!c.reviewedAt && Date.now() - c.reviewedAt < 120000;
+        if (
+          r && r.status === 'succeeded' && r.transcript &&
+          !reviewedThisRun &&
+          !reviewRecentlyStarted
+        ) {
+          actions.push({ type: 'request-review', cardId: c.id, transcript: r.transcript, reviewer });
         }
       }
     }
@@ -153,6 +172,40 @@ export function tick(input: TickInput): TickAction[] {
 // ── Review LLM call ────────────────────────────────────────────────────────
 // Used by both self-approve mode (Maestro reviews) and reviewer-agent mode
 // (user-picked agent reviews). Returns a verdict + short rationale.
+
+function chooseWorkerForCard(card: KanbanCard, workers: AgentDef[]): AgentDef | undefined {
+  if (!workers.length) return undefined;
+
+  const text = `${card.title} ${card.description || ''} ${card.tag || ''}`.toLowerCase();
+  const implementationCard = /\b(add|build|create|implement|wire|fix|update|change|refactor|persist|integrate|delete|remove|render|save|load|write)\b/.test(text)
+    && !/\b(audit|monitor|diagnose|investigate|review|watch|report)\b/.test(text);
+  let best = workers[0];
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const worker of workers) {
+    const profile = `${worker.name} ${worker.slug} ${worker.description} ${worker.systemPrompt}`.toLowerCase();
+    const canEdit = worker.allowedTools.includes('Edit') || worker.allowedTools.includes('Write');
+    let score = 0;
+
+    for (const token of text.split(/[^a-z0-9]+/).filter(t => t.length >= 4)) {
+      if (profile.includes(token)) score += 2;
+    }
+    if (implementationCard && !canEdit) score -= 50;
+    if (implementationCard && canEdit) score += 6;
+    if (/\b(ui|ux|frontend|front-end|react|css|layout|screen|button|modal|component)\b/.test(text) && /front|ui|ux|react|web/.test(profile)) score += 8;
+    if (/\b(api|server|backend|back-end|database|db|sql|route|endpoint|auth)\b/.test(text) && /back|server|api|database/.test(profile)) score += 8;
+    if (/\b(network|dns|proxy|cors|websocket|socket|tls|http|connect|transport)\b/.test(text) && /network|dns|proxy|transport/.test(profile)) score += 8;
+    if (/\b(architecture|refactor|complex|debug|senior|cross-cutting|integration)\b/.test(text) && /senior|programming|architecture/.test(profile)) score += 6;
+    if (implementationCard && /senior|programming|engineer/.test(profile)) score += 8;
+
+    if (score > bestScore) {
+      best = worker;
+      bestScore = score;
+    }
+  }
+
+  return best;
+}
 
 export interface ReviewVerdict {
   pass: boolean;

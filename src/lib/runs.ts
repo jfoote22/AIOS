@@ -145,29 +145,3 @@ export async function* parseRunStream(stream: ReadableStream<Uint8Array>): Async
   }
 }
 
-// ── Triage (Backlog manager agent) ───────────────────────────────────────────
-// Asks Claude to assign the best-fit agent to each backlog card. Returns the
-// proposed assignments — caller decides whether to apply them.
-
-export interface TriageProposal {
-  cardId: string;
-  agentId: string | null;       // null = no good fit (leave unassigned)
-  rationale: string;
-}
-
-export async function triageBacklog(args: {
-  cards: Array<{ id: string; title: string; description?: string; tag?: string }>;
-  agents: Array<{ id: string; name: string; slug: string; description: string }>;
-}): Promise<{ proposals: TriageProposal[] }> {
-  const authMode = await getAnthropicAuthMode();
-  const res = await fetch(apiUrl('/api/agents/triage'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...args, authMode }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-    throw new Error(err.error || `Triage failed (${res.status})`);
-  }
-  return res.json();
-}

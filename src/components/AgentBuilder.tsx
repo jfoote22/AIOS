@@ -4,10 +4,11 @@ import {
   Bot, Plus, Trash2, Sparkles, Loader2, AlertCircle, FolderOpen, FileText, X, Save,
 } from 'lucide-react';
 import {
-  listAgents, saveAgent, deleteAgent, newAgent, draftAgentField, slugify,
+  listAgents, saveAgent, deleteAgent, newAgent, draftAgentField, slugify, ensureBuiltInAgents,
   TOOL_CATALOG, DEFAULT_TOOLS,
   type AgentDef, type DraftField,
 } from '../lib/agents';
+import { loadBoard } from '../lib/kanban';
 import { onAnthropicAuthModeChange } from '../lib/authMode';
 
 interface Props { onAgentsChange?: (agents: AgentDef[]) => void; }
@@ -19,13 +20,18 @@ export default function AgentBuilder({ onAgentsChange }: Props) {
   const [drafting, setDrafting] = useState<DraftField | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [boardProjectRoot, setBoardProjectRoot] = useState('');
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [_authTick, setAuthTick] = useState(0);
 
   useEffect(() => onAnthropicAuthModeChange(() => setAuthTick(t => t + 1)), []);
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+    loadBoard().then(board => setBoardProjectRoot(board.projectRoot?.trim() || '')).catch(() => setBoardProjectRoot(''));
+  }, []);
 
   const refresh = async () => {
+    await ensureBuiltInAgents();
     const list = await listAgents();
     setAgents(list);
     onAgentsChange?.(list);
@@ -115,7 +121,10 @@ export default function AgentBuilder({ onAgentsChange }: Props) {
     if (!draft) return;
     if (!draft.name.trim()) { setError('Name is required.'); return; }
     setError(null);
-    const { filePath, warning } = await saveAgent(draft);
+    const latestBoard = await loadBoard().catch(() => null);
+    const latestProjectRoot = latestBoard?.projectRoot?.trim() || boardProjectRoot;
+    setBoardProjectRoot(latestProjectRoot);
+    const { filePath, warning } = await saveAgent(draft, { fallbackWorkingDir: latestProjectRoot });
     if (warning) setError(warning);
     if (filePath) setToast(`Saved to ${shortPath(filePath)}`);
     else if (!warning) setToast('Saved');
@@ -127,9 +136,10 @@ export default function AgentBuilder({ onAgentsChange }: Props) {
   const onDelete = async () => {
     if (!draft) return;
     if (!confirm(`Delete agent "${draft.name}"? This also removes the .md file.`)) return;
+    const latestBoard = await loadBoard().catch(() => null);
     await deleteAgent(draft.id, {
       alsoDeleteFile: true,
-      workingDir: draft.workingDir,
+      workingDir: draft.workingDir || latestBoard?.projectRoot?.trim() || boardProjectRoot,
       slug: draft.slug,
     });
     setDraft(null);
@@ -271,7 +281,7 @@ export default function AgentBuilder({ onAgentsChange }: Props) {
                       onClick={async () => {
                         const picked = await window.aios?.pickFolder({
                           title: `Working dir for ${draft.name || 'agent'}`,
-                          defaultPath: draft.workingDir || undefined,
+                          defaultPath: draft.workingDir || boardProjectRoot || undefined,
                         });
                         if (picked) onChange('workingDir', picked);
                       }}
@@ -324,11 +334,11 @@ export default function AgentBuilder({ onAgentsChange }: Props) {
                 )}
               </div>
 
-              {draft.workingDir && (
+              {(draft.workingDir || boardProjectRoot) && (
                 <div className="text-[10px] text-zinc-600 flex items-center gap-1">
                   <FileText className="w-3 h-3" />
                   Will write{' '}
-                  <code className="text-zinc-400">{draft.workingDir.replace(/\\/g, '/')}/.claude/agents/{draft.slug}.md</code>
+                  <code className="text-zinc-400">{(draft.workingDir || boardProjectRoot).replace(/\\/g, '/')}/.claude/agents/{draft.slug}.md</code>
                 </div>
               )}
             </>

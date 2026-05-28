@@ -39,6 +39,10 @@ export interface KanbanCard {
    * and board.projectRoot. Use for "this card should be scoped to subfolder X".
    */
   workingDirOverride?: string;
+  reviewState?: 'pending' | 'reviewing' | 'passed' | 'needs-work' | 'error' | 'missing-run';
+  reviewMessage?: string;
+  reviewedRunId?: string;
+  reviewedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -117,16 +121,38 @@ export interface PlannedTask {
   description: string;
   estimate?: string;
   tag?: string;
+  dependsOn?: string[];
 }
 
 export interface PlanRequest {
   goal: string;
   context?: string;        // optional extra context (existing cards, notes, etc.)
+  constraints?: string;
+  acceptance?: string;
+  questions?: string;
   desiredCount?: number;   // soft hint, default 6-8
 }
 
 export interface PlanResult {
   tasks: PlannedTask[];
+}
+
+export interface PlanAssistRequest {
+  goal: string;
+  context?: string;
+  constraints?: string;
+  acceptance?: string;
+  questions?: string;
+  desiredCount?: number;
+}
+
+export interface PlanAssistResult {
+  goal: string;
+  context: string;
+  constraints: string;
+  acceptance: string;
+  questions: string;
+  desiredCount?: number;
 }
 
 export async function planTasks(req: PlanRequest): Promise<PlanResult> {
@@ -137,6 +163,9 @@ export async function planTasks(req: PlanRequest): Promise<PlanResult> {
     body: JSON.stringify({
       goal: req.goal,
       context: req.context,
+      constraints: req.constraints,
+      acceptance: req.acceptance,
+      questions: req.questions,
       desiredCount: req.desiredCount,
       authMode,
     }),
@@ -144,6 +173,20 @@ export async function planTasks(req: PlanRequest): Promise<PlanResult> {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
     throw new Error(err.error || `Planner failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function assistPlanBrief(req: PlanAssistRequest): Promise<PlanAssistResult> {
+  const authMode = await getAnthropicAuthMode();
+  const res = await fetch(apiUrl('/api/kanban/plan-assist'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...req, authMode }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error || `Plan assist failed (${res.status})`);
   }
   return res.json();
 }

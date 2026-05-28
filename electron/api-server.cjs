@@ -231,27 +231,34 @@ function start() {
   // (@ai-sdk/anthropic). Returns parsed JSON, never streams.
   app.post('/api/kanban/plan', async (req, res) => {
     try {
-      const { goal, context, desiredCount, authMode } = req.body || {};
+      const { goal, context, constraints, acceptance, questions, desiredCount, authMode } = req.body || {};
       if (!goal || typeof goal !== 'string' || !goal.trim()) {
         return res.status(400).json({ error: 'Missing or empty `goal`.' });
       }
       const target = Math.max(2, Math.min(20, Number(desiredCount) || 7));
 
       const systemPrompt = [
-        'You are a kanban planning assistant. Given a high-level goal, decompose it into modular, independently actionable subtasks suitable for cards on a kanban board.',
-        'Each subtask must be concrete, has a clear "done" state, and is small enough to complete in one focused work session.',
-        'Avoid generic filler ("plan", "review"). Prefer specific, verb-first titles ("Wire OAuth callback to /api/auth/callback").',
+        'You are a senior delivery planner for an AI-assisted engineering kanban board. Given a planning brief, decompose it into connected, modular cards that build toward the same outcome.',
+        'Each card must have a concise task name and a detailed, plan-oriented description that explains purpose, implementation direction, dependencies, and a clear done state.',
+        'Cards should connect: earlier cards establish foundations, later cards integrate, polish, verify, or document. Avoid isolated chores unless they genuinely unblock the plan.',
+        'Avoid generic filler ("plan", "review"). Prefer specific, verb-first titles ("Create persisted planning brief model", "Wire planner cards into backlog generation").',
         `Aim for roughly ${target} tasks. Order them so earlier tasks unblock later ones.`,
         '',
         'Return ONLY a JSON object matching this schema, with no surrounding prose or markdown fences:',
-        '{ "tasks": [ { "title": string, "description": string, "estimate"?: string, "tag"?: string } ] }',
+        '{ "tasks": [ { "title": string, "description": string, "estimate"?: string, "tag"?: string, "dependsOn"?: string[] } ] }',
+        'description should be 3-6 sentences or concise bullets encoded as plain text. Include acceptance criteria when useful.',
         'estimate is a short free-text size hint like "30 min", "small", "1 day".',
         'tag is a single lowercase token grouping related tasks (e.g. "backend", "ui", "docs").',
+        'dependsOn is an optional list of earlier task titles this card depends on.',
       ].join('\n');
 
-      const userPrompt = context
-        ? `GOAL:\n${goal.trim()}\n\nADDITIONAL CONTEXT:\n${context}`
-        : `GOAL:\n${goal.trim()}`;
+      const userPrompt = [
+        `GOAL:\n${goal.trim()}`,
+        context ? `\nCONTEXT / CURRENT STATE:\n${context}` : '',
+        constraints ? `\nCONSTRAINTS / NON-GOALS:\n${constraints}` : '',
+        acceptance ? `\nDEFINITION OF DONE:\n${acceptance}` : '',
+        questions ? `\nANSWERS / OPEN QUESTIONS:\n${questions}` : '',
+      ].filter(Boolean).join('\n');
 
       let raw = '';
 
@@ -307,6 +314,7 @@ function start() {
           description: typeof t.description === 'string' ? t.description.trim() : '',
           estimate: typeof t.estimate === 'string' ? t.estimate.trim() : undefined,
           tag: typeof t.tag === 'string' ? t.tag.trim().toLowerCase() : undefined,
+          dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.filter(v => typeof v === 'string').map(v => v.trim()).filter(Boolean) : undefined,
         }));
 
       res.json({ tasks });
@@ -314,6 +322,84 @@ function start() {
       console.error('Kanban planner error:', err);
       const message = err?.message || 'Kanban planner failed.';
       if (!res.headersSent) res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/kanban/plan-assist', async (req, res) => {
+    try {
+      const { goal = '', context = '', constraints = '', acceptance = '', questions = '', desiredCount, authMode } = req.body || {};
+      if (!String(goal).trim() && !String(context).trim()) {
+        return res.status(400).json({ error: 'Add at least a goal or context first.' });
+      }
+
+      const systemPrompt = [
+        'You help turn a rough product or engineering idea into a useful planning brief before generating kanban cards.',
+        'Improve what the user has entered. Keep the user intent intact; do not invent product requirements that conflict with the brief.',
+        'Ask only high-leverage questions. If enough is known, include assumptions instead of blocking.',
+        '',
+        'Return ONLY a JSON object matching this schema, with no prose or markdown fences:',
+        '{ "goal": string, "context": string, "constraints": string, "acceptance": string, "questions": string, "desiredCount"?: number }',
+        'questions should be short numbered questions or explicit assumptions. Keep every field practical and ready to feed into a card planner.',
+      ].join('\n');
+
+      const userPrompt = [
+        `Goal:\n${String(goal).trim() || '(blank)'}`,
+        `Current state / notes:\n${String(context).trim() || '(blank)'}`,
+        `Constraints / non-goals:\n${String(constraints).trim() || '(blank)'}`,
+        `Definition of done:\n${String(acceptance).trim() || '(blank)'}`,
+        `Questions / assumptions:\n${String(questions).trim() || '(blank)'}`,
+        `Target card count: ${Number(desiredCount) || 7}`,
+        '',
+        'Refine this into a stronger planning brief now.',
+      ].join('\n\n');
+
+      let raw = '';
+      if (authMode === 'subscription') {
+        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const modelId = getModelId('claude') || getModelId('anthropic');
+        const stream = query({
+          prompt: userPrompt,
+          options: { model: modelId, systemPrompt, allowedTools: [], permissionMode: 'bypassPermissions' },
+        });
+        for await (const msg of stream) {
+          if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
+            for (const block of msg.message.content) {
+              if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
+            }
+          } else if (msg.type === 'result') break;
+        }
+      } else {
+        const key = getProviderKey('anthropic');
+        if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
+        const { default: Anthropic } = await import('@anthropic-ai/sdk');
+        const client = new Anthropic({ apiKey: key });
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-7';
+        const response = await client.messages.create({
+          model: modelId,
+          max_tokens: 3072,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userPrompt }],
+        });
+        for (const block of response.content || []) {
+          if (block.type === 'text') raw += block.text;
+        }
+      }
+
+      const parsed = extractJsonObject(raw);
+      if (!parsed) {
+        return res.status(502).json({ error: 'Claude returned no parsable planning brief.', raw: raw.slice(0, 800) });
+      }
+      res.json({
+        goal: typeof parsed.goal === 'string' ? parsed.goal.trim() : String(goal).trim(),
+        context: typeof parsed.context === 'string' ? parsed.context.trim() : String(context).trim(),
+        constraints: typeof parsed.constraints === 'string' ? parsed.constraints.trim() : String(constraints).trim(),
+        acceptance: typeof parsed.acceptance === 'string' ? parsed.acceptance.trim() : String(acceptance).trim(),
+        questions: typeof parsed.questions === 'string' ? parsed.questions.trim() : String(questions).trim(),
+        desiredCount: Number.isFinite(Number(parsed.desiredCount)) ? Math.max(2, Math.min(20, Number(parsed.desiredCount))) : undefined,
+      });
+    } catch (err) {
+      console.error('Kanban plan assist error:', err);
+      if (!res.headersSent) res.status(500).json({ error: err?.message || 'Plan assist failed.' });
     }
   });
 
@@ -597,90 +683,6 @@ function start() {
     const c = runId ? activeRuns.get(runId) : null;
     if (c) { try { c.abort(); } catch {} }
     res.json({ canceled: !!c });
-  });
-
-  // --- Backlog triage: Manager agent picks an agent per card ---
-  app.post('/api/agents/triage', async (req, res) => {
-    try {
-      const { cards = [], agents = [], authMode } = req.body || {};
-      if (!Array.isArray(cards) || cards.length === 0) {
-        return res.status(400).json({ error: 'No cards to triage.' });
-      }
-      if (!Array.isArray(agents) || agents.length === 0) {
-        return res.status(400).json({ error: 'No agents available. Create at least one agent first.' });
-      }
-
-      const systemPrompt = [
-        'You are the Manager agent of a kanban board. Given a list of unassigned cards and a roster of specialized agents, decide which agent best fits each card.',
-        'Prefer assigning over leaving unassigned, but if no agent is a reasonable fit, set agentId to null and say so in the rationale.',
-        'Each agent has a description that captures its specialty and when to use it. Match on that.',
-        '',
-        'Return ONLY a JSON object matching this schema, with no surrounding prose or markdown fences:',
-        '{ "proposals": [ { "cardId": string, "agentId": string | null, "rationale": string } ] }',
-        'rationale is one short sentence (<140 chars) explaining the choice.',
-      ].join('\n');
-
-      const userPrompt = [
-        '## Available agents',
-        ...agents.map((a, i) => `${i + 1}. id="${a.id}" name="${a.name || a.slug}" — ${a.description || '(no description)'}`),
-        '',
-        '## Backlog cards',
-        ...cards.map((c, i) => `${i + 1}. id="${c.id}" title="${c.title}"${c.tag ? ` tag="${c.tag}"` : ''}${c.description ? `\n   ${c.description.slice(0, 240)}` : ''}`),
-        '',
-        'Assign each card now.',
-      ].join('\n');
-
-      let raw = '';
-      if (authMode === 'subscription') {
-        const { query } = await import('@anthropic-ai/claude-agent-sdk');
-        const modelId = getModelId('claude') || getModelId('anthropic');
-        const stream = query({
-          prompt: userPrompt,
-          options: { model: modelId, systemPrompt, allowedTools: [], permissionMode: 'bypassPermissions' },
-        });
-        for await (const msg of stream) {
-          if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
-            for (const block of msg.message.content) {
-              if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
-            }
-          } else if (msg.type === 'result') break;
-        }
-      } else {
-        const key = getProviderKey('anthropic');
-        if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models or switch to subscription auth.' });
-        const { default: Anthropic } = await import('@anthropic-ai/sdk');
-        const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-7';
-        const response = await client.messages.create({
-          model: modelId, max_tokens: 4096, system: systemPrompt,
-          messages: [{ role: 'user', content: userPrompt }],
-        });
-        for (const block of response.content || []) {
-          if (block.type === 'text') raw += block.text;
-        }
-      }
-
-      const parsed = extractJsonObject(raw);
-      if (!parsed || !Array.isArray(parsed.proposals)) {
-        return res.status(502).json({ error: 'Triage returned no parsable proposals.', raw: raw.slice(0, 800) });
-      }
-
-      // Validate proposals against the input ids; drop unknowns silently.
-      const cardIds = new Set(cards.map(c => c.id));
-      const agentIds = new Set(agents.map(a => a.id));
-      const proposals = parsed.proposals
-        .filter(p => p && cardIds.has(p.cardId))
-        .map(p => ({
-          cardId: String(p.cardId),
-          agentId: p.agentId && agentIds.has(p.agentId) ? String(p.agentId) : null,
-          rationale: typeof p.rationale === 'string' ? p.rationale.trim() : '',
-        }));
-
-      res.json({ proposals });
-    } catch (err) {
-      console.error('triage error:', err);
-      if (!res.headersSent) res.status(500).json({ error: err?.message || 'Triage failed.' });
-    }
   });
 
   // --- Review (Maestro self-approve OR a chosen reviewer agent grades a run) ---

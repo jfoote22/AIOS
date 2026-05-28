@@ -10,7 +10,7 @@ export default function MaestroControls({
   onChange: (next: MaestroState) => void;
   onTickNow: () => void;
 }) {
-  const reviewerCandidates = agents.filter(a => a.role !== 'maestro');
+  const reviewerCandidates = agents.filter(a => a.role !== 'maestro' && a.role !== 'watcher');
 
   return (
     <div className="flex items-center gap-3 px-3 py-1.5 border-b border-zinc-800 bg-zinc-900/30 shrink-0 flex-wrap">

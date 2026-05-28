@@ -6,13 +6,13 @@ import {
   FolderOpen, Folder, Music, MousePointer2,
 } from 'lucide-react';
 import {
-  loadBoard, saveBoard, newCard, planTasks, resolveWorkingDir, COLUMNS,
+  loadBoard, saveBoard, newCard, planTasks, assistPlanBrief, resolveWorkingDir, COLUMNS,
   type KanbanBoard, type KanbanCard, type ColumnId, type Priority,
 } from '../lib/kanban';
-import { type AgentDef } from '../lib/agents';
+import { REVIEW_WATCHER_AGENT_SLUG, type AgentDef } from '../lib/agents';
 import {
-  startRun, cancelRun, recordRun, parseRunStream, triageBacklog,
-  type AgentRun, type TriageProposal,
+  startRun, cancelRun, recordRun, parseRunStream, listRuns,
+  type AgentRun,
 } from '../lib/runs';
 import {
   loadMaestroState, saveMaestroState, ensureMaestroAgent, tick as maestroTick,
@@ -20,7 +20,6 @@ import {
 } from '../lib/maestro';
 import AgentBuilder from '../components/AgentBuilder';
 import AgentRunDrawer from '../components/AgentRunDrawer';
-import TriageModal from '../components/TriageModal';
 import MaestroControls from '../components/MaestroControls';
 
 const PRIORITY_COLOR: Record<Priority, string> = {
@@ -77,8 +76,13 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   const [board, setBoard] = useState<KanbanBoard | null>(null);
   const [planOpen, setPlanOpen] = useState(false);
   const [planGoal, setPlanGoal] = useState('');
+  const [planContext, setPlanContext] = useState('');
+  const [planConstraints, setPlanConstraints] = useState('');
+  const [planAcceptance, setPlanAcceptance] = useState('');
+  const [planQuestions, setPlanQuestions] = useState('');
   const [planCount, setPlanCount] = useState(7);
   const [planBusy, setPlanBusy] = useState(false);
+  const [planAssistBusy, setPlanAssistBusy] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
   const [editing, setEditing] = useState<KanbanCard | null>(null);
   const [composer, setComposer] = useState<ColumnId | null>(null);
@@ -92,17 +96,13 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   const boardRef = useRef<KanbanBoard | null>(null);
   boardRef.current = board;
 
-  // Triage state
-  const [triaging, setTriaging] = useState(false);
-  const [triageProposals, setTriageProposals] = useState<TriageProposal[] | null>(null);
-  const [triageError, setTriageError] = useState<string | null>(null);
-
   // Maestro state
   const [maestro, setMaestro] = useState<MaestroState>(DEFAULT_MAESTRO);
   const maestroRef = useRef<MaestroState>(maestro);
   maestroRef.current = maestro;
   const [selectedReviewIds, setSelectedReviewIds] = useState<Set<string>>(new Set());
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [maestroActivity, setMaestroActivity] = useState({ backlog: false, running: false, review: false });
   const [maestroBootstrapped, setMaestroBootstrapped] = useState(false);
   const reviewedRef = useRef<Set<string>>(new Set()); // run ids we've already auto-reviewed
 
@@ -113,6 +113,10 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
       if (normalized !== loaded) saveBoard(normalized).catch(e => console.error('kanban repair save failed', e));
     });
   }, []);
+  useEffect(() => {
+    hydrateLatestRuns().catch(e => console.warn('load runs failed', e));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => { loadMaestroState().then(setMaestro); }, []);
   // Bootstrap Maestro agent record once agents have loaded
   useEffect(() => {
@@ -121,16 +125,29 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   }, [agents, maestroBootstrapped]);
 
   const updateMaestro = (next: MaestroState) => {
-    setMaestro(next);
-    saveMaestroState(next).catch(e => console.error('maestro save failed', e));
+    let resolved = next;
+    if (next.reviewMode === 'reviewer-agent' && !next.reviewerAgentId) {
+      const reviewer = agents.find(a => a.slug === REVIEW_WATCHER_AGENT_SLUG) || agents.find(a => a.role === 'reviewer');
+      if (reviewer) resolved = { ...next, reviewerAgentId: reviewer.id };
+    }
+    setMaestro(resolved);
+    saveMaestroState(resolved).catch(e => console.error('maestro save failed', e));
   };
 
-  // Workers only — Maestro & Reviewer agents are hidden from card assignment.
-  const workerAgents = useMemo(() => agents.filter(a => a.role !== 'maestro' && a.role !== 'reviewer'), [agents]);
+  // Workers only: Maestro, Reviewer, and Watcher agents are hidden from card assignment.
+  const workerAgents = useMemo(() => agents.filter(a => a.role !== 'maestro' && a.role !== 'reviewer' && a.role !== 'watcher'), [agents]);
   const agentsRef = useRef(agents); agentsRef.current = agents;
   const runsRef = useRef(runs); runsRef.current = runs;
 
+  useEffect(() => {
+    if (!maestro.enabled || maestro.reviewMode !== 'reviewer-agent' || maestro.reviewerAgentId) return;
+    const reviewer = agents.find(a => a.slug === REVIEW_WATCHER_AGENT_SLUG) || agents.find(a => a.role === 'reviewer');
+    if (reviewer) updateMaestro({ ...maestro, reviewerAgentId: reviewer.id });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents, maestro.enabled, maestro.reviewMode, maestro.reviewerAgentId]);
+
   const persist = (next: KanbanBoard) => {
+    boardRef.current = next;
     setBoard(next);
     saveBoard(next).catch(e => console.error('kanban save failed', e));
   };
@@ -154,16 +171,22 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   };
 
   const updateCard = (id: string, patch: Partial<KanbanCard>) => {
-    if (!board) return;
+    const current = boardRef.current;
+    if (!current) return;
     persist({
-      ...board,
-      cards: board.cards.map(c => c.id === id ? { ...c, ...patch, updatedAt: Date.now() } : c),
+      ...current,
+      cards: current.cards.map(c => c.id === id ? { ...c, ...patch, updatedAt: Date.now() } : c),
     });
   };
 
   const deleteCard = (id: string) => {
     if (!board) return;
     persist({ ...board, cards: board.cards.filter(c => c.id !== id) });
+  };
+
+  const deleteDoneCards = () => {
+    if (!board) return;
+    persist({ ...board, cards: board.cards.filter(c => c.column !== 'done') });
   };
 
   const moveCard = (id: string, target: ColumnId, beforeId?: string) => {
@@ -191,15 +214,28 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
     recordRun(next).catch(e => console.error('persist run failed', e));
   };
 
+  const hydrateLatestRuns = async (): Promise<Map<string, AgentRun>> => {
+    const allRuns = await listRuns();
+    const latestByCard = new Map<string, AgentRun>();
+    for (const run of allRuns) {
+      const existing = latestByCard.get(run.cardId);
+      if (!existing || run.startedAt > existing.startedAt) latestByCard.set(run.cardId, run);
+    }
+    runsRef.current = latestByCard;
+    setRuns(latestByCard);
+    return latestByCard;
+  };
+
   const runAgentOnCard = async (card: KanbanCard) => {
     if (!card.assignedAgentId) return;
     const agent = agentById.get(card.assignedAgentId);
-    if (!agent || !board) return;
+    const currentBoard = boardRef.current;
+    if (!agent || !currentBoard) return;
 
     // Resolve effective working dir (card override → agent → board project root).
     // Refuse the run if nothing is set, rather than silently leaking files into
     // whatever folder AIOS was launched from.
-    const effectiveCwd = resolveWorkingDir(card, agent, board);
+    const effectiveCwd = resolveWorkingDir(card, agent, currentBoard);
     if (!effectiveCwd) {
       setRun(card.id, {
         id: `run-no-cwd-${Date.now()}`,
@@ -292,32 +328,71 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
     const b = boardRef.current;
     const s = maestroRef.current;
     if (!b || !s.enabled) return;
-    const actions = maestroTick({ board: b, agents: agentsRef.current, runs: runsRef.current, state: s });
-    for (const action of actions) {
-      if (action.type === 'promote-to-ready') {
-        updateCard(action.cardId, { column: 'ready' });
-      } else if (action.type === 'start-run') {
-        // Fire and forget — runAgentOnCard handles its own state.
-        runAgentOnCard(action.card);
-      } else if (action.type === 'request-review') {
-        // Self-approve only fires here; reviewer-agent mode is batch-driven.
-        const runId = runsRef.current.get(action.cardId)?.id;
-        if (runId && reviewedRef.current.has(runId)) continue;
-        if (runId) reviewedRef.current.add(runId);
-        const card = b.cards.find(c => c.id === action.cardId);
-        if (!card) continue;
-        try {
-          const verdict = await reviewCard({
-            card: { id: card.id, title: card.title, description: card.description },
-            transcript: action.transcript,
+    const hydratedRuns = await hydrateLatestRuns().catch(() => runsRef.current);
+    const actions = maestroTick({ board: b, agents: agentsRef.current, runs: hydratedRuns, state: s });
+    if (!actions.some(a => a.type === 'request-review') && (s.reviewMode === 'self' || s.reviewMode === 'reviewer-agent')) {
+      for (const card of b.cards) {
+        if (card.column !== 'review') continue;
+        const run = hydratedRuns.get(card.id);
+        if (!run || run.status !== 'succeeded' || !run.transcript) {
+          updateCard(card.id, {
+            reviewState: 'missing-run',
+            reviewMessage: run ? `Latest run is ${run.status}; Review Watcher needs a successful run transcript.` : 'No run transcript found for Review Watcher.',
+            reviewedAt: Date.now(),
           });
-          if (verdict.pass) updateCard(card.id, { column: 'done' });
-          // On fail, leave it in Review so the user can intervene.
-        } catch (e) {
-          console.warn('self-review failed', e);
         }
       }
     }
+    if (!actions.length) return;
+    setMaestroActivity({
+      backlog: actions.some(a => a.type === 'promote-to-ready'),
+      running: actions.some(a => a.type === 'assign-agent' || a.type === 'start-run'),
+      review: actions.some(a => a.type === 'request-review'),
+    });
+    for (const action of actions) {
+      if (action.type === 'promote-to-ready') {
+        updateCard(action.cardId, { column: 'ready' });
+      } else if (action.type === 'assign-agent') {
+        updateCard(action.cardId, { assignedAgentId: action.agentId });
+      } else if (action.type === 'start-run') {
+        // Fire and forget — runAgentOnCard handles its own state.
+        runAgentOnCard(action.card);
+        } else if (action.type === 'request-review') {
+          const runId = hydratedRuns.get(action.cardId)?.id;
+          if (runId && reviewedRef.current.has(runId)) continue;
+          const card = b.cards.find(c => c.id === action.cardId);
+          if (!card) continue;
+          updateCard(card.id, {
+            reviewState: 'reviewing',
+            reviewMessage: action.reviewer ? `${action.reviewer.name} is reviewing this card.` : 'Maestro is reviewing this card.',
+            reviewedRunId: runId,
+            reviewedAt: Date.now(),
+          });
+          try {
+            const verdict = await reviewCard({
+              card: { id: card.id, title: card.title, description: card.description },
+              transcript: action.transcript,
+              reviewer: action.reviewer,
+            });
+            if (runId) reviewedRef.current.add(runId);
+            if (verdict.pass) {
+              updateCard(card.id, { column: 'done', reviewState: 'passed', reviewMessage: verdict.rationale, reviewedRunId: runId, reviewedAt: Date.now() });
+            } else {
+              updateCard(card.id, { reviewState: 'needs-work', reviewMessage: verdict.rationale, reviewedRunId: runId, reviewedAt: Date.now() });
+            }
+          } catch (e) {
+            console.warn('review failed', e);
+            updateCard(card.id, {
+              reviewState: 'error',
+              reviewMessage: e instanceof Error ? e.message : String(e),
+              reviewedAt: Date.now(),
+            });
+          }
+        }
+    }
+    window.setTimeout(() => {
+      setMaestroActivity({ backlog: false, running: false, review: false });
+    }, 700);
   };
 
   // Approve selected Review cards using the chosen reviewer agent.
@@ -383,61 +458,65 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [maestro.enabled, maestro.cadence, maestro.heartbeatSec]);
 
-  // ── Backlog triage ─────────────────────────────────────────────────────────
-
-  const openTriage = async () => {
-    if (!board) return;
-    const backlog = board.cards.filter(c => c.column === 'backlog');
-    if (!backlog.length) { setTriageError('Nothing in Backlog to triage.'); setTriageProposals([]); return; }
-    if (!workerAgents.length) { setTriageError('Create at least one worker agent first.'); setTriageProposals([]); return; }
-    setTriaging(true); setTriageError(null); setTriageProposals([]);
-    try {
-      const { proposals } = await triageBacklog({
-        cards: backlog.map(c => ({ id: c.id, title: c.title, description: c.description, tag: c.tag })),
-        agents: workerAgents.map(a => ({ id: a.id, name: a.name, slug: a.slug, description: a.description })),
-      });
-      setTriageProposals(proposals);
-    } catch (e: any) {
-      setTriageError(e?.message ?? String(e));
-    } finally {
-      setTriaging(false);
-    }
-  };
-
-  const applyTriage = (overrides: Record<string, string | null>) => {
-    if (!board) return;
-    const now = Date.now();
-    const next: KanbanBoard = {
-      ...board,
-      cards: board.cards.map(c => {
-        if (c.column !== 'backlog') return c;
-        const agentId = overrides[c.id];
-        if (!agentId) return c; // unassigned stays in backlog
-        return { ...c, assignedAgentId: agentId, column: 'ready', updatedAt: now };
-      }),
-    };
-    persist(next);
-    setTriageProposals(null);
-  };
-
   const runPlanner = async () => {
     if (!planGoal.trim() || !board) return;
     setPlanBusy(true); setPlanError(null);
     try {
-      const { tasks } = await planTasks({ goal: planGoal, desiredCount: planCount });
+      const { tasks } = await planTasks({
+        goal: planGoal,
+        context: planContext,
+        constraints: planConstraints,
+        acceptance: planAcceptance,
+        questions: planQuestions,
+        desiredCount: planCount,
+      });
       if (!tasks.length) throw new Error('Planner returned no tasks.');
       let pos = Date.now();
       const cards = tasks.map(t => newCard({
-        title: t.title, description: t.description || '', tag: t.tag, estimate: t.estimate,
+        title: t.title,
+        description: [
+          t.description || '',
+          t.dependsOn?.length ? `Depends on: ${t.dependsOn.join(', ')}` : '',
+        ].filter(Boolean).join('\n\n'),
+        tag: t.tag,
+        estimate: t.estimate,
         source: 'ai', column: 'backlog', parentGoal: planGoal.trim(), position: pos++,
       }));
       persist({ ...board, cards: [...board.cards, ...cards] });
       setPlanGoal('');
+      setPlanContext('');
+      setPlanConstraints('');
+      setPlanAcceptance('');
+      setPlanQuestions('');
       setPlanOpen(false);
     } catch (e: any) {
       setPlanError(e?.message ?? String(e));
     } finally {
       setPlanBusy(false);
+    }
+  };
+
+  const askClaudeForPlan = async () => {
+    setPlanAssistBusy(true); setPlanError(null);
+    try {
+      const next = await assistPlanBrief({
+        goal: planGoal,
+        context: planContext,
+        constraints: planConstraints,
+        acceptance: planAcceptance,
+        questions: planQuestions,
+        desiredCount: planCount,
+      });
+      setPlanGoal(next.goal || planGoal);
+      setPlanContext(next.context || '');
+      setPlanConstraints(next.constraints || '');
+      setPlanAcceptance(next.acceptance || '');
+      setPlanQuestions(next.questions || '');
+      if (next.desiredCount) setPlanCount(next.desiredCount);
+    } catch (e: any) {
+      setPlanError(e?.message ?? String(e));
+    } finally {
+      setPlanAssistBusy(false);
     }
   };
 
@@ -448,10 +527,12 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   const totals = board.cards.length;
   const doneCount = byColumn.done.length;
   const unassignedCount = board.cards.filter(c => !c.assignedAgentId).length;
+  const activeRunCount = Array.from(runs.values()).filter(r => r.status === 'running').length;
+  const anyAgentActive = activeRunCount > 0 || reviewBusy || maestroActivity.backlog || maestroActivity.running || maestroActivity.review;
 
   return (
     <div className="h-full flex flex-col">
-      <header className="h-10 px-3 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/40 shrink-0">
+      <header className="relative h-10 px-3 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/40 shrink-0">
         <KanbanSquare className="w-3.5 h-3.5 text-indigo-400" />
         <span className="text-[11px] uppercase tracking-widest text-zinc-300">Board</span>
 
@@ -478,6 +559,21 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
         <span className="text-[10px] text-zinc-500">
           {totals} card{totals === 1 ? '' : 's'} · {unassignedCount} unassigned · {doneCount} done
         </span>
+
+        {anyAgentActive && (
+          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-indigo-500/30 bg-indigo-500/10 text-indigo-200 text-[10px] uppercase tracking-wider pointer-events-none">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            <span>
+              {maestroActivity.review || reviewBusy
+                ? 'Review Watcher working'
+                : activeRunCount > 0
+                  ? `${activeRunCount} agent${activeRunCount === 1 ? '' : 's'} running`
+                  : maestroActivity.backlog
+                    ? 'Backlog Watcher working'
+                    : 'Maestro thinking'}
+            </span>
+          </div>
+        )}
 
         <div className="ml-auto flex items-center gap-1.5">
           <button
@@ -521,6 +617,12 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
               agents={workerAgents}
               agentById={agentById}
               runs={runs}
+              activityLabel={
+                col.id === 'backlog' && maestroActivity.backlog ? 'Backlog Watcher' :
+                col.id === 'running' && (activeRunCount > 0 || maestroActivity.running) ? 'Maestro' :
+                col.id === 'review' && (maestroActivity.review || reviewBusy) ? 'Review Watcher' :
+                undefined
+              }
               reviewerMode={maestro.enabled && maestro.reviewMode === 'reviewer-agent' && col.id === 'review'}
               selectedReviewIds={selectedReviewIds}
               onToggleReviewSelect={(id) => setSelectedReviewIds(prev => {
@@ -550,13 +652,13 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
               onRun={runAgentOnCard}
               onCancelRun={cancelCardRun}
               onOpenRun={setOpenRunCardId}
+              onDeleteCard={col.id === 'done' ? deleteCard : undefined}
+              onClearColumn={col.id === 'done' ? deleteDoneCards : undefined}
               onDragStart={(id) => { draggedId.current = id; }}
               onDropOnColumn={(target, beforeId) => {
                 const id = draggedId.current; draggedId.current = null;
                 if (id) moveCard(id, target, beforeId);
               }}
-              onTriage={col.id === 'backlog' ? openTriage : undefined}
-              triaging={col.id === 'backlog' ? triaging : false}
             />
           ))}
         </div>
@@ -566,9 +668,14 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
         {planOpen && (
           <PlanModal
             goal={planGoal} setGoal={setPlanGoal}
+            context={planContext} setContext={setPlanContext}
+            constraints={planConstraints} setConstraints={setPlanConstraints}
+            acceptance={planAcceptance} setAcceptance={setPlanAcceptance}
+            questions={planQuestions} setQuestions={setPlanQuestions}
             count={planCount} setCount={setPlanCount}
-            busy={planBusy} error={planError}
+            busy={planBusy} assistBusy={planAssistBusy} error={planError}
             onCancel={() => { setPlanOpen(false); setPlanError(null); }}
+            onAssist={askClaudeForPlan}
             onRun={runPlanner}
           />
         )}
@@ -589,18 +696,6 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
             onCancel={() => cancelCardRun(openRunCardId)}
           />
         )}
-        {triageProposals && (
-          <TriageModal
-            proposals={triageProposals}
-            cards={board.cards}
-            agents={workerAgents}
-            busy={triaging}
-            error={triageError}
-            onCancel={() => { setTriageProposals(null); setTriageError(null); }}
-            onApply={applyTriage}
-            onRetry={openTriage}
-          />
-        )}
       </AnimatePresence>
     </div>
   );
@@ -608,9 +703,10 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
 
 function Column({
   column, cards, agents, agentById, runs, isComposing, composerText,
+  activityLabel,
   onStartCompose, onCancelCompose, onSubmitCompose, onComposerTextChange,
-  onCardClick, onAssign, onRun, onCancelRun, onOpenRun,
-  onDragStart, onDropOnColumn, onTriage, triaging,
+  onCardClick, onAssign, onRun, onCancelRun, onOpenRun, onDeleteCard, onClearColumn,
+  onDragStart, onDropOnColumn,
   reviewerMode, selectedReviewIds, onToggleReviewSelect, onApproveSelected, reviewBusy,
 }: {
   column: { id: ColumnId; label: string; hint: string };
@@ -618,6 +714,7 @@ function Column({
   agents: AgentDef[];
   agentById: Map<string, AgentDef>;
   runs: Map<string, AgentRun>;
+  activityLabel?: string;
   isComposing: boolean;
   composerText: string;
   onStartCompose: () => void;
@@ -629,10 +726,10 @@ function Column({
   onRun: (card: KanbanCard) => void;
   onCancelRun: (cardId: string) => void;
   onOpenRun: (cardId: string) => void;
+  onDeleteCard?: (cardId: string) => void;
+  onClearColumn?: () => void;
   onDragStart: (id: string) => void;
   onDropOnColumn: (target: ColumnId, beforeId?: string) => void;
-  onTriage?: () => void;
-  triaging?: boolean;
   reviewerMode?: boolean;
   selectedReviewIds?: Set<string>;
   onToggleReviewSelect?: (id: string) => void;
@@ -650,16 +747,14 @@ function Column({
       <header className="px-2.5 py-1.5 flex items-center gap-2 border-b border-zinc-800/60" title={column.hint}>
         <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-300">{column.label}</span>
         <span className="text-[9px] text-zinc-500 px-1 py-0.5 rounded bg-zinc-800">{cards.length}</span>
-        {onTriage && (
-          <button
-            onClick={onTriage}
-            disabled={triaging || cards.length === 0}
-            title="Have the Manager agent assign each backlog card to the best-fit agent"
-            className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 hover:text-indigo-200 border border-indigo-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
+        {activityLabel && (
+          <span
+            title={`${activityLabel} is working`}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/25 text-[9px] uppercase tracking-wider text-indigo-200"
           >
-            {triaging ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Wand2 className="w-2.5 h-2.5" />}
-            Triage
-          </button>
+            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+            {activityLabel}
+          </span>
         )}
         {reviewerMode && onApproveSelected && (
           <button
@@ -672,10 +767,21 @@ function Column({
             Approve ({selectedReviewIds?.size ?? 0})
           </button>
         )}
+        {onClearColumn && (
+          <button
+            onClick={onClearColumn}
+            disabled={cards.length === 0}
+            title="Delete all done cards"
+            className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider bg-red-600/15 text-red-300 hover:bg-red-600/25 hover:text-red-200 border border-red-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Trash2 className="w-2.5 h-2.5" />
+            Clear
+          </button>
+        )}
         <button
           onClick={onStartCompose}
           title="Add card"
-          className={`${onTriage ? '' : 'ml-auto'} p-0.5 rounded text-zinc-500 hover:text-white hover:bg-zinc-800`}
+          className={`${reviewerMode || onClearColumn ? '' : 'ml-auto'} p-0.5 rounded text-zinc-500 hover:text-white hover:bg-zinc-800`}
         >
           <Plus className="w-3 h-3" />
         </button>
@@ -696,6 +802,7 @@ function Column({
             onOpenRun={() => onOpenRun(card.id)}
             onDragStart={() => onDragStart(card.id)}
             onDropBefore={() => onDropOnColumn(column.id, card.id)}
+            onDelete={onDeleteCard ? () => onDeleteCard(card.id) : undefined}
             selectable={!!reviewerMode}
             selected={!!selectedReviewIds?.has(card.id)}
             onToggleSelect={() => onToggleReviewSelect?.(card.id)}
@@ -736,7 +843,7 @@ function Column({
 
 function CardItem({
   card, agents, agent, run, onClick, onAssign, onRun, onCancelRun, onOpenRun, onDragStart, onDropBefore,
-  selectable, selected, onToggleSelect,
+  onDelete, selectable, selected, onToggleSelect,
 }: {
   card: KanbanCard;
   agents: AgentDef[];
@@ -749,6 +856,7 @@ function CardItem({
   onOpenRun: () => void;
   onDragStart: () => void;
   onDropBefore: () => void;
+  onDelete?: () => void;
   selectable?: boolean;
   selected?: boolean;
   onToggleSelect?: () => void;
@@ -762,8 +870,17 @@ function CardItem({
       onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
       onDrop={(e) => { e.preventDefault(); e.stopPropagation(); onDropBefore(); }}
       onClick={onClick}
-      className="group rounded-md bg-zinc-900 hover:bg-zinc-900/80 border border-zinc-800 hover:border-zinc-700 p-2 cursor-pointer transition-colors"
+      className="group relative rounded-md bg-zinc-900 hover:bg-zinc-900/80 border border-zinc-800 hover:border-zinc-700 p-2 cursor-pointer transition-colors"
     >
+      {onDelete && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          title="Delete done card"
+          className="absolute top-1 right-1 p-0.5 rounded text-zinc-600 hover:text-red-300 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+        >
+          <X className="w-3 h-3" />
+        </button>
+      )}
       <div className="flex items-start gap-1">
         {selectable ? (
           <input
@@ -778,7 +895,10 @@ function CardItem({
           <GripVertical className="w-3 h-3 text-zinc-600 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
         )}
         <div className="flex-1 min-w-0">
-          <div className="text-[11px] text-zinc-100 leading-snug">{card.title}</div>
+          <div className="flex items-start gap-1.5 text-[11px] text-zinc-100 leading-snug">
+            {running && <Loader2 className="w-3 h-3 mt-0.5 shrink-0 animate-spin text-indigo-300" />}
+            <span className="min-w-0">{card.title}</span>
+          </div>
 
           {/* Agent assignment row */}
           <div className="flex items-center gap-1 mt-1.5" onClick={e => e.stopPropagation()}>
@@ -827,6 +947,25 @@ function CardItem({
             </button>
           )}
 
+          {card.reviewState && card.reviewState !== 'passed' && (
+            <div
+              className={`mt-1.5 flex items-start gap-1 px-1.5 py-1 rounded border text-[9px] leading-snug ${
+                card.reviewState === 'reviewing'
+                  ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-200'
+                  : card.reviewState === 'needs-work'
+                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                    : 'bg-red-500/10 border-red-500/30 text-red-200'
+              }`}
+              title={card.reviewMessage || card.reviewState}
+            >
+              {card.reviewState === 'reviewing' ? <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0 mt-0.5" /> : <AlertCircle className="w-2.5 h-2.5 shrink-0 mt-0.5" />}
+              <span className="min-w-0 line-clamp-2">
+                {card.reviewState === 'needs-work' ? 'Needs work: ' : card.reviewState === 'missing-run' ? 'Review blocked: ' : card.reviewState === 'error' ? 'Review error: ' : ''}
+                {card.reviewMessage || card.reviewState}
+              </span>
+            </div>
+          )}
+
           {(card.tag || card.estimate || card.priority) && (
             <div className="flex flex-wrap items-center gap-1 mt-1.5">
               {card.tag && (
@@ -856,50 +995,106 @@ function CardItem({
 }
 
 function PlanModal({
-  goal, setGoal, count, setCount, busy, error, onCancel, onRun,
+  goal, setGoal, context, setContext, constraints, setConstraints, acceptance, setAcceptance,
+  questions, setQuestions, count, setCount, busy, assistBusy, error, onCancel, onAssist, onRun,
 }: {
   goal: string; setGoal: (s: string) => void;
+  context: string; setContext: (s: string) => void;
+  constraints: string; setConstraints: (s: string) => void;
+  acceptance: string; setAcceptance: (s: string) => void;
+  questions: string; setQuestions: (s: string) => void;
   count: number; setCount: (n: number) => void;
-  busy: boolean; error: string | null;
-  onCancel: () => void; onRun: () => void;
+  busy: boolean; assistBusy: boolean; error: string | null;
+  onCancel: () => void; onAssist: () => void; onRun: () => void;
 }) {
+  const locked = busy || assistBusy;
   return (
     <motion.div
       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-      onClick={busy ? undefined : onCancel}
+      onClick={locked ? undefined : onCancel}
       className="fixed inset-0 z-50 bg-black/90 backdrop-blur-xl overflow-y-auto"
     >
       <div className="min-h-full flex items-start justify-center p-8">
         <motion.div
           initial={{ scale: 0.97, y: 12 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.97, y: 12 }}
           onClick={e => e.stopPropagation()}
-          className="my-auto w-full max-w-lg bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden"
+          className="my-auto w-full max-w-3xl bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden"
         >
           <header className="h-14 px-5 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/30">
             <Sparkles className="w-4 h-4 text-indigo-400" />
             <h3 className="text-sm font-semibold">Plan with AI</h3>
+            <button
+              onClick={onAssist}
+              disabled={locked || (!goal.trim() && !context.trim())}
+              title="Ask Claude to refine the brief before generating cards"
+              className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-violet-600/20 text-violet-200 hover:bg-violet-600/30 border border-violet-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {assistBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+              Ask Claude
+            </button>
           </header>
           <div className="px-5 py-4 space-y-3">
             <div>
-              <label className="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Goal</label>
+              <label className="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Outcome</label>
               <textarea
-                autoFocus value={goal} onChange={e => setGoal(e.target.value)} disabled={busy} rows={5}
-                placeholder='e.g. "Add Stripe checkout to the pricing page and persist subscription tier"'
+                autoFocus value={goal} onChange={e => setGoal(e.target.value)} disabled={locked} rows={3}
+                placeholder='e.g. "Make the Orchestra planner generate connected implementation cards from a richer brief"'
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-[12px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/60 resize-none"
               />
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <PlanField label="Current state / context">
+                <textarea
+                  value={context}
+                  onChange={e => setContext(e.target.value)}
+                  disabled={locked}
+                  rows={5}
+                  placeholder="What exists now, relevant files, current behavior, user pain, prior attempts..."
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-[12px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/60 resize-none"
+                />
+              </PlanField>
+              <PlanField label="Definition of done">
+                <textarea
+                  value={acceptance}
+                  onChange={e => setAcceptance(e.target.value)}
+                  disabled={locked}
+                  rows={5}
+                  placeholder="What should be true when this is finished? Include test, UX, and behavior expectations."
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-[12px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/60 resize-none"
+                />
+              </PlanField>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <PlanField label="Constraints / non-goals">
+                <textarea
+                  value={constraints}
+                  onChange={e => setConstraints(e.target.value)}
+                  disabled={locked}
+                  rows={4}
+                  placeholder="Scope limits, design constraints, files to avoid, compatibility requirements..."
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-[12px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/60 resize-none"
+                />
+              </PlanField>
+              <PlanField label="Questions / assumptions">
+                <textarea
+                  value={questions}
+                  onChange={e => setQuestions(e.target.value)}
+                  disabled={locked}
+                  rows={4}
+                  placeholder="Let Claude add clarifying questions, assumptions, or decisions that shape the card sequence."
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-2 text-[12px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/60 resize-none"
+                />
+              </PlanField>
             </div>
             <div className="flex items-center gap-3">
               <label className="text-[10px] uppercase tracking-wider text-zinc-500">Target count</label>
               <input
                 type="number" min={2} max={20} value={count}
-                onChange={e => setCount(parseInt(e.target.value || '7', 10))} disabled={busy}
+                onChange={e => setCount(parseInt(e.target.value || '7', 10))} disabled={locked}
                 className="w-16 bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1 text-[12px] text-zinc-100 tabular-nums focus:outline-none focus:border-indigo-500/60"
               />
-              <span className="text-[11px] text-zinc-500">cards (soft hint)</span>
+              <span className="text-[11px] text-zinc-500">connected backlog cards</span>
             </div>
-            <p className="text-[11px] text-zinc-500">
-              Generated cards land in <span className="text-zinc-300">Backlog</span>. Assign agents to move them to <span className="text-zinc-300">Ready</span>.
-            </p>
             {error && (
               <div className="flex items-start gap-2 p-2.5 rounded-md bg-red-500/10 border border-red-500/30 text-red-300 text-[12px]">
                 <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -908,9 +1103,9 @@ function PlanModal({
             )}
           </div>
           <footer className="px-5 py-3 border-t border-zinc-800 bg-zinc-900/30 flex justify-end gap-2">
-            <button onClick={onCancel} disabled={busy} className="px-3 py-1.5 rounded-md text-[12px] text-zinc-400 hover:text-white hover:bg-zinc-800 disabled:opacity-50">Cancel</button>
+            <button onClick={onCancel} disabled={locked} className="px-3 py-1.5 rounded-md text-[12px] text-zinc-400 hover:text-white hover:bg-zinc-800 disabled:opacity-50">Cancel</button>
             <button
-              onClick={onRun} disabled={busy || !goal.trim()}
+              onClick={onRun} disabled={locked || !goal.trim()}
               className="px-3 py-1.5 rounded-md text-[12px] font-bold uppercase tracking-wider bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white inline-flex items-center gap-1.5"
             >
               {busy ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Planning…</> : <><Wand2 className="w-3.5 h-3.5" /> Generate cards</>}
@@ -919,6 +1114,15 @@ function PlanModal({
         </motion.div>
       </div>
     </motion.div>
+  );
+}
+
+function PlanField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">{label}</label>
+      {children}
+    </div>
   );
 }
 
