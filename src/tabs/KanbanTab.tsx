@@ -319,6 +319,23 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
     await cancelRun(run.id);
   };
 
+  const sendCardBackToPlanning = (card: KanbanCard, feedback: string, runId?: string) => {
+    const cleanFeedback = feedback.trim() || 'Review Watcher marked this card as needing more planning.';
+    const existing = card.description || '';
+    const nextDescription = existing.includes(cleanFeedback)
+      ? existing
+      : [existing, `Review feedback (${new Date().toLocaleString()}): ${cleanFeedback}`].filter(Boolean).join('\n\n');
+    updateCard(card.id, {
+      column: 'backlog',
+      assignedAgentId: undefined,
+      description: nextDescription,
+      reviewState: 'needs-work',
+      reviewMessage: cleanFeedback,
+      reviewedRunId: runId,
+      reviewedAt: Date.now(),
+    });
+  };
+
   // ── Maestro tick controller ────────────────────────────────────────────────
   // Runs the deterministic state machine and applies whatever actions it
   // emits. Reads through refs so we always see the latest board/runs even
@@ -335,13 +352,19 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
         if (card.column !== 'review') continue;
         const run = hydratedRuns.get(card.id);
         if (!run || run.status !== 'succeeded' || !run.transcript) {
-          updateCard(card.id, {
-            reviewState: 'missing-run',
-            reviewMessage: run ? `Latest run is ${run.status}; Review Watcher needs a successful run transcript.` : 'No run transcript found for Review Watcher.',
-            reviewedAt: Date.now(),
-          });
+          sendCardBackToPlanning(
+            card,
+            run ? `Latest run is ${run.status}; Review Watcher needs a successful run transcript.` : 'No run transcript found for Review Watcher.',
+            run?.id,
+          );
         }
       }
+    }
+    // Sweep: older cards may already be parked with needs-work. Done must mean
+    // passed, so send those back to planning instead of treating them as complete.
+    for (const card of b.cards) {
+      if (card.reviewState !== 'needs-work') continue;
+      sendCardBackToPlanning(card, card.reviewMessage || 'Review Watcher marked this card as needing work.', card.reviewedRunId);
     }
     if (!actions.length) return;
     setMaestroActivity({
@@ -376,9 +399,15 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
             });
             if (runId) reviewedRef.current.add(runId);
             if (verdict.pass) {
-              updateCard(card.id, { column: 'done', reviewState: 'passed', reviewMessage: verdict.rationale, reviewedRunId: runId, reviewedAt: Date.now() });
+              updateCard(card.id, {
+                column: 'done',
+                reviewState: 'passed',
+                reviewMessage: verdict.rationale,
+                reviewedRunId: runId,
+                reviewedAt: Date.now(),
+              });
             } else {
-              updateCard(card.id, { reviewState: 'needs-work', reviewMessage: verdict.rationale, reviewedRunId: runId, reviewedAt: Date.now() });
+              sendCardBackToPlanning(card, verdict.rationale || 'Review Watcher marked this card as needing work.', runId);
             }
           } catch (e) {
             console.warn('review failed', e);
@@ -417,6 +446,7 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
             reviewer,
           });
           if (verdict.pass) updateCard(card.id, { column: 'done' });
+          else sendCardBackToPlanning(card, verdict.rationale || 'Reviewer marked this card as needing more planning.', run.id);
         } catch (e) {
           console.warn('reviewer-agent review failed for', id, e);
         }
@@ -645,6 +675,12 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
                 if (agentId && card?.column === 'backlog') {
                   patch.column = 'ready';
                 }
+                if (agentId && card?.reviewState === 'needs-work') {
+                  patch.reviewState = 'pending';
+                  patch.reviewMessage = undefined;
+                  patch.reviewedRunId = undefined;
+                  patch.reviewedAt = undefined;
+                }
                 updateCard(cardId, {
                   ...patch,
                 });
@@ -684,7 +720,18 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
             card={editing}
             agents={workerAgents}
             onClose={() => setEditing(null)}
-            onSave={patch => { updateCard(editing.id, patch); setEditing({ ...editing, ...patch }); }}
+            onSave={patch => {
+              const clearsReview = editing.reviewState === 'needs-work' && (
+                typeof patch.title === 'string' ||
+                typeof patch.description === 'string' ||
+                !!patch.assignedAgentId
+              );
+              const nextPatch = clearsReview
+                ? { ...patch, reviewState: 'pending' as const, reviewMessage: undefined, reviewedRunId: undefined, reviewedAt: undefined }
+                : patch;
+              updateCard(editing.id, nextPatch);
+              setEditing({ ...editing, ...nextPatch });
+            }}
             onDelete={() => { deleteCard(editing.id); setEditing(null); }}
           />
         )}

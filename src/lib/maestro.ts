@@ -120,6 +120,7 @@ export function tick(input: TickInput): TickAction[] {
   // exists, it also keeps unassigned Backlog cards flowing into Ready.
   for (const c of board.cards) {
     if (c.column !== 'backlog') continue;
+    if (c.reviewState === 'needs-work' || c.reviewState === 'missing-run' || c.reviewState === 'error') continue;
     if (c.assignedAgentId && workerById.has(c.assignedAgentId)) {
       actions.push({ type: 'promote-to-ready', cardId: c.id });
     } else if (!c.assignedAgentId && hasBacklogWatcher) {
@@ -177,12 +178,20 @@ function chooseWorkerForCard(card: KanbanCard, workers: AgentDef[]): AgentDef | 
   if (!workers.length) return undefined;
 
   const text = `${card.title} ${card.description || ''} ${card.tag || ''}`.toLowerCase();
-  const implementationCard = /\b(add|build|create|implement|wire|fix|update|change|refactor|persist|integrate|delete|remove|render|save|load|write)\b/.test(text)
-    && !/\b(audit|monitor|diagnose|investigate|review|watch|report)\b/.test(text);
-  let best = workers[0];
+  // Default to implementation. Only flip to audit-only when the card is *explicitly*
+  // an audit/diagnose/report task and contains no implementation verb.
+  const auditOnlyCard = /\b(audit|diagnose|investigate|monitor|report on|review of|inspect)\b/.test(text)
+    && !/\b(add|build|create|implement|wire|fix|update|change|refactor|persist|integrate|delete|remove|render|save|load|write|ship|expose|hook up)\b/.test(text);
+  const implementationCard = !auditOnlyCard;
+
+  // Implementation cards must go to an Edit/Write-capable worker if any exist.
+  const editCapable = workers.filter(w => w.allowedTools.includes('Edit') || w.allowedTools.includes('Write'));
+  const pool = implementationCard && editCapable.length ? editCapable : workers;
+
+  let best = pool[0];
   let bestScore = Number.NEGATIVE_INFINITY;
 
-  for (const worker of workers) {
+  for (const worker of pool) {
     const profile = `${worker.name} ${worker.slug} ${worker.description} ${worker.systemPrompt}`.toLowerCase();
     const canEdit = worker.allowedTools.includes('Edit') || worker.allowedTools.includes('Write');
     let score = 0;
@@ -190,13 +199,14 @@ function chooseWorkerForCard(card: KanbanCard, workers: AgentDef[]): AgentDef | 
     for (const token of text.split(/[^a-z0-9]+/).filter(t => t.length >= 4)) {
       if (profile.includes(token)) score += 2;
     }
-    if (implementationCard && !canEdit) score -= 50;
-    if (implementationCard && canEdit) score += 6;
+    if (implementationCard && !canEdit) score -= 100;
+    if (implementationCard && canEdit) score += 10;
     if (/\b(ui|ux|frontend|front-end|react|css|layout|screen|button|modal|component)\b/.test(text) && /front|ui|ux|react|web/.test(profile)) score += 8;
     if (/\b(api|server|backend|back-end|database|db|sql|route|endpoint|auth)\b/.test(text) && /back|server|api|database/.test(profile)) score += 8;
     if (/\b(network|dns|proxy|cors|websocket|socket|tls|http|connect|transport)\b/.test(text) && /network|dns|proxy|transport/.test(profile)) score += 8;
     if (/\b(architecture|refactor|complex|debug|senior|cross-cutting|integration)\b/.test(text) && /senior|programming|architecture/.test(profile)) score += 6;
     if (implementationCard && /senior|programming|engineer/.test(profile)) score += 8;
+    if (auditOnlyCard && /monitor|diagnose|network|audit/.test(profile)) score += 10;
 
     if (score > bestScore) {
       best = worker;
