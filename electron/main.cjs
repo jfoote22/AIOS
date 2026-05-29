@@ -30,6 +30,57 @@ let tray = null;
 let pendingCaptureTargetId = null;
 let apiPort = 0;
 
+// Application menu. Even with the bar hidden, this is what supplies the
+// clipboard keyboard accelerators (Ctrl+C/V/X, Select All). Without it,
+// pasting and dictation tools (e.g. Wispr Flow) silently fail in text fields.
+function buildAppMenu() {
+  return Menu.buildFromTemplate([
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'pasteAndMatchStyle' },
+        { role: 'delete' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+      ],
+    },
+    { role: 'windowMenu' },
+  ]);
+}
+
+// Right-click context menu with clipboard actions for editable fields. Gives
+// users a visible Paste even if a keyboard shortcut is intercepted upstream.
+function wireContextMenu(webContents) {
+  webContents.on('context-menu', (_e, params) => {
+    const canPaste = params.editFlags?.canPaste;
+    const items = [];
+    if (params.isEditable || params.selectionText) {
+      if (params.editFlags?.canCut) items.push({ role: 'cut' });
+      if (params.editFlags?.canCopy) items.push({ role: 'copy' });
+      if (params.isEditable) items.push({ role: 'paste', enabled: !!canPaste });
+      if (params.editFlags?.canSelectAll) items.push({ type: 'separator' }, { role: 'selectAll' });
+    }
+    if (items.length) Menu.buildFromTemplate(items).popup({ window: BrowserWindow.fromWebContents(webContents) });
+  });
+}
+
 function createWindow() {
   const winIcon = nativeImage.createFromPath(path.join(__dirname, 'tray-icon@2x.png'));
   mainWindow = new BrowserWindow({
@@ -40,6 +91,7 @@ function createWindow() {
     backgroundColor: '#09090b',
     title: 'AIOS',
     icon: winIcon.isEmpty() ? undefined : winIcon,
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -48,6 +100,11 @@ function createWindow() {
       additionalArguments: [`--api-port=${apiPort}`],
     },
   });
+
+  // Keep the menu bar hidden (clean custom UI) but the clipboard accelerators
+  // from the application menu still fire — Ctrl+V, Ctrl+C, etc.
+  mainWindow.setMenuBarVisibility(false);
+  wireContextMenu(mainWindow.webContents);
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:3000');
@@ -178,6 +235,8 @@ app.whenReady().then(async () => {
 
   terminal.registerTerminalIpc();
 
+  Menu.setApplicationMenu(buildAppMenu());
+
   createWindow();
   createTray();
 
@@ -211,6 +270,24 @@ ipcMain.handle('dialog:pick-folder', async (_e, opts = {}) => {
   });
   if (result.canceled || !result.filePaths.length) return null;
   return result.filePaths[0];
+});
+
+// Native file picker (used by DeepDive research attachments). Returns an array
+// of absolute file paths, or [] if cancelled.
+ipcMain.handle('dialog:pick-files', async (_e, opts = {}) => {
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  const result = await dialog.showOpenDialog(win, {
+    title: opts.title || 'Attach files',
+    properties: ['openFile', 'multiSelections'],
+    filters: opts.filters || [
+      { name: 'Documents', extensions: ['pdf', 'docx', 'xlsx', 'xls', 'pptx', 'txt', 'md', 'markdown', 'csv', 'json', 'rtf'] },
+      { name: 'Code', extensions: ['js', 'ts', 'tsx', 'jsx', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'go', 'rs', 'rb', 'php', 'html', 'css', 'xml', 'yaml', 'yml', 'sql', 'sh'] },
+      { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'tif'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  if (result.canceled || !result.filePaths.length) return [];
+  return result.filePaths;
 });
 
 // Multi-provider key handlers

@@ -25,7 +25,7 @@ export const DEFAULT_MAESTRO: MaestroState = {
   reviewMode: 'human',
   cadence: 'manual',
   heartbeatSec: 30,
-  parallelism: 2,
+  parallelism: 4,
 };
 
 const STATE_KEY = 'maestro:state';

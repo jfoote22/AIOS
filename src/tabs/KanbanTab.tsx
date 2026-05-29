@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
   KanbanSquare, Sparkles, Plus, Trash2, X, Loader2, AlertCircle, Tag as TagIcon,
   Clock, Wand2, GripVertical, Bot, Play, CheckCircle2, Square as StopSquare,
-  FolderOpen, Folder, Music, MousePointer2,
+  FolderOpen, Folder, Music, MousePointer2, Users, PlayCircle,
 } from 'lucide-react';
 import {
   loadBoard, saveBoard, newCard, planTasks, assistPlanBrief, resolveWorkingDir, COLUMNS,
@@ -319,6 +319,26 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
     await cancelRun(run.id);
   };
 
+  // Manual swarm: start agents on every assigned Ready (or assigned Backlog)
+  // card, up to the parallelism cap. Mirrors what Maestro does on a tick, but
+  // fires on demand so you don't need autonomous mode to run things in parallel.
+  const runAllReady = () => {
+    const b = boardRef.current;
+    if (!b) return;
+    const cap = maestroRef.current.parallelism;
+    let runningNow = Array.from(runsRef.current.values()).filter(r => r.status === 'running').length;
+    const candidates = b.cards
+      .filter(c => (c.column === 'ready' || c.column === 'backlog')
+        && !!c.assignedAgentId
+        && runsRef.current.get(c.id)?.status !== 'running')
+      .sort((a, z) => a.position - z.position);
+    for (const c of candidates) {
+      if (runningNow >= cap) break;
+      runAgentOnCard(c);
+      runningNow++;
+    }
+  };
+
   const sendCardBackToPlanning = (card: KanbanCard, feedback: string, runId?: string) => {
     const cleanFeedback = feedback.trim() || 'Review Watcher marked this card as needing more planning.';
     const existing = card.description || '';
@@ -560,6 +580,17 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   const activeRunCount = Array.from(runs.values()).filter(r => r.status === 'running').length;
   const anyAgentActive = activeRunCount > 0 || reviewBusy || maestroActivity.backlog || maestroActivity.running || maestroActivity.review;
 
+  // Swarm bar data: one "lane" per currently-running card, plus the worker
+  // agents that aren't busy, plus how many more we could start right now.
+  const activeLanes = board.cards
+    .filter(c => runs.get(c.id)?.status === 'running')
+    .map(c => ({ card: c, agent: c.assignedAgentId ? agentById.get(c.assignedAgentId) : undefined }));
+  const busyAgentIds = new Set(activeLanes.map(l => l.agent?.id).filter(Boolean) as string[]);
+  const idleWorkerAgents = workerAgents.filter(a => !busyAgentIds.has(a.id));
+  const runnableCount = board.cards.filter(c =>
+    (c.column === 'ready' || c.column === 'backlog') && !!c.assignedAgentId && runs.get(c.id)?.status !== 'running').length;
+  const willStartCount = Math.min(Math.max(0, maestro.parallelism - activeRunCount), runnableCount);
+
   return (
     <div className="h-full flex flex-col">
       <header className="relative h-10 px-3 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/40 shrink-0">
@@ -636,6 +667,18 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
           onTickNow={runTick}
         />
       )}
+
+      <SwarmBar
+        lanes={activeLanes}
+        idleAgents={idleWorkerAgents}
+        parallelism={maestro.parallelism}
+        activeCount={activeRunCount}
+        willStart={willStartCount}
+        onChangeParallelism={(n) => updateMaestro({ ...maestro, parallelism: n })}
+        onRunReady={runAllReady}
+        onOpenRun={setOpenRunCardId}
+        onCancelRun={cancelCardRun}
+      />
 
       <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden">
         <div className="h-full flex gap-2 px-3 py-3 min-w-max">
@@ -744,6 +787,104 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
           />
         )}
       </AnimatePresence>
+    </div>
+  );
+}
+
+// Swarm bar: a board-wide, mode-agnostic strip that makes parallel agent work
+// visible and launchable. Shows the concurrency cap, one live "lane" per
+// running card, the idle worker agents (available capacity), and a one-click
+// "Run Ready" button that fans agents out across assigned cards up to the cap.
+function SwarmBar({
+  lanes, idleAgents, parallelism, activeCount, willStart,
+  onChangeParallelism, onRunReady, onOpenRun, onCancelRun,
+}: {
+  lanes: Array<{ card: KanbanCard; agent?: AgentDef }>;
+  idleAgents: AgentDef[];
+  parallelism: number;
+  activeCount: number;
+  willStart: number;
+  onChangeParallelism: (n: number) => void;
+  onRunReady: () => void;
+  onOpenRun: (cardId: string) => void;
+  onCancelRun: (cardId: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/50 shrink-0">
+      <div className="flex items-center gap-1.5 shrink-0">
+        <Users className="w-3 h-3 text-indigo-400" />
+        <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400">Swarm</span>
+      </div>
+
+      <div
+        className="flex items-center gap-1 shrink-0"
+        title="Max agents working at once — applies to Maestro and to the Run Ready button"
+      >
+        <input
+          type="number" min={1} max={10} value={parallelism}
+          onChange={e => onChangeParallelism(Math.max(1, Math.min(10, parseInt(e.target.value || '1', 10) || 1)))}
+          className="w-11 bg-zinc-900 border border-zinc-800 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 tabular-nums focus:outline-none focus:border-indigo-500/60"
+        />
+        <span className="text-[9px] uppercase tracking-wider text-zinc-500">lanes</span>
+      </div>
+
+      <span className={`text-[10px] tabular-nums shrink-0 ${activeCount > 0 ? 'text-indigo-300' : 'text-zinc-600'}`}>
+        {activeCount}/{parallelism} active
+      </span>
+
+      <div className="h-4 w-px bg-zinc-800 shrink-0" />
+
+      {/* Live lanes + idle agents */}
+      <div className="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto">
+        {lanes.length === 0 && idleAgents.length === 0 && (
+          <span className="text-[10px] text-zinc-600">No worker agents yet — build one on the left.</span>
+        )}
+        {lanes.map(({ card, agent }) => (
+          <div
+            key={card.id}
+            className="flex items-center gap-1 pl-1.5 pr-0.5 py-0.5 rounded-md border border-indigo-500/30 bg-indigo-500/10 text-indigo-200 shrink-0 max-w-[220px]"
+          >
+            <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />
+            <button
+              onClick={() => onOpenRun(card.id)}
+              title={`${agent?.name || agent?.slug || 'agent'} · ${card.title} — open transcript`}
+              className="flex items-center gap-1 min-w-0"
+            >
+              <span className="text-[9px] font-bold uppercase tracking-wider shrink-0">{agent?.name || agent?.slug || 'agent'}</span>
+              <span className="text-[10px] text-indigo-100/70 truncate">{card.title}</span>
+            </button>
+            <button
+              onClick={() => onCancelRun(card.id)}
+              title="Cancel run"
+              className="p-0.5 rounded text-indigo-300/70 hover:text-red-300 hover:bg-red-500/10 shrink-0"
+            >
+              <StopSquare className="w-2.5 h-2.5" />
+            </button>
+          </div>
+        ))}
+        {idleAgents.map(a => (
+          <span
+            key={a.id}
+            title={`${a.name || a.slug} — idle`}
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded-md border border-zinc-800 bg-zinc-900/40 text-zinc-500 shrink-0"
+          >
+            <Bot className="w-2.5 h-2.5" />
+            <span className="text-[9px] uppercase tracking-wider">{a.name || a.slug}</span>
+          </span>
+        ))}
+      </div>
+
+      <button
+        onClick={onRunReady}
+        disabled={willStart === 0}
+        title={willStart === 0
+          ? 'Nothing to start — assign an agent to a Ready/Backlog card, or wait for a lane to free up'
+          : `Start ${willStart} agent${willStart === 1 ? '' : 's'} on Ready cards in parallel`}
+        className="ml-auto shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider border transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600/30 hover:text-emerald-200 border-emerald-500/30"
+      >
+        <PlayCircle className="w-3 h-3" />
+        Run Ready{willStart > 0 ? ` (${willStart})` : ''}
+      </button>
     </div>
   );
 }

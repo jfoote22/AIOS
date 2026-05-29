@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('aios', {
   getApiPort: () => ipcRenderer.invoke('app:get-api-port'),
   // Native folder picker
   pickFolder: (opts) => ipcRenderer.invoke('dialog:pick-folder', opts || {}),
+  // Native multi-file picker (DeepDive research attachments)
+  pickFiles: (opts) => ipcRenderer.invoke('dialog:pick-files', opts || {}),
   // Multi-provider keys
   getProviderKey: (providerId) => ipcRenderer.invoke('keys:get', providerId),
   setProviderKey: (providerId, key) => ipcRenderer.invoke('keys:set', providerId, key),

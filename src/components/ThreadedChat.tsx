@@ -5,9 +5,125 @@ import {
   Search, Link2, Video, FileText, Target, MessageSquare, Scissors, Brain,
   RotateCw, Maximize2, Minimize2, ChevronLeft, ChevronRight, X,
   Eye, EyeOff, Palette, ClipboardList, FileX2, Lightbulb, Sparkles, RefreshCw,
-  ChevronsUp, ChevronsDown,
+  ChevronsUp, ChevronsDown, Globe, Loader2, Paperclip, ExternalLink, PlayCircle, AlertCircle,
 } from 'lucide-react';
 import { apiUrl } from '../lib/apiBase';
+import {
+  type Attachment, type LinkItem, type VideoItem,
+  detectUrls, newAttachmentId, fetchUrlAttachment, fetchFileAttachment, buildSourcesBlock,
+  findLinks, findVideos, formatCount, timeAgo,
+} from '../lib/research';
+
+// Verified results attached to a "Get Links" / "Get Videos" thread.
+interface ThreadResearch {
+  kind: 'links' | 'videos';
+  status: 'loading' | 'ready' | 'error';
+  intro?: string;
+  links?: LinkItem[];
+  videos?: VideoItem[];
+  error?: string;
+}
+
+// Renders verified link/video results (curated intro + cards) for a thread.
+function ResearchResultsPanel({ research, onRetry }: { research: ThreadResearch; onRetry: () => void }) {
+  const isVideos = research.kind === 'videos';
+
+  if (research.status === 'loading') {
+    return (
+      <div className="flex items-center gap-3 text-sm text-zinc-400 bg-zinc-900/60 border border-zinc-800 rounded-xl p-4">
+        <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+        {isVideos ? 'Searching YouTube and ranking by recency & quality…' : 'Searching the web and verifying links…'}
+      </div>
+    );
+  }
+
+  if (research.status === 'error') {
+    return (
+      <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm text-red-300">
+        <div className="flex items-center gap-2 font-semibold mb-1">
+          <AlertCircle className="w-4 h-4" /> Couldn’t fetch {isVideos ? 'videos' : 'links'}
+        </div>
+        <p className="text-red-300/80 text-xs leading-relaxed mb-3">{research.error}</p>
+        <button onClick={onRetry} className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold rounded-lg transition-colors">
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  const links = research.links || [];
+  const videos = research.videos || [];
+  const empty = isVideos ? videos.length === 0 : links.length === 0;
+
+  return (
+    <div className="space-y-3">
+      {research.intro && (
+        <div className="bg-gradient-to-r from-indigo-500/10 to-transparent border-l-4 border-indigo-500/50 rounded-r-lg p-3 text-sm text-zinc-200 leading-relaxed">
+          {research.intro}
+        </div>
+      )}
+
+      {empty && (
+        <div className="text-center text-zinc-500 text-sm py-6">
+          No {isVideos ? 'videos' : 'links'} found for this selection.
+          <button onClick={onRetry} className="ml-2 text-indigo-400 hover:text-indigo-300 underline">Retry</button>
+        </div>
+      )}
+
+      {/* Link cards */}
+      {!isVideos && links.map((l, i) => (
+        <a
+          key={`${l.url}-${i}`}
+          href={l.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="block group bg-zinc-900/70 hover:bg-zinc-800/80 border border-zinc-800 hover:border-indigo-500/40 rounded-xl p-3 transition-all"
+        >
+          <div className="flex items-start gap-2">
+            <Globe className="w-4 h-4 text-indigo-400 mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-zinc-100 group-hover:text-white truncate">{l.title}</span>
+                <ExternalLink className="w-3 h-3 text-zinc-600 group-hover:text-indigo-400 shrink-0" />
+              </div>
+              <div className="text-[11px] text-emerald-400/80 truncate">{l.source}</div>
+              {l.reason && <div className="text-xs text-zinc-400 mt-1 leading-snug line-clamp-2">{l.reason}</div>}
+            </div>
+          </div>
+        </a>
+      ))}
+
+      {/* Video cards */}
+      {isVideos && videos.map((v, i) => (
+        <a
+          key={`${v.videoId}-${i}`}
+          href={v.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex gap-3 group bg-zinc-900/70 hover:bg-zinc-800/80 border border-zinc-800 hover:border-indigo-500/40 rounded-xl p-2.5 transition-all"
+        >
+          <div className="relative shrink-0">
+            {v.thumbnail
+              ? <img src={v.thumbnail} alt="" className="w-32 h-[72px] object-cover rounded-lg bg-zinc-800" />
+              : <div className="w-32 h-[72px] rounded-lg bg-zinc-800 flex items-center justify-center"><PlayCircle className="w-6 h-6 text-zinc-600" /></div>}
+            {v.duration && (
+              <span className="absolute bottom-1 right-1 px-1 py-0.5 bg-black/80 text-white text-[10px] font-medium rounded">{v.duration}</span>
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-zinc-100 group-hover:text-white line-clamp-2 leading-snug">{v.title}</div>
+            <div className="text-[11px] text-zinc-400 mt-1 truncate">{v.channel}</div>
+            <div className="flex items-center gap-2 text-[10px] text-zinc-500 mt-1">
+              {v.viewCount != null && <span>{formatCount(v.viewCount)} views</span>}
+              {v.publishedAt && <><span>•</span><span>{timeAgo(v.publishedAt)}</span></>}
+              {v.likeCount ? <><span>•</span><span>{formatCount(v.likeCount)} likes</span></> : null}
+            </div>
+          </div>
+        </a>
+      ))}
+    </div>
+  );
+}
 import { getCachedModels, onModelsChange, type ModelSlot } from '../lib/models';
 import { getConfigured, onConfiguredChange, type ProviderId } from '../lib/providers';
 import {
@@ -32,6 +148,7 @@ export interface Thread {
   rowId?: number; // Track which row this thread belongs to
   sourceType?: 'main' | 'thread'; // Track if created from main chat or another thread
   actionType?: 'ask' | 'details' | 'simplify' | 'examples' | 'learning' | 'links' | 'videos'; // Track which context action was used
+  research?: ThreadResearch; // Verified links/videos for 'links'/'videos' threads
 }
 
 // Mobile selection state interface
@@ -156,7 +273,103 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     source: string;
   }>>([]);
   const [showLearningModal, setShowLearningModal] = useState<boolean>(false);
-  
+
+  // Research attachments (links/files added as model-agnostic context).
+  // attachmentsRef mirrors state synchronously so submit logic can read the
+  // latest values immediately after awaiting in-flight extractions.
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const attachmentsRef = useRef<Attachment[]>([]);
+  const pendingExtractions = useRef<Map<string, Promise<void>>>(new Map());
+  const [showUrlInput, setShowUrlInput] = useState(false);
+  const [urlInputValue, setUrlInputValue] = useState('');
+
+  const commitAttachments = (next: Attachment[]) => {
+    attachmentsRef.current = next;
+    setAttachments(next);
+  };
+  const upsertAttachment = (id: string, patch: Partial<Attachment>) =>
+    commitAttachments(attachmentsRef.current.map(a => (a.id === id ? { ...a, ...patch } : a)));
+  const removeAttachment = (id: string) => {
+    pendingExtractions.current.delete(id);
+    commitAttachments(attachmentsRef.current.filter(a => a.id !== id));
+  };
+
+  // Add a URL attachment and kick off server-side extraction. Returns once the
+  // attachment has settled (ready/error). De-dupes by source URL.
+  const addUrlAttachment = (url: string): Promise<void> => {
+    const trimmed = url.trim();
+    if (!trimmed) return Promise.resolve();
+    if (attachmentsRef.current.some(a => a.source === trimmed)) return Promise.resolve();
+    const id = newAttachmentId();
+    commitAttachments([
+      ...attachmentsRef.current,
+      { id, kind: 'url', label: trimmed, source: trimmed, status: 'extracting' },
+    ]);
+    const p = (async () => {
+      const result = await fetchUrlAttachment(trimmed);
+      upsertAttachment(id, { ...result, id });
+      pendingExtractions.current.delete(id);
+    })();
+    pendingExtractions.current.set(id, p);
+    return p;
+  };
+
+  // Add a file attachment and kick off server-side extraction. De-dupes by path.
+  const addFileAttachment = (filePath: string): Promise<void> => {
+    if (attachmentsRef.current.some(a => a.source === filePath)) return Promise.resolve();
+    const id = newAttachmentId();
+    const label = filePath.split(/[\\/]/).pop() || filePath;
+    commitAttachments([
+      ...attachmentsRef.current,
+      { id, kind: 'file', label, source: filePath, status: 'extracting' },
+    ]);
+    const p = (async () => {
+      const result = await fetchFileAttachment(filePath);
+      upsertAttachment(id, { ...result, id });
+      pendingExtractions.current.delete(id);
+    })();
+    pendingExtractions.current.set(id, p);
+    return p;
+  };
+
+  // Open the native file picker and attach the chosen files.
+  const handlePickFiles = async () => {
+    if (!window.aios?.pickFiles) return;
+    try {
+      const paths = await window.aios.pickFiles();
+      for (const p of paths) addFileAttachment(p);
+    } catch (e) {
+      console.error('File pick failed:', e);
+    }
+  };
+
+  // Build the outgoing main-chat message: auto-detect any pasted URLs, wait for
+  // all in-flight extractions, then prepend ready (not-yet-injected) sources.
+  const submitMainMessage = async (rawText: string) => {
+    const text = rawText.trim();
+    if (!text) return;
+
+    // Auto-detect URLs the user pasted into the message itself.
+    for (const url of detectUrls(text)) addUrlAttachment(url);
+
+    // Wait for every still-extracting attachment to settle.
+    if (pendingExtractions.current.size > 0) {
+      await Promise.allSettled(Array.from(pendingExtractions.current.values()));
+    }
+
+    const block = buildSourcesBlock(attachmentsRef.current);
+    const injectedIds = attachmentsRef.current
+      .filter(a => a.status === 'ready' && a.text && !a.injected)
+      .map(a => a.id);
+    if (injectedIds.length) {
+      commitAttachments(
+        attachmentsRef.current.map(a => (injectedIds.includes(a.id) ? { ...a, injected: true } : a)),
+      );
+    }
+
+    mainChat.append({ role: 'user', content: block ? `${block}\n${text}` : text });
+  };
+
   // Mobile selection state
   const [mobileSelection, setMobileSelection] = useState<MobileSelection>({
     isActive: false,
@@ -638,6 +851,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       activeThreadId: activeThreadId,
       uiState: uiState, // New: preserve UI state
       learningSnippets: learningSnippets, // Include learning snippets for content selection
+      attachments: attachmentsRef.current, // Research links/files attached as context
     };
   };
 
@@ -670,6 +884,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           sourceType: thread.sourceType || 'main',
           actionType: thread.actionType || 'ask',
           parentThreadId: thread.parentThreadId || undefined,
+          research: thread.research || undefined,
         }));
         
         // Store thread messages to be loaded into chat instances when they're ready
@@ -694,6 +909,9 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           console.log('📚 No learning snippets found in saved state');
           setLearningSnippets([]);
         }
+
+        // Restore research attachments
+        commitAttachments(Array.isArray(state.attachments) ? state.attachments : []);
         
         // Load main messages if available
         if (state.mainMessages && state.mainMessages.length > 0) {
@@ -746,6 +964,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const clearAllAndStartFresh = () => {
     setThreads([]);
     setActiveThreadId(null);
+    pendingExtractions.current.clear();
+    commitAttachments([]);
     setExpandedThread('main');
     setCollapsedRows(new Set());
     setCollapsedContexts(new Set());
@@ -887,6 +1107,25 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     console.log('Context menu should be showing'); // Debug log
   }, []);
 
+  // Run real retrieval for a 'links'/'videos' thread and store verified results
+  // on the thread. Replaces sending a (hallucination-prone) prompt to the model.
+  const runThreadResearch = async (threadId: string, kind: 'links' | 'videos', context: string) => {
+    const patch = (research: ThreadResearch) =>
+      setThreads(prev => prev.map(t => (t.id === threadId ? { ...t, research } : t)));
+    patch({ kind, status: 'loading' });
+    try {
+      if (kind === 'links') {
+        const { intro, items } = await findLinks(context);
+        patch({ kind, status: 'ready', intro, links: items });
+      } else {
+        const { intro, items } = await findVideos(context);
+        patch({ kind, status: 'ready', intro, videos: items });
+      }
+    } catch (e: any) {
+      patch({ kind, status: 'error', error: e?.message || 'Retrieval failed' });
+    }
+  };
+
   const createNewThread = (context: string, autoExpand: boolean = false, autoSend: boolean = false, actionType: 'ask' | 'details' | 'simplify' | 'examples' | 'learning' | 'links' | 'videos' = 'ask') => {
     // Auto-exit fullscreen mode when creating new thread to ensure proper functionality
     const wasInFullscreen = !!fullscreenThread;
@@ -1005,6 +1244,11 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         window.dispatchEvent(event);
       }, baseDelay);
     }
+
+    // "Get links" / "Get videos": run real retrieval instead of prompting a model.
+    if (actionType === 'links' || actionType === 'videos') {
+      runThreadResearch(newThreadId, actionType, context);
+    }
   };
 
   const closeThread = (threadId: string) => {
@@ -1052,14 +1296,17 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         action: 'links',
         icon: <Link2 className="w-3.5 h-3.5 text-white" />,
         label: 'Get links',
-        onClick: () => createNewThread(`Please provide relevant links and resources related to: "${selectedText}". Include authoritative sources, documentation, articles, and useful websites that would help someone learn more about this topic.`, false, true, 'links'),
+        // Real retrieval: pass the raw selection; createNewThread kicks off
+        // grounded web search + verification instead of prompting the model.
+        // No autoExpand/autoSend — those fire model prompts; research replaces that.
+        onClick: () => createNewThread(selectedText, false, false, 'links'),
         colorScheme: getActionColorScheme('links')
       },
       {
         action: 'videos',
         icon: <Video className="w-3.5 h-3.5 text-white" />,
         label: 'Get videos',
-        onClick: () => createNewThread(`Please suggest relevant YouTube videos, tutorials, and video content related to: "${selectedText}". Include educational videos, tutorials, documentaries, and other video resources that would help understand this topic better.`, false, true, 'videos'),
+        onClick: () => createNewThread(selectedText, false, false, 'videos'),
         colorScheme: getActionColorScheme('videos')
       },
       {
@@ -1199,11 +1446,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const handleMainSubmit = (e: any) => {
     e.preventDefault();
     if (!mainChat.input.trim()) return;
-    // Append the user message to the main chat (identical to thread behavior)
-    mainChat.append({
-      role: 'user',
-      content: mainChat.input.trim(),
-    });
+    // Route through submitMainMessage so attachments are injected as context.
+    submitMainMessage(mainChat.input.trim());
     // Clear the input after sending
     mainChat.setInput('');
   };
@@ -1226,11 +1470,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       if (!localInput.trim()) return;
       
       if (!isThread && mainChat) {
-        // Main chat submission
-        mainChat.append({
-          role: 'user',
-          content: localInput.trim()
-        });
+        // Main chat submission — inject any attached research sources as context.
+        submitMainMessage(localInput.trim());
         mainChat.setInput?.('');
       } else if (isThread && threadChat) {
         // Thread chat submission - use the thread's chat instance
@@ -1713,7 +1954,14 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
         {/* Thread Messages */}
         <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-gradient-to-b from-transparent to-zinc-900/10 min-h-0">
-          {threadChat.messages.length === 0 && (
+          {/* Verified link/video results for 'links'/'videos' threads */}
+          {thread.research && (
+            <ResearchResultsPanel
+              research={thread.research}
+              onRetry={() => runThreadResearch(thread.id, thread.research!.kind, thread.selectedContext || thread.title || '')}
+            />
+          )}
+          {!thread.research && threadChat.messages.length === 0 && (
             <div className="text-center text-zinc-500 text-sm py-8">
               <MessageSquare className="w-5 h-5 mx-auto mb-2 text-zinc-600" />
               <div className="text-white">Ask a question about the selected context above</div>
@@ -2273,6 +2521,99 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                 <span className="flex-1">{mainChat.error.message || 'Chat request failed.'}</span>
               </div>
             )}
+            {/* Research attachments bar */}
+            <div className="mx-auto max-w-full mb-3 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setShowUrlInput(v => !v)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors"
+                  title="Attach a web link as research context"
+                >
+                  <Link2 className="w-3.5 h-3.5" /> Attach link
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePickFiles}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors"
+                  title="Attach a document, spreadsheet, PDF, or code file as research context"
+                >
+                  <Paperclip className="w-3.5 h-3.5" /> Attach file
+                </button>
+                <span className="text-[10px] text-zinc-600">
+                  Links are fetched & added as context for any selected model.
+                </span>
+              </div>
+
+              {showUrlInput && (
+                <form
+                  className="flex items-center gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const v = urlInputValue.trim();
+                    if (!v) return;
+                    addUrlAttachment(v.startsWith('http') ? v : `https://${v}`);
+                    setUrlInputValue('');
+                    setShowUrlInput(false);
+                  }}
+                >
+                  <input
+                    type="text"
+                    autoFocus
+                    value={urlInputValue}
+                    onChange={(e) => setUrlInputValue(e.target.value)}
+                    placeholder="https://example.com/article"
+                    className="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                  <button type="submit" className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg transition-colors">
+                    Add
+                  </button>
+                  <button type="button" onClick={() => { setShowUrlInput(false); setUrlInputValue(''); }} className="px-2 py-2 text-zinc-500 hover:text-white transition-colors">
+                    <X className="w-4 h-4" />
+                  </button>
+                </form>
+              )}
+
+              {attachments.length > 0 && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  {attachments.map(att => (
+                    <div
+                      key={att.id}
+                      className={`group flex items-center gap-2 pl-2.5 pr-1.5 py-1.5 rounded-lg border text-xs max-w-[260px] ${
+                        att.status === 'error'
+                          ? 'border-red-500/40 bg-red-500/10 text-red-300'
+                          : att.status === 'ready'
+                            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                            : 'border-zinc-700 bg-zinc-800/60 text-zinc-300'
+                      }`}
+                      title={att.status === 'error' ? att.error : att.source}
+                    >
+                      {att.status === 'extracting'
+                        ? <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" />
+                        : att.kind === 'url'
+                          ? <Globe className="w-3.5 h-3.5 shrink-0" />
+                          : <FileText className="w-3.5 h-3.5 shrink-0" />}
+                      <span className="truncate font-medium">{att.label}</span>
+                      {att.status === 'ready' && att.charCount != null && (
+                        <span className="text-[10px] opacity-70 shrink-0">
+                          {(att.charCount / 1000).toFixed(att.charCount >= 1000 ? 0 : 1)}k{att.truncated ? '+' : ''}
+                        </span>
+                      )}
+                      {att.status === 'error' && <span className="text-[10px] opacity-80 shrink-0">failed</span>}
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(att.id)}
+                        className="p-0.5 rounded hover:bg-black/30 text-current opacity-60 hover:opacity-100 transition-opacity shrink-0"
+                        title="Remove attachment"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div className="mx-auto max-w-full">
               <ChatInput
                 onSubmit={handleMainSubmit}

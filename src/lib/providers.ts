@@ -1,7 +1,7 @@
 // Multi-provider registry. Phase 1: Gemini wired for snippet analysis;
 // OpenAI/Anthropic/Grok/Ollama placeholders ready for Phase 2 (DeepDive chat).
 
-export type ProviderId = 'gemini' | 'openai' | 'anthropic' | 'grok' | 'deepgram' | 'replicate' | 'ollama';
+export type ProviderId = 'gemini' | 'openai' | 'anthropic' | 'grok' | 'deepgram' | 'replicate' | 'ollama' | 'youtube';
 
 export interface ProviderDef {
   id: ProviderId;
@@ -23,6 +23,7 @@ export const PROVIDERS: ProviderDef[] = [
   { id: 'deepgram',  label: 'Deepgram',        keyHint: 'dg_…',   url: 'https://console.deepgram.com/',           defaultModel: 'nova-2' },
   { id: 'replicate', label: 'Replicate',       keyHint: 'r8_…',   url: 'https://replicate.com/account/api-tokens' },
   { id: 'ollama',    label: 'Ollama (local)',  keyHint: 'http://localhost:11434', isUrl: true, url: 'https://ollama.com', defaultModel: 'llama3.2' },
+  { id: 'youtube',   label: 'YouTube Data API', keyHint: 'AIza…', url: 'https://console.cloud.google.com/apis/library/youtube.googleapis.com' },
 ];
 
 export function getProvider(id: ProviderId): ProviderDef | undefined {

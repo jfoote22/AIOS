@@ -15,6 +15,8 @@ const cors = (req, res, next) => {
 
 const { getProviderKey } = require('./keystore.cjs');
 const { getModelId } = require('./modelstore.cjs');
+const extract = require('./extract.cjs');
+const research = require('./research.cjs');
 
 // Dynamic imports for ESM-only ai SDK packages.
 async function loadAi() {
@@ -46,6 +48,77 @@ function streamHandler(buildModel, defaultSystem) {
       }
     }
   };
+}
+
+const VISION_EXT_MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.tiff': 'image/tiff',
+  '.tif': 'image/tiff',
+  '.pdf': 'application/pdf',
+};
+
+const VISION_PROMPT =
+  'Extract ALL readable text from this document/image verbatim. Preserve structure ' +
+  '(headings, lists, and tables as markdown) where possible. If there is no text, ' +
+  'briefly describe the visual content instead. Output only the extracted content — ' +
+  'no preamble, no commentary.';
+
+// Build a vision-based text extractor used for images and scanned PDFs.
+// Prefers Gemini (handles images AND PDFs natively); falls back to OpenAI for
+// images only. Returns null if no vision-capable provider is configured.
+// This is the one extraction path that is NOT the user's chat model — images
+// can't be read by every chat provider, so a fixed extractor is used.
+async function buildVisionExtractor() {
+  const geminiKey = getProviderKey('gemini');
+  if (geminiKey) {
+    const { GoogleGenAI } = await import('@google/genai');
+    const client = new GoogleGenAI({ apiKey: geminiKey });
+    return async (buf, ext) => {
+      const mimeType = VISION_EXT_MIME[ext] || 'application/octet-stream';
+      const result = await client.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [{
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType, data: buf.toString('base64') } },
+            { text: VISION_PROMPT },
+          ],
+        }],
+      });
+      return result.text || '';
+    };
+  }
+
+  const openaiKey = getProviderKey('openai');
+  if (openaiKey) {
+    const OpenAI = (await import('openai')).default;
+    const client = new OpenAI({ apiKey: openaiKey });
+    return async (buf, ext) => {
+      const mimeType = VISION_EXT_MIME[ext];
+      if (!mimeType || mimeType === 'application/pdf') {
+        throw new Error('OpenAI vision fallback supports images only. Configure a Gemini key to read scanned PDFs.');
+      }
+      const dataUrl = `data:${mimeType};base64,${buf.toString('base64')}`;
+      const completion = await client.chat.completions.create({
+        model: getModelId('openai'),
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: VISION_PROMPT },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        }],
+      });
+      return completion.choices?.[0]?.message?.content || '';
+    };
+  }
+
+  return null;
 }
 
 function buildGrokSystemPrompt({ showReasoning, mode }) {
@@ -904,6 +977,72 @@ Be specific and faithful to what is actually visible. Do not invent details. If 
     } catch (e) {
       console.error('Vision OCR error:', e);
       res.status(500).json({ error: e?.message || 'Vision analysis failed' });
+    }
+  });
+
+  // --- DeepDive research: fetch & extract a web page as clean markdown ---
+  // Model-agnostic: extraction happens here, and the renderer injects the
+  // resulting text into the chat context before it reaches any model.
+  app.post('/api/research/fetch-url', async (req, res) => {
+    try {
+      const { url } = req.body || {};
+      if (!url || typeof url !== 'string') {
+        return res.status(400).json({ error: 'url is required' });
+      }
+      const result = await extract.extractUrl(url.trim());
+      res.json(result);
+    } catch (e) {
+      console.error('URL extraction error:', e);
+      res.status(400).json({ error: e?.message || 'Failed to extract URL' });
+    }
+  });
+
+  // --- DeepDive research: extract text from a local file ---
+  app.post('/api/research/extract-file', async (req, res) => {
+    try {
+      const { filePath } = req.body || {};
+      if (!filePath || typeof filePath !== 'string') {
+        return res.status(400).json({ error: 'filePath is required' });
+      }
+      // Vision extractor (Gemini/OpenAI) handles images and scanned PDFs;
+      // null when no vision provider is configured (extractFile then errors
+      // only for image/scanned inputs, not text-bearing files).
+      const visionExtractor = await buildVisionExtractor().catch(() => null);
+      const result = await extract.extractFile(filePath, visionExtractor);
+      res.json(result);
+    } catch (e) {
+      console.error('File extraction error:', e);
+      res.status(400).json({ error: e?.message || 'Failed to extract file' });
+    }
+  });
+
+  // --- DeepDive research: real link search (Gemini grounding + verification) ---
+  app.post('/api/research/find-links', async (req, res) => {
+    try {
+      const { context } = req.body || {};
+      if (!context || typeof context !== 'string') {
+        return res.status(400).json({ error: 'context is required' });
+      }
+      const result = await research.findLinks(context);
+      res.json(result);
+    } catch (e) {
+      console.error('find-links error:', e);
+      res.status(400).json({ error: e?.message || 'Failed to find links' });
+    }
+  });
+
+  // --- DeepDive research: real YouTube video search (Data API, ranked) ---
+  app.post('/api/research/find-videos', async (req, res) => {
+    try {
+      const { context } = req.body || {};
+      if (!context || typeof context !== 'string') {
+        return res.status(400).json({ error: 'context is required' });
+      }
+      const result = await research.findVideos(context);
+      res.json(result);
+    } catch (e) {
+      console.error('find-videos error:', e);
+      res.status(400).json({ error: e?.message || 'Failed to find videos' });
     }
   });
 

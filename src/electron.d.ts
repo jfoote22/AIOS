@@ -10,6 +10,7 @@ declare global {
       getVersion: () => Promise<string>;
       getApiPort: () => Promise<number>;
       pickFolder: (opts?: { title?: string; defaultPath?: string }) => Promise<string | null>;
+      pickFiles: (opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }) => Promise<string[]>;
       getProviderKey: (providerId: string) => Promise<string>;
       setProviderKey: (providerId: string, key: string) => Promise<true>;
       clearProviderKey: (providerId: string) => Promise<true>;

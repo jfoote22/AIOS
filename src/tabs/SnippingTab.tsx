@@ -2,8 +2,15 @@ import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Camera, X, Scissors, Copy, History, Search, Bell, PauseCircle, PlayCircle,
-  MoreVertical, LayoutGrid, List, MessageSquare, Send, Sparkles, Eye
+  MoreVertical, LayoutGrid, List, MessageSquare, Send, Sparkles, Eye,
+  ChevronDown, ChevronRight, GripVertical, Trash2
 } from 'lucide-react';
+import {
+  DndContext, closestCenter, PointerSensor, useSensor, useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import { SortableContext, useSortable, rectSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import * as db from '../lib/db';
 import {
   analyzeSnip, analyzeSnipWith, analyzeText, isGeminiReady, setGeminiKey, onGeminiReadyChange,
@@ -30,12 +37,128 @@ export interface CapturedItem {
   originThreadId?: string;
 }
 
+// Shared pointer sensor: a small drag threshold so clicks on the remove/copy
+// buttons still register as clicks, not drags.
+function useDragSensors() {
+  return useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+}
+
+// --- Sortable tag chips (drag any chip into any slot; the rest trickle over) ---
+function SortableTagChip({ id, onRemove }: { id: string; onRemove: () => void }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
+  return (
+    <span ref={setNodeRef} style={style} {...attributes} {...listeners}
+      className={`group flex items-center gap-1 text-[11px] pl-1.5 pr-2 py-1 bg-indigo-600/10 border border-indigo-500/20 rounded-full text-indigo-300 cursor-grab active:cursor-grabbing select-none ${isDragging ? 'ring-1 ring-indigo-400/60' : ''}`}
+      title="Drag to reorder">
+      <GripVertical className="w-3 h-3 text-indigo-400/40 group-hover:text-indigo-400/80" />
+      {id}
+      <button onPointerDown={(e) => e.stopPropagation()} onClick={onRemove} className="text-indigo-400/60 hover:text-red-400 transition-colors" title="Remove tag"><X className="w-3 h-3" /></button>
+    </span>
+  );
+}
+
+function SortableTags({ tags, onAdd, onRemove, onReorder }: {
+  tags: string[];
+  onAdd: (tag: string) => void;
+  onRemove: (tag: string) => void;
+  onReorder: (from: number, to: number) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const sensors = useDragSensors();
+  const commit = () => { const t = draft.trim(); if (t) { onAdd(t); setDraft(''); } };
+  const onDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (over && active.id !== over.id) {
+      onReorder(tags.indexOf(String(active.id)), tags.indexOf(String(over.id)));
+    }
+  };
+  return (
+    <div>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+        <SortableContext items={tags} strategy={rectSortingStrategy}>
+          <div className="flex flex-wrap gap-2 mb-3">
+            {tags.map(tag => <SortableTagChip key={tag} id={tag} onRemove={() => onRemove(tag)} />)}
+            {tags.length === 0 && <span className="text-[11px] text-zinc-600 italic">No tags yet</span>}
+          </div>
+        </SortableContext>
+      </DndContext>
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(); } }}
+        onBlur={commit}
+        placeholder="Add tag (Enter to confirm)"
+        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
+      />
+    </div>
+  );
+}
+
+// --- Sortable entity "value" blocks — drag any block into any slot in the grid ---
+function SortableEntityCard({ id, ent, onEdit, onRemove, onCopy }: {
+  id: string; ent: Entity;
+  onEdit: (patch: Partial<Entity>) => void;
+  onRemove: () => void;
+  onCopy: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, zIndex: isDragging ? 10 : undefined };
+  return (
+    <div ref={setNodeRef} style={style}
+      className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl group hover:border-indigo-500/50 transition-colors flex items-center gap-2">
+      <button {...attributes} {...listeners} className="cursor-grab active:cursor-grabbing text-zinc-600 hover:text-indigo-400 transition-colors shrink-0 touch-none" title="Drag to reorder"><GripVertical className="w-4 h-4" /></button>
+      <div className="space-y-1 min-w-0 flex-1">
+        <input type="text" value={ent.label} onChange={(e) => onEdit({ label: e.target.value })} placeholder="LABEL"
+          className="w-full bg-transparent text-[9px] font-bold text-zinc-500 uppercase tracking-tighter focus:outline-none focus:text-indigo-400" />
+        <input type="text" value={ent.value} onChange={(e) => onEdit({ value: e.target.value })} placeholder="value"
+          className="w-full bg-transparent text-sm font-mono text-indigo-300 focus:outline-none focus:text-indigo-200" />
+      </div>
+      <button onClick={onCopy} className="p-2 hover:bg-indigo-600/20 rounded-lg text-zinc-500 hover:text-indigo-400 transition-colors shrink-0" title="Copy value"><Copy className="w-4 h-4" /></button>
+      <button onClick={onRemove} className="p-2 hover:bg-red-500/20 rounded-lg text-zinc-500 hover:text-red-400 transition-colors shrink-0" title="Remove entity"><X className="w-4 h-4" /></button>
+    </div>
+  );
+}
+
+function SortableEntities({ entities, onReorder, onEdit, onRemove, onCopy }: {
+  entities: Entity[];
+  onReorder: (from: number, to: number) => void;
+  onEdit: (index: number, patch: Partial<Entity>) => void;
+  onRemove: (index: number) => void;
+  onCopy: (value: string) => void;
+}) {
+  const sensors = useDragSensors();
+  // Positional ids — stable for the duration of a single drag (the list only
+  // changes on drop), which is all dnd-kit needs.
+  const ids = entities.map((_, i) => `ent-${i}`);
+  const onDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (over && active.id !== over.id) {
+      onReorder(ids.indexOf(String(active.id)), ids.indexOf(String(over.id)));
+    }
+  };
+  return (
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+      <SortableContext items={ids} strategy={rectSortingStrategy}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {entities.map((ent, idx) => (
+            <SortableEntityCard key={ids[idx]} id={ids[idx]} ent={ent}
+              onEdit={(patch) => onEdit(idx, patch)} onRemove={() => onRemove(idx)} onCopy={() => onCopy(ent.value)} />
+          ))}
+        </div>
+      </SortableContext>
+    </DndContext>
+  );
+}
+
 export default function SnippingTab() {
   const [view, setView] = useState<'vault' | 'chat'>('vault');
   const [chatHistory, setChatHistory] = useState<(ChatTurn & { citedIds?: string[] })[]>([]);
   const [chatInput, setChatInput] = useState('');
-  const [tagDraft, setTagDraft] = useState('');
   const [textSelection, setTextSelection] = useState('');
+  const [vaultLayout, setVaultLayout] = useState<'grid' | 'list'>('grid');
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const extractedTextRef = useRef<HTMLPreElement | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -398,7 +521,43 @@ export default function SnippingTab() {
     db.setMeta('vault-chat-history', chatHistory).catch(err => console.error('Failed to save chat history:', err));
   }, [chatHistory, chatBusy]);
 
-  useEffect(() => { setTagDraft(''); setTextSelection(''); }, [selectedItem?.id]);
+  useEffect(() => { setTextSelection(''); }, [selectedItem?.id]);
+
+  // Persist the chosen vault layout (grid/list) like the OCR provider.
+  useEffect(() => {
+    db.getMeta<'grid' | 'list'>('vault-layout')
+      .then(v => { if (v === 'grid' || v === 'list') setVaultLayout(v); })
+      .catch(() => {});
+  }, []);
+  const updateLayout = (l: 'grid' | 'list') => {
+    setVaultLayout(l);
+    db.setMeta('vault-layout', l).catch(err => console.error('Failed to save layout:', err));
+  };
+  const toggleRow = (id: string) =>
+    setExpandedRows(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  // Reorder tags within an item (drag-and-drop). Order-only, so no re-embed.
+  const reorderTagsForItem = (id: string, from: number, to: number) => {
+    const item = vault.find(i => i.id === id);
+    if (!item) return;
+    const next = [...item.tags];
+    if (from < 0 || from >= next.length || to < 0 || to >= next.length) return;
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    updateItem(id, { tags: next });
+  };
+
+  // Reorder entity blocks within an item. Entities aren't part of the embed
+  // source, so order changes never need a re-embed.
+  const reorderEntitiesForItem = (id: string, from: number, to: number) => {
+    const item = vault.find(i => i.id === id);
+    if (!item) return;
+    const next = [...item.entities];
+    if (from < 0 || from >= next.length || to < 0 || to >= next.length) return;
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    updateItem(id, { entities: next });
+  };
 
   const categories = Array.from(new Set(vault.map(item => item.category)));
 
@@ -530,26 +689,19 @@ export default function SnippingTab() {
                   </section>
                 )}
 
-                {/* 3. Tags underneath that */}
+                {/* 3. Tags underneath that — drag chips to reorder */}
                 <section>
                   <div className="flex items-center justify-between mb-3">
-                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Tags</p>
+                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Tags <span className="text-zinc-600 normal-case tracking-normal">· drag to reorder</span></p>
                     <span className="text-[10px] text-zinc-600">{selectedItem.tags.length}</span>
                   </div>
-                  <div className="flex flex-wrap gap-2 mb-3">
-                    {selectedItem.tags.map(tag => (
-                      <span key={tag} className="group flex items-center gap-1.5 text-[11px] px-2.5 py-1 bg-indigo-600/10 border border-indigo-500/20 rounded-full text-indigo-300">
-                        {tag}
-                        <button onClick={() => removeTagFromItem(selectedItem.id, tag)} className="text-indigo-400/60 hover:text-red-400 transition-colors" title="Remove tag"><X className="w-3 h-3" /></button>
-                      </span>
-                    ))}
-                    {selectedItem.tags.length === 0 && <span className="text-[11px] text-zinc-600 italic">No tags yet</span>}
-                  </div>
-                  <input type="text" value={tagDraft} onChange={(e) => setTagDraft(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addTagToItem(selectedItem.id, tagDraft); setTagDraft(''); } }}
-                    onBlur={() => { if (tagDraft.trim()) { addTagToItem(selectedItem.id, tagDraft); setTagDraft(''); } }}
-                    placeholder="Add tag (Enter to confirm)"
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all" />
+                  <SortableTags
+                    key={selectedItem.id}
+                    tags={selectedItem.tags}
+                    onAdd={(t) => addTagToItem(selectedItem.id, t)}
+                    onRemove={(t) => removeTagFromItem(selectedItem.id, t)}
+                    onReorder={(from, to) => reorderTagsForItem(selectedItem.id, from, to)}
+                  />
                 </section>
 
                 <section>
@@ -557,31 +709,17 @@ export default function SnippingTab() {
                     <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Extracted Entities</p>
                     <button onClick={() => addEntity(selectedItem.id)} className="text-[10px] px-2 py-1 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded-lg text-indigo-300 font-bold uppercase tracking-widest transition-colors">+ Add</button>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {selectedItem.entities.map((ent, idx) => (
-                      <div key={idx} className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl group hover:border-indigo-500/50 transition-all flex items-center gap-2">
-                        <div className="space-y-1 min-w-0 flex-1">
-                          <input
-                            type="text"
-                            value={ent.label}
-                            onChange={(e) => updateEntity(selectedItem.id, idx, { label: e.target.value })}
-                            placeholder="LABEL"
-                            className="w-full bg-transparent text-[9px] font-bold text-zinc-500 uppercase tracking-tighter focus:outline-none focus:text-indigo-400"
-                          />
-                          <input
-                            type="text"
-                            value={ent.value}
-                            onChange={(e) => updateEntity(selectedItem.id, idx, { value: e.target.value })}
-                            placeholder="value"
-                            className="w-full bg-transparent text-sm font-mono text-indigo-300 focus:outline-none focus:text-indigo-200"
-                          />
-                        </div>
-                        <button onClick={() => copyToClipboard(ent.value)} className="p-2 hover:bg-indigo-600/20 rounded-lg text-zinc-500 hover:text-indigo-400 transition-colors shrink-0" title="Copy value"><Copy className="w-4 h-4" /></button>
-                        <button onClick={() => removeEntity(selectedItem.id, idx)} className="p-2 hover:bg-red-500/20 rounded-lg text-zinc-500 hover:text-red-400 transition-colors shrink-0" title="Remove entity"><X className="w-4 h-4" /></button>
-                      </div>
-                    ))}
-                    {selectedItem.entities.length === 0 && <p className="text-[11px] text-zinc-600 italic col-span-full">No entities yet — click "Add" to create one.</p>}
-                  </div>
+                  {selectedItem.entities.length > 0 ? (
+                    <SortableEntities
+                      entities={selectedItem.entities}
+                      onReorder={(from, to) => reorderEntitiesForItem(selectedItem.id, from, to)}
+                      onEdit={(idx, patch) => updateEntity(selectedItem.id, idx, patch)}
+                      onRemove={(idx) => removeEntity(selectedItem.id, idx)}
+                      onCopy={copyToClipboard}
+                    />
+                  ) : (
+                    <p className="text-[11px] text-zinc-600 italic">No entities yet — click "Add" to create one.</p>
+                  )}
                 </section>
 
                 {selectedItem.chunks && selectedItem.chunks.length > 0 && (
@@ -762,17 +900,24 @@ export default function SnippingTab() {
                   <p className="text-xs text-zinc-500">{activeCategory ? `${filteredVault.length} insights in this vault.` : `Total intelligence gathered: ${vault.length} nuggets.`}</p>
                 </div>
                 <div className="flex items-center gap-2 bg-zinc-900 p-1 rounded-lg border border-zinc-800">
-                  <button className="p-1.5 bg-indigo-600/20 rounded text-indigo-400"><LayoutGrid className="w-4 h-4" /></button>
-                  <button className="p-1.5 hover:bg-zinc-800 rounded text-zinc-500"><List className="w-4 h-4" /></button>
+                  <button onClick={() => updateLayout('grid')} title="Grid view"
+                    className={`p-1.5 rounded transition-colors ${vaultLayout === 'grid' ? 'bg-indigo-600/20 text-indigo-400' : 'text-zinc-500 hover:bg-zinc-800 hover:text-white'}`}>
+                    <LayoutGrid className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => updateLayout('list')} title="Compact list view"
+                    className={`p-1.5 rounded transition-colors ${vaultLayout === 'list' ? 'bg-indigo-600/20 text-indigo-400' : 'text-zinc-500 hover:bg-zinc-800 hover:text-white'}`}>
+                    <List className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
 
               {filteredVault.length > 0 ? (
+                vaultLayout === 'grid' ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8">
                   {filteredVault.map((item) => (
-                    <motion.div key={item.id} layout initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+                    <motion.div key={item.id}
                       onClick={() => setSelectedItem(item)}
-                      className="group bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden hover:border-indigo-500/50 transition-all shadow-2xl flex flex-col cursor-pointer">
+                      className="group bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden hover:border-indigo-500/50 transition-colors shadow-2xl flex flex-col cursor-pointer">
                       <div className="aspect-[16/9] relative overflow-hidden bg-zinc-800">
                         <img src={item.image} alt="Snip" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700" />
                         <div className="absolute top-3 left-3 px-2 py-0.5 bg-black/60 backdrop-blur-xl rounded text-[10px] font-mono font-bold text-indigo-400 border border-white/5">{item.source}</div>
@@ -795,6 +940,87 @@ export default function SnippingTab() {
                     </motion.div>
                   ))}
                 </div>
+                ) : (
+                <div className="space-y-2 max-w-5xl mx-auto">
+                  {filteredVault.map((item) => {
+                    const expanded = expandedRows.has(item.id);
+                    return (
+                      <motion.div key={item.id}
+                        className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden hover:border-indigo-500/40 transition-colors">
+                        {/* Thin row */}
+                        <div className="flex items-center gap-3 p-2.5 cursor-pointer" onClick={() => toggleRow(item.id)}>
+                          <span className="text-zinc-500 shrink-0">{expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</span>
+                          <img src={item.image} alt="Snip" className="w-14 h-9 object-cover rounded-md bg-zinc-800 shrink-0" />
+                          <span className="text-[9px] px-2 py-0.5 bg-indigo-600/10 text-indigo-400 rounded-full font-bold uppercase tracking-tighter border border-indigo-500/20 shrink-0">{item.category}</span>
+                          <span className="text-sm text-zinc-100 font-semibold truncate flex-1 min-w-0">{(item.title && item.title !== 'Analyzing…') ? item.title : (item.summary || 'Untitled capture')}</span>
+                          {item.status === 'analyzing' && <span className="text-[9px] px-2 py-0.5 bg-amber-500/10 text-amber-400 rounded-full font-bold uppercase border border-amber-500/20 animate-pulse shrink-0">Analyzing</span>}
+                          {item.status === 'error' && <span className="text-[9px] px-2 py-0.5 bg-red-500/10 text-red-400 rounded-full font-bold uppercase border border-red-500/20 shrink-0">Error</span>}
+                          {item.tags.length > 0 && <span className="hidden md:inline text-[10px] text-zinc-600 shrink-0">{item.tags.length} tag{item.tags.length === 1 ? '' : 's'}</span>}
+                          <span className="text-[10px] text-zinc-600 shrink-0 flex items-center gap-1"><History className="w-3 h-3" />{new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          <button onClick={(e) => deleteItem(item.id, e)} className="p-1.5 rounded text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-colors shrink-0" title="Delete from vault"><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
+
+                        {/* Expanded detail — reveals all data inline */}
+                        <AnimatePresence initial={false}>
+                          {expanded && (
+                            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden border-t border-zinc-800">
+                              <div className="p-4 grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-5">
+                                <div className="space-y-3">
+                                  <img src={item.image} alt="Capture" className="w-full rounded-lg border border-zinc-800 object-cover" />
+                                  <button onClick={() => setSelectedItem(item)} className="w-full py-2 text-[10px] font-bold uppercase tracking-widest bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded-lg text-indigo-300 transition-colors">Open full editor</button>
+                                </div>
+                                <div className="space-y-4 min-w-0">
+                                  {item.title && item.title !== 'Analyzing…' && <p className="text-base font-bold text-zinc-100">{item.title}</p>}
+                                  <p className="text-sm text-zinc-400 leading-relaxed">{item.summary}</p>
+
+                                  {item.extractedText && (
+                                    <div>
+                                      <div className="flex items-center justify-between mb-1">
+                                        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Extracted Text</p>
+                                        <button onClick={() => copyToClipboard(item.extractedText)} className="text-[10px] text-indigo-400 hover:text-indigo-300 uppercase tracking-widest">Copy</button>
+                                      </div>
+                                      <pre className="text-[11px] text-zinc-300 whitespace-pre-wrap font-mono bg-black/30 border border-zinc-800 rounded-lg p-2 max-h-40 overflow-y-auto">{item.extractedText}</pre>
+                                    </div>
+                                  )}
+
+                                  <div>
+                                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Tags <span className="text-zinc-600 normal-case tracking-normal">· drag to reorder</span></p>
+                                    <SortableTags
+                                      key={item.id}
+                                      tags={item.tags}
+                                      onAdd={(t) => addTagToItem(item.id, t)}
+                                      onRemove={(t) => removeTagFromItem(item.id, t)}
+                                      onReorder={(from, to) => reorderTagsForItem(item.id, from, to)}
+                                    />
+                                  </div>
+
+                                  {item.entities.length > 0 && (
+                                    <div>
+                                      <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Entities <span className="text-zinc-600 normal-case tracking-normal">· drag to reorder</span></p>
+                                      <SortableEntities
+                                        entities={item.entities}
+                                        onReorder={(from, to) => reorderEntitiesForItem(item.id, from, to)}
+                                        onEdit={(idx, patch) => updateEntity(item.id, idx, patch)}
+                                        onRemove={(idx) => removeEntity(item.id, idx)}
+                                        onCopy={copyToClipboard}
+                                      />
+                                    </div>
+                                  )}
+
+                                  <div className="flex flex-wrap gap-4 text-[11px] text-zinc-500 pt-1">
+                                    <span>Category: <span className="text-zinc-300 font-semibold">{item.category}</span></span>
+                                    <span>Source: <span className="text-zinc-300 font-semibold">{item.source}</span></span>
+                                  </div>
+                                </div>
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </motion.div>
+                    );
+                  })}
+                </div>
+                )
               ) : (
                 <div className="h-[50vh] flex flex-col items-center justify-center text-center space-y-6">
                   <div className="w-24 h-24 bg-zinc-900 rounded-full flex items-center justify-center border border-zinc-800 relative">

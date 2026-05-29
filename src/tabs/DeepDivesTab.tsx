@@ -14,6 +14,7 @@ export interface DeepDiveRecord {
   threads: any[];
   selectedModel: string;
   learningSnippets?: any[];
+  attachments?: any[];
   activeThreadId?: string | null;
   timestamp: number;
   updatedAt: number;
@@ -29,6 +30,7 @@ export default function DeepDivesTab() {
   const [isSaving, setIsSaving] = useState(false);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [configured, setConfigured] = useState<Set<ProviderId>>(getConfigured());
+  const [showNewChatConfirm, setShowNewChatConfirm] = useState(false);
 
   useEffect(() => onConfiguredChange(setConfigured), []);
   useEffect(() => { refresh(); }, []);
@@ -74,6 +76,7 @@ export default function DeepDivesTab() {
         threads: state.threads ?? [],
         selectedModel: state.selectedModel ?? 'anthropic',
         learningSnippets: state.learningSnippets ?? [],
+        attachments: state.attachments ?? [],
         activeThreadId: state.activeThreadId ?? null,
         timestamp: currentId ? (saved.find(s => s.id === currentId)?.timestamp ?? Date.now()) : Date.now(),
         updatedAt: Date.now(),
@@ -96,6 +99,7 @@ export default function DeepDivesTab() {
         selectedModel: record.selectedModel ?? 'anthropic',
         activeThreadId: record.activeThreadId ?? null,
         learningSnippets: record.learningSnippets ?? [],
+        attachments: record.attachments ?? [],
       });
       setCurrentId(record.id);
       setSaveTitle(record.title);
@@ -122,11 +126,16 @@ export default function DeepDivesTab() {
   const handleNewChat = () => {
     const state = threadedChatRef.current?.getCurrentState?.();
     const hasContent = (state?.mainMessages?.length ?? 0) > 0 || (state?.threads?.length ?? 0) > 0;
-    if (hasContent && !confirm('Start a new chat? The current conversation will be cleared. Saved DeepDives are kept — Save first if you want to keep this session.')) return;
+    if (hasContent) { setShowNewChatConfirm(true); return; }
+    doNewChat();
+  };
+
+  const doNewChat = () => {
     threadedChatRef.current?.clearAllAndStartFresh?.();
     setCurrentId(null);
     setSaveTitle('');
     setSaveDescription('');
+    setShowNewChatConfirm(false);
   };
 
   const handleCopy = () => threadedChatRef.current?.copyAllAIResponses?.();
@@ -145,7 +154,7 @@ export default function DeepDivesTab() {
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
             <div className="p-1.5 bg-zinc-800 rounded-md"><MessageSquare className="w-4 h-4 text-indigo-400" /></div>
-            <h1 className="text-sm font-bold uppercase tracking-widest text-zinc-100">DeepDives</h1>
+            <h1 className="text-sm font-bold uppercase tracking-widest text-zinc-100">DeepDive</h1>
             {currentId && (
               <span className="ml-1 text-[10px] px-2 py-0.5 bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 rounded-full font-bold uppercase tracking-widest">
                 Saved
@@ -307,6 +316,44 @@ export default function DeepDivesTab() {
                 </div>
               </div>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* New Chat confirmation — styled to match AIOS (replaces native confirm) */}
+      <AnimatePresence>
+        {showNewChatConfirm && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[160] bg-black/90 backdrop-blur-xl flex items-center justify-center p-8"
+            onClick={() => setShowNewChatConfirm(false)}>
+            <motion.div initial={{ scale: 0.96, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.96, opacity: 0 }}
+              className="max-w-md w-full bg-zinc-900/60 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl relative"
+              onClick={(e) => e.stopPropagation()}>
+              <button onClick={() => setShowNewChatConfirm(false)} className="absolute top-6 right-6 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-10"><X className="w-5 h-5" /></button>
+
+              <div className="p-8 space-y-6">
+                <header>
+                  <div className="px-3 py-1 inline-block bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-400 font-bold text-[10px] uppercase tracking-widest mb-3">
+                    Start a new chat
+                  </div>
+                  <h2 className="text-xl font-bold text-zinc-100 leading-tight">Clear the current conversation?</h2>
+                  <p className="text-sm text-zinc-400 mt-2 leading-relaxed">
+                    The current conversation will be cleared. Saved DeepDives are kept — Save first if you want to keep this session.
+                  </p>
+                </header>
+
+                <div className="flex justify-end gap-2 pt-2 border-t border-zinc-800">
+                  <button onClick={() => setShowNewChatConfirm(false)}
+                    className="px-4 py-2 text-[11px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white transition-colors">
+                    Cancel
+                  </button>
+                  <button onClick={doNewChat}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold rounded-lg transition-all active:scale-95 shadow-lg shadow-indigo-600/10 uppercase tracking-wider">
+                    <Plus className="w-3.5 h-3.5" />New Chat
+                  </button>
+                </div>
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
