@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Settings as SettingsIcon, Sliders, CreditCard, Download } from 'lucide-react';
+import { Settings as SettingsIcon, Sliders, CreditCard, Download, Server } from 'lucide-react';
 import ModelsTab from './ModelsTab';
 import SubscriptionsTab from './SubscriptionsTab';
 import ImportsTab from './ImportsTab';
+import HermesSettingsTab from './HermesSettingsTab';
 
-type SettingsSection = 'models' | 'subscriptions' | 'imports';
+type SettingsSection = 'models' | 'hermes' | 'subscriptions' | 'imports';
 
 interface SectionDef {
   id: SettingsSection;
@@ -14,6 +15,7 @@ interface SectionDef {
 
 const SECTIONS: SectionDef[] = [
   { id: 'models',        label: 'Models',        icon: Sliders },
+  { id: 'hermes',        label: 'Hermes',        icon: Server },
   { id: 'subscriptions', label: 'Subscriptions', icon: CreditCard },
   { id: 'imports',       label: 'Imports',       icon: Download },
 ];
@@ -61,6 +63,7 @@ export default function SettingsTab() {
         {/* Keep all sections mounted so in-progress drafts (e.g. a half-typed key or
             subscription entry) survive switching between Models and Subscriptions. */}
         <Panel active={section === 'models'}><ModelsTab /></Panel>
+        <Panel active={section === 'hermes'}><HermesSettingsTab /></Panel>
         <Panel active={section === 'subscriptions'}><SubscriptionsTab /></Panel>
         <Panel active={section === 'imports'}><ImportsTab /></Panel>
       </div>

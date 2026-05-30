@@ -217,7 +217,12 @@ export default function SnippingTab() {
   useEffect(() => {
     db.getAllSnippets<CapturedItem>()
       .then(items => {
-        const normalized = items.map(i => ({ title: '', extractedText: '', status: 'ready' as const, ...i }));
+        const normalized = items.map(i => ({
+          ...i,
+          title: i.title || '',
+          extractedText: i.extractedText || '',
+          status: i.status || 'ready' as const,
+        }));
         setVault(normalized);
         if (!isGeminiReady()) return;
         const needEmbed = normalized.filter(i => i.status === 'ready' && (!i.embedding || !i.embedding.length));
@@ -354,7 +359,7 @@ export default function SnippingTab() {
     if (!updatedItem) return;
     db.putSnippet(updatedItem).catch(err => console.error('Failed to persist edit:', err));
     if (options.reembed && aiReady) {
-      const target = updatedItem;
+      const target = updatedItem as CapturedItem;
       embedText(buildEmbedSource(target))
         .then(embedding => {
           const withEmbed = { ...target, embedding };
@@ -835,7 +840,7 @@ export default function SnippingTab() {
                 Gemini · gemini-2.5-flash{!configuredProviders.has('gemini') ? ' (no key)' : ''}
               </option>
               <option value="anthropic" disabled>
-                Anthropic · {configuredModels.claude || 'claude-opus-4-7'} (soon)
+                Anthropic · {configuredModels.claude || 'claude-opus-4-8'} (soon)
               </option>
               <option value="grok" disabled>
                 Grok · {configuredModels.grok || 'grok-4'} (soon)

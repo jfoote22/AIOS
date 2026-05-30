@@ -13,8 +13,8 @@ const cors = (req, res, next) => {
   next();
 };
 
-const { getProviderKey } = require('./keystore.cjs');
-const { getModelId } = require('./modelstore.cjs');
+const { getProviderKey, setProviderKey } = require('./keystore.cjs');
+const { getModelId, setModelId } = require('./modelstore.cjs');
 const extract = require('./extract.cjs');
 const research = require('./research.cjs');
 
@@ -146,12 +146,245 @@ Always show your work like on grok.com's Think Mode. Be thorough in your reasoni
   }
 }
 
+function normalizeHermesBaseUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  return raw.replace(/\/+$/, '');
+}
+
+function hermesRootUrl(baseUrl) {
+  return normalizeHermesBaseUrl(baseUrl).replace(/\/v1$/i, '');
+}
+
+async function fetchHermes(pathname, options = {}) {
+  const baseUrl = normalizeHermesBaseUrl(getProviderKey('hermes_base_url'));
+  const apiKey = getProviderKey('hermes_api_key');
+  if (!baseUrl) throw new Error('Hermes base URL is not configured.');
+  if (!apiKey) throw new Error('Hermes API key is not configured.');
+
+  const healthPath = pathname.startsWith('/health');
+  const root = healthPath ? hermesRootUrl(baseUrl) : baseUrl;
+  const response = await fetch(`${root}${pathname}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.headers || {}),
+    },
+  });
+
+  const text = await response.text();
+  let data = null;
+  if (text) {
+    try { data = JSON.parse(text); }
+    catch { data = { text }; }
+  }
+  if (!response.ok) {
+    const detail = data?.error?.message || data?.error || data?.message || text || response.statusText;
+    throw new Error(`Hermes ${response.status}: ${detail}`);
+  }
+  return data;
+}
+
+function extractOpenAIText(completion) {
+  const message = completion?.choices?.[0]?.message;
+  const content = message?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(part => {
+      if (typeof part === 'string') return part;
+      if (part?.type === 'text') return part.text || '';
+      return '';
+    }).join('');
+  }
+  return '';
+}
+
+function extractJsonFromText(text) {
+  if (typeof text !== 'string' || !text.length) return null;
+  const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+  const start = cleaned.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        try { return JSON.parse(cleaned.slice(start, i + 1)); }
+        catch { return null; }
+      }
+    }
+  }
+  return null;
+}
+
+async function runHermesCronCommand(instruction) {
+  const completion = await fetchHermes('/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: getModelId('hermes'),
+      stream: false,
+      messages: [
+        {
+          role: 'system',
+          content: [
+            'You are an API bridge for Hermes cron management.',
+            'Use the Hermes cronjob tool to satisfy the request.',
+            'Return ONLY one valid JSON object. No markdown, no prose.',
+            'For list responses, use { "jobs": [...] }.',
+            'For mutations, use { "ok": true, "job": object|null, "message": string }.',
+          ].join('\n'),
+        },
+        { role: 'user', content: instruction },
+      ],
+    }),
+  });
+  const text = extractOpenAIText(completion);
+  const parsed = extractJsonFromText(text);
+  if (!parsed) throw new Error(`Hermes cron returned no parsable JSON: ${text.slice(0, 500)}`);
+  return parsed;
+}
+
 function start() {
   const app = express();
   app.use(cors);
   app.use(express.json({ limit: '20mb' }));
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
+
+  app.get('/api/hermes/config', (_req, res) => {
+    const baseUrl = normalizeHermesBaseUrl(getProviderKey('hermes_base_url'));
+    const apiKey = getProviderKey('hermes_api_key');
+    res.json({
+      baseUrl,
+      hasApiKey: !!apiKey,
+      apiKeyPreview: apiKey ? `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}` : '',
+      model: getModelId('hermes'),
+    });
+  });
+
+  app.post('/api/hermes/config', (req, res) => {
+    const { baseUrl, apiKey, model } = req.body || {};
+    const nextBaseUrl = normalizeHermesBaseUrl(baseUrl);
+    if (!nextBaseUrl) return res.status(400).json({ error: 'Hermes base URL is required.' });
+    if (!/^https?:\/\//i.test(nextBaseUrl)) return res.status(400).json({ error: 'Hermes base URL must start with http:// or https://.' });
+    setProviderKey('hermes_base_url', nextBaseUrl);
+    if (typeof apiKey === 'string' && apiKey.trim()) setProviderKey('hermes_api_key', apiKey.trim());
+    if (typeof model === 'string' && model.trim()) setModelId('hermes', model.trim());
+    res.json({ ok: true, baseUrl: nextBaseUrl, hasApiKey: !!getProviderKey('hermes_api_key'), model: getModelId('hermes') });
+  });
+
+  app.get('/api/hermes/health', async (_req, res) => {
+    try {
+      res.json(await fetchHermes('/health/detailed'));
+    } catch (err) {
+      res.status(502).json({ error: err?.message || 'Hermes health check failed.' });
+    }
+  });
+
+  app.get('/api/hermes/models', async (_req, res) => {
+    try {
+      res.json(await fetchHermes('/models'));
+    } catch (err) {
+      res.status(502).json({ error: err?.message || 'Hermes models check failed.' });
+    }
+  });
+
+  app.get('/api/hermes/capabilities', async (_req, res) => {
+    try {
+      res.json(await fetchHermes('/capabilities'));
+    } catch (err) {
+      res.status(502).json({ error: err?.message || 'Hermes capabilities check failed.' });
+    }
+  });
+
+  app.post('/api/hermes/chat', async (req, res) => {
+    try {
+      const { messages = [], model } = req.body || {};
+      if (!Array.isArray(messages) || !messages.length) {
+        return res.status(400).json({ error: 'messages must be a non-empty array.' });
+      }
+      const completion = await fetchHermes('/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: model || getModelId('hermes'),
+          messages,
+          stream: false,
+        }),
+      });
+      res.json({ content: extractOpenAIText(completion), raw: completion });
+    } catch (err) {
+      res.status(502).json({ error: err?.message || 'Hermes chat failed.' });
+    }
+  });
+
+  app.get('/api/hermes/cron/jobs', async (_req, res) => {
+    try {
+      const data = await runHermesCronCommand([
+        'Call cronjob(action="list") to list all scheduled jobs.',
+        'Return JSON only in this shape:',
+        '{ "jobs": [ { "id": string, "name": string, "prompt": string, "schedule": string, "skills": string[], "deliver": string, "repeat": number|null, "state": string, "next_run": string|null, "next_run_at": string|null, "run_count": number, "created_at": string|null, "provider": string|null, "model": string|null, "script": string|null, "workdir": string|null } ] }',
+      ].join('\n'));
+      res.json({ jobs: Array.isArray(data.jobs) ? data.jobs : [] });
+    } catch (err) {
+      res.status(502).json({ error: err?.message || 'Failed to list Hermes cron jobs.' });
+    }
+  });
+
+  app.post('/api/hermes/cron/jobs', async (req, res) => {
+    try {
+      const job = req.body || {};
+      const isUpdate = typeof job.id === 'string' && job.id.trim();
+      const instruction = [
+        isUpdate
+          ? `Update cron job ${JSON.stringify(job.id.trim())} using cronjob(action="update", job_id=${JSON.stringify(job.id.trim())}, ...).`
+          : 'Create a new cron job using cronjob(action="create", ...).',
+        'Use these fields exactly where provided:',
+        JSON.stringify({
+          name: job.name || undefined,
+          schedule: job.schedule || undefined,
+          prompt: job.prompt || undefined,
+          skills: Array.isArray(job.skills) ? job.skills : undefined,
+          deliver: job.deliver || undefined,
+          repeat: job.repeat === '' ? null : job.repeat,
+          provider: job.provider || null,
+          model: job.model || null,
+          script: job.script || null,
+          workdir: job.workdir || null,
+        }),
+        'Return JSON only: { "ok": true, "job": <updated-or-created-job-or-null>, "message": "saved" }',
+      ].join('\n');
+      res.json(await runHermesCronCommand(instruction));
+    } catch (err) {
+      res.status(502).json({ error: err?.message || 'Failed to save Hermes cron job.' });
+    }
+  });
+
+  app.post('/api/hermes/cron/jobs/:jobId/:action', async (req, res) => {
+    try {
+      const action = String(req.params.action || '').toLowerCase();
+      if (!['pause', 'resume', 'run', 'remove'].includes(action)) {
+        return res.status(400).json({ error: 'Unsupported cron action.' });
+      }
+      const jobId = String(req.params.jobId || '').trim();
+      const data = await runHermesCronCommand([
+        `Call cronjob(action=${JSON.stringify(action)}, job_id=${JSON.stringify(jobId)}).`,
+        'Return JSON only: { "ok": true, "job": null, "message": string }',
+      ].join('\n'));
+      res.json(data);
+    } catch (err) {
+      res.status(502).json({ error: err?.message || 'Failed to update Hermes cron job.' });
+    }
+  });
 
   // --- OpenAI chat (model ID configurable via Models tab) ---
   app.post('/api/openai/chat', streamHandler(
@@ -362,7 +595,7 @@ function start() {
         }
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-7';
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 4096,
@@ -446,7 +679,7 @@ function start() {
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-7';
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 3072,
@@ -579,7 +812,7 @@ function start() {
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-7';
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 1024,
@@ -811,7 +1044,7 @@ function start() {
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-7';
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
         const response = await client.messages.create({
           model: modelId, max_tokens: 1024, system: systemPrompt,
           messages: [{ role: 'user', content: userPrompt }],

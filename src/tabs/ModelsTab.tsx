@@ -56,7 +56,10 @@ export default function ModelsTab() {
   }, [configured]);
 
   const updateRow = (id: ProviderId, patch: Partial<RowState>) =>
-    setRows(prev => ({ ...prev, [id]: { draft: '', saving: false, masked: '', ...prev[id], ...patch } }));
+    setRows(prev => {
+      const current = prev[id] ?? { draft: '', saving: false, masked: '' };
+      return { ...prev, [id]: { ...current, ...patch } };
+    });
 
   const save = async (id: ProviderId) => {
     const row = rows[id];

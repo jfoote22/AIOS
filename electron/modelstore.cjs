@@ -12,9 +12,17 @@ const fs = require('fs');
 
 const DEFAULTS = {
   openai: 'gpt-4o',
-  claude: 'claude-opus-4-7',
+  claude: 'claude-opus-4-8',
   anthropic: 'claude-sonnet-4-6',
   grok: 'grok-4',
+  hermes: 'hermes-mac',
+};
+
+// Retired model IDs → their replacement. A stored value matching a retired ID
+// is auto-upgraded on read (and re-persisted), so users who had the previous
+// default don't get pinned to an old model.
+const RETIRED = {
+  claude: { 'claude-opus-4-7': 'claude-opus-4-8' },
 };
 
 function getFilePath() {
@@ -27,7 +35,15 @@ function readStore() {
     if (!fs.existsSync(file)) return { ...DEFAULTS };
     const raw = fs.readFileSync(file, 'utf8');
     const parsed = JSON.parse(raw || '{}');
-    return { ...DEFAULTS, ...parsed };
+    const store = { ...DEFAULTS, ...parsed };
+    // Upgrade any retired model IDs, persisting the change once.
+    let changed = false;
+    for (const slot of Object.keys(RETIRED)) {
+      const replacement = RETIRED[slot][store[slot]];
+      if (replacement) { store[slot] = replacement; changed = true; }
+    }
+    if (changed) { try { writeStore(store); } catch (_) { /* best effort */ } }
+    return store;
   } catch (e) {
     console.error('Failed to read model store:', e);
     return { ...DEFAULTS };
