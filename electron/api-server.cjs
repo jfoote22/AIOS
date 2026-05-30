@@ -386,6 +386,89 @@ function start() {
     }
   });
 
+  app.post('/api/hermes/cron/draft', async (req, res) => {
+    try {
+      const { field, currentValue = '', hint = '', job = {}, authMode } = req.body || {};
+      if (!field) return res.status(400).json({ error: 'Missing `field`.' });
+
+      const sysParts = [
+        'You help draft Hermes cron jobs.',
+        'Hermes cron jobs run a prompt on a schedule and may attach installed Hermes skill names.',
+        'Hermes skills are Hermes-native skill folders, not Anthropic skills.',
+        'Return ONLY the requested value. No markdown fences, no commentary.',
+      ];
+
+      if (field === 'name') {
+        sysParts.push('Return a concise kebab-case or short title-style job name, under 60 characters.');
+      } else if (field === 'prompt') {
+        sysParts.push('Return a complete task prompt for the scheduled Hermes run. Be specific about inputs, output format, constraints, and what to report.');
+      } else if (field === 'schedule') {
+        sysParts.push('Return ONLY a five-field cron expression: minute hour day-of-month month day-of-week. Example: 0 9 * * * for daily at 9:00 AM.');
+      } else if (field === 'skills') {
+        sysParts.push('Return ONLY a JSON array of likely Hermes skill names. Use [] if no specific installed skill is clearly needed.');
+      } else if (field === 'all') {
+        sysParts.push('Return ONLY JSON: { "name": string, "prompt": string, "schedule": string, "skills": string[], "deliver": "local"|"origin" }. Schedule must be five-field cron.');
+      } else {
+        return res.status(400).json({ error: `Unknown field "${field}".` });
+      }
+
+      const ctxLines = [
+        `Existing name: ${job.name || '(blank)'}`,
+        `Existing schedule: ${job.schedule || '(blank)'}`,
+        `Existing prompt: ${job.prompt || '(blank)'}`,
+        Array.isArray(job.skills) && job.skills.length ? `Existing skills: ${job.skills.join(', ')}` : '',
+        job.workdir ? `Working directory: ${job.workdir}` : '',
+        job.script ? `Script: ${job.script}` : '',
+        currentValue ? `Current value:\n${currentValue}` : '',
+        hint ? `User hint: ${hint}` : '',
+      ].filter(Boolean);
+      const userPrompt = `Context:\n${ctxLines.join('\n')}\n\nDraft the value for "${field}" now.`;
+
+      let raw = '';
+      if (authMode === 'subscription') {
+        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const modelId = getModelId('claude') || getModelId('anthropic');
+        const stream = query({
+          prompt: userPrompt,
+          options: {
+            model: modelId,
+            systemPrompt: sysParts.join('\n'),
+            allowedTools: [],
+            permissionMode: 'bypassPermissions',
+          },
+        });
+        for await (const msg of stream) {
+          if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
+            for (const block of msg.message.content) {
+              if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
+            }
+          } else if (msg.type === 'result') break;
+        }
+      } else {
+        const key = getProviderKey('anthropic');
+        if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
+        const { default: Anthropic } = await import('@anthropic-ai/sdk');
+        const client = new Anthropic({ apiKey: key });
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const response = await client.messages.create({
+          model: modelId,
+          max_tokens: 1200,
+          system: sysParts.join('\n'),
+          messages: [{ role: 'user', content: userPrompt }],
+        });
+        for (const block of response.content || []) {
+          if (block.type === 'text') raw += block.text;
+        }
+      }
+
+      const value = raw.trim().replace(/^```[a-z]*\n?|\n?```$/g, '').trim();
+      res.json({ field, value });
+    } catch (err) {
+      console.error('Hermes cron draft error:', err);
+      if (!res.headersSent) res.status(500).json({ error: err?.message || 'Hermes cron draft failed.' });
+    }
+  });
+
   // --- OpenAI chat (model ID configurable via Models tab) ---
   app.post('/api/openai/chat', streamHandler(
     ({ createOpenAI }) => {
