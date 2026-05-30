@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject, type LinkObject } from 'react-force-graph-2d';
-import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Tag, Sliders, RotateCcw } from 'lucide-react';
+import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Tag, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle } from 'lucide-react';
 import * as db from '../lib/db';
 import {
   embedText, cosineSimilarity, chatWithVault, isGeminiReady, onGeminiReadyChange,
   type ChatTurn, type VaultContextItem,
 } from '../lib/ai';
 import { buildGraph, nodeAsContextItem, type BrainNode, type BrainLink, type BrainGraph } from '../lib/graph';
-import { listImports, listAllChunks, onImportsChange, type ImportedConversation, type ImportChunk } from '../lib/imports';
+import { listImports, listAllChunks, onImportsChange, deleteImport, type ImportedConversation, type ImportChunk } from '../lib/imports';
 import { setSeed as setDeepDiveSeed } from '../lib/deepdiveSeed';
 import { navigateTo } from '../lib/navigate';
 
@@ -27,6 +27,9 @@ export default function SecondBrainTab() {
   const [citedIds, setCitedIds] = useState<Set<string>>(new Set());
   const [aiReady, setAiReady] = useState<boolean>(isGeminiReady());
   const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
+  const [nodeMenu, setNodeMenu] = useState<{ node: BrainNode; x: number; y: number } | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<BrainNode | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // ── Physics controls (persist to db.meta so they survive reloads) ──────────
   const [physics, setPhysics] = useState<PhysicsSettings>(DEFAULT_PHYSICS);
@@ -264,6 +267,65 @@ export default function SecondBrainTab() {
     setChatInput(`Tell me about "${focusedNode.label}"`);
   };
 
+  // Quick lookups for the hierarchy tree. react-force-graph mutates link
+  // source/target from id strings into node objects once rendered, so normalize.
+  const nodeById = useMemo(() => {
+    const m = new Map<string, BrainNode>();
+    for (const n of graph.nodes) m.set(n.id, n);
+    return m;
+  }, [graph]);
+
+  const adjacency = useMemo(() => {
+    const idOf = (x: any) => (x && typeof x === 'object' ? x.id : x);
+    const m = new Map<string, Set<string>>();
+    for (const l of graph.links as any[]) {
+      const s = idOf(l.source);
+      const t = idOf(l.target);
+      if (!s || !t) continue;
+      if (!m.has(s)) m.set(s, new Set());
+      if (!m.has(t)) m.set(t, new Set());
+      m.get(s)!.add(t);
+      m.get(t)!.add(s);
+    }
+    return m;
+  }, [graph]);
+
+  // Delete a neuron: remove the underlying record and prune local state so the
+  // graph rebuilds without it.
+  const deleteNode = async (node: BrainNode) => {
+    setIsDeleting(true);
+    try {
+      if (node.kind === 'snippet') {
+        await db.removeSnippet(node.data.id);
+        setSnippets(prev => prev.filter(s => s.id !== node.data.id));
+      } else if (node.kind === 'deepdive') {
+        await db.removeThread(node.data.id);
+        setDeepDives(prev => prev.filter(d => d.id !== node.data.id));
+      } else if (node.kind === 'import') {
+        await deleteImport(node.data.id); // also clears chunks + emits change
+        setImports(prev => prev.filter(im => im.id !== node.data.id));
+      }
+      setCitedIds(prev => { const n = new Set(prev); n.delete(node.id); return n; });
+      if (focusedNode?.id === node.id) setFocusedNode(null);
+      setNodeMenu(null);
+      setPendingDelete(null);
+    } catch (e: any) {
+      console.error('Failed to delete neuron:', e);
+      alert(`Failed to delete: ${e?.message ?? e}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Close the right-click menu on any outside interaction.
+  useEffect(() => {
+    if (!nodeMenu) return;
+    const close = () => setNodeMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', close);
+    return () => { window.removeEventListener('click', close); window.removeEventListener('keydown', close); };
+  }, [nodeMenu]);
+
   const stats = useMemo(() => {
     const snipCount = graph.nodes.filter(n => n.kind === 'snippet').length;
     const ddCount = graph.nodes.filter(n => n.kind === 'deepdive').length;
@@ -357,7 +419,7 @@ export default function SecondBrainTab() {
         </aside>
 
         {/* Right 2/3 — force-directed graph */}
-        <div ref={containerRef} className="flex-1 relative bg-gradient-to-br from-zinc-950 via-zinc-950 to-zinc-900 overflow-hidden">
+        <div ref={containerRef} onContextMenu={(e) => e.preventDefault()} className="flex-1 relative bg-gradient-to-br from-zinc-950 via-zinc-950 to-zinc-900 overflow-hidden">
           {graph.nodes.length === 0 ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-8 space-y-4">
               <div className="w-24 h-24 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center relative">
@@ -391,13 +453,31 @@ export default function SecondBrainTab() {
               cooldownTicks={120}
               warmupTicks={20}
               onNodeClick={onNodeClick}
-              onBackgroundClick={() => setFocusedNode(null)}
+              onNodeRightClick={(n, e) => {
+                const node = n as unknown as BrainNode;
+                setFocusedNode(node);
+                setNodeMenu({ node, x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY });
+              }}
+              onBackgroundClick={() => { setFocusedNode(null); setNodeMenu(null); }}
               backgroundColor="rgba(0,0,0,0)"
               enableNodeDrag={true}
               minZoom={0.2}
               maxZoom={8}
             />
           )}
+
+          {/* Navigable hierarchy tree — upper-left, rooted at the selected node */}
+          <AnimatePresence>
+            {focusedNode && (
+              <HierarchyPanel
+                root={focusedNode}
+                nodeById={nodeById}
+                adjacency={adjacency}
+                onSelect={(node) => onNodeClick(node as any)}
+                onClose={() => setFocusedNode(null)}
+              />
+            )}
+          </AnimatePresence>
 
           <AnimatePresence>
             {focusedNode && (
@@ -406,6 +486,7 @@ export default function SecondBrainTab() {
                 allChunks={chunks}
                 onClose={() => setFocusedNode(null)}
                 onAsk={askAboutFocused}
+                onDelete={() => setPendingDelete(focusedNode)}
                 onDeepDive={() => {
                   const seed = nodeToSeed(focusedNode, chunks);
                   if (!seed) return;
@@ -416,6 +497,26 @@ export default function SecondBrainTab() {
               />
             )}
           </AnimatePresence>
+
+          {/* Right-click context menu */}
+          {nodeMenu && (
+            <div
+              className="fixed z-30 min-w-[180px] bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl py-1"
+              style={{ left: nodeMenu.x, top: nodeMenu.y }}
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <div className="px-3 py-1.5 text-[10px] uppercase tracking-widest text-zinc-500 border-b border-zinc-800 truncate">
+                {nodeMenu.node.label}
+              </div>
+              <button
+                onClick={() => { setPendingDelete(nodeMenu.node); setNodeMenu(null); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-red-400 hover:bg-red-500/10 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Delete neuron
+              </button>
+            </div>
+          )}
 
           {/* Physics controls */}
           {graph.nodes.length > 0 && (
@@ -442,6 +543,159 @@ export default function SecondBrainTab() {
           )}
         </div>
       </div>
+
+      {/* Delete confirmation — styled to match AIOS */}
+      <AnimatePresence>
+        {pendingDelete && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[160] bg-black/90 backdrop-blur-xl flex items-center justify-center p-8"
+            onClick={() => !isDeleting && setPendingDelete(null)}>
+            <motion.div initial={{ scale: 0.96, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.96, opacity: 0 }}
+              className="max-w-md w-full bg-zinc-900/60 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl relative"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="p-8 space-y-6">
+                <header>
+                  <div className="px-3 py-1 inline-flex items-center gap-1.5 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 font-bold text-[10px] uppercase tracking-widest mb-3">
+                    <AlertCircle className="w-3 h-3" /> Delete neuron
+                  </div>
+                  <h2 className="text-xl font-bold text-zinc-100 leading-tight">Delete “{pendingDelete.label}”?</h2>
+                  <p className="text-sm text-zinc-400 mt-2 leading-relaxed">
+                    This permanently removes the underlying {pendingDelete.kind === 'snippet' ? 'snippet' : pendingDelete.kind === 'deepdive' ? 'DeepDive session' : 'imported conversation'} from your vault. This can’t be undone.
+                  </p>
+                </header>
+                <div className="flex justify-end gap-2 pt-2 border-t border-zinc-800">
+                  <button onClick={() => setPendingDelete(null)} disabled={isDeleting}
+                    className="px-4 py-2 text-[11px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white transition-colors">
+                    Cancel
+                  </button>
+                  <button onClick={() => deleteNode(pendingDelete)} disabled={isDeleting}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-red-600 hover:bg-red-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-[11px] font-bold rounded-lg transition-all active:scale-95 uppercase tracking-wider">
+                    <Trash2 className="w-3.5 h-3.5" />{isDeleting ? 'Deleting…' : 'Delete'}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+// ── Navigable hierarchy tree ─────────────────────────────────────────────────
+
+function kindIcon(kind: BrainNode['kind']) {
+  if (kind === 'snippet') return Scissors;
+  if (kind === 'deepdive') return Compass;
+  return DownloadIcon;
+}
+
+function HierarchyPanel({
+  root, nodeById, adjacency, onSelect, onClose,
+}: {
+  root: BrainNode;
+  nodeById: Map<string, BrainNode>;
+  adjacency: Map<string, Set<string>>;
+  onSelect: (node: BrainNode) => void;
+  onClose: () => void;
+}) {
+  const stop = (e: React.MouseEvent) => e.stopPropagation();
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -16 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: -16 }}
+      transition={{ duration: 0.15 }}
+      onMouseDown={stop}
+      onClick={stop}
+      className="absolute top-4 left-4 w-[280px] max-h-[60%] bg-zinc-950/95 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-2xl flex flex-col overflow-hidden z-20"
+    >
+      <header className="h-10 px-3 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/40 shrink-0">
+        <Network className="w-3.5 h-3.5 text-indigo-300" />
+        <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-300">Hierarchy</span>
+        <button onClick={onClose} className="ml-auto p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800">
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </header>
+      <div className="flex-1 min-h-0 overflow-y-auto p-2 scrollbar-hide">
+        {/* key on root id so the tree fully resets when a different node is selected */}
+        <TreeNode
+          key={root.id}
+          nodeId={root.id}
+          ancestorIds={new Set()}
+          depth={0}
+          isRoot
+          nodeById={nodeById}
+          adjacency={adjacency}
+          onSelect={onSelect}
+        />
+      </div>
+    </motion.div>
+  );
+}
+
+function TreeNode({
+  nodeId, ancestorIds, depth, isRoot, nodeById, adjacency, onSelect,
+}: {
+  nodeId: string;
+  ancestorIds: Set<string>;
+  depth: number;
+  isRoot?: boolean;
+  nodeById: Map<string, BrainNode>;
+  adjacency: Map<string, Set<string>>;
+  onSelect: (node: BrainNode) => void;
+}) {
+  const [expanded, setExpanded] = useState(isRoot);
+  const node = nodeById.get(nodeId);
+  if (!node) return null;
+
+  // Children = connected neurons, excluding ancestors so we don't loop back.
+  const childIds = Array.from(adjacency.get(nodeId) ?? []).filter(id => !ancestorIds.has(id) && nodeById.has(id));
+  childIds.sort((a, b) => (nodeById.get(a)?.label ?? '').localeCompare(nodeById.get(b)?.label ?? ''));
+  const hasChildren = childIds.length > 0;
+  const Icon = kindIcon(node.kind);
+
+  return (
+    <div>
+      <div
+        className={`group flex items-center gap-1 rounded-md hover:bg-zinc-800/60 ${isRoot ? 'bg-zinc-800/40' : ''}`}
+        style={{ paddingLeft: depth * 12 }}
+      >
+        {hasChildren ? (
+          <button onClick={() => setExpanded(e => !e)} className="p-1 text-zinc-500 hover:text-white shrink-0" title={expanded ? 'Collapse' : 'Expand'}>
+            {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          </button>
+        ) : (
+          <span className="w-5 shrink-0" />
+        )}
+        <button
+          onClick={() => onSelect(node)}
+          className="flex items-center gap-1.5 py-1 pr-2 min-w-0 flex-1 text-left"
+          title={`${node.group} · click to focus`}
+        >
+          <Icon className={`w-3 h-3 shrink-0 ${isRoot ? 'text-indigo-300' : 'text-zinc-500 group-hover:text-zinc-300'}`} />
+          <span className={`text-[11px] truncate ${isRoot ? 'text-zinc-100 font-semibold' : 'text-zinc-300'}`}>{node.label}</span>
+          {hasChildren && <span className="ml-auto text-[9px] text-zinc-600 shrink-0">{childIds.length}</span>}
+        </button>
+      </div>
+      {expanded && hasChildren && (
+        <div>
+          {childIds.map(cid => (
+            <TreeNode
+              key={cid}
+              nodeId={cid}
+              ancestorIds={new Set([...ancestorIds, nodeId])}
+              depth={depth + 1}
+              nodeById={nodeById}
+              adjacency={adjacency}
+              onSelect={onSelect}
+            />
+          ))}
+        </div>
+      )}
+      {isRoot && !hasChildren && (
+        <p className="text-[10px] text-zinc-600 italic px-2 py-2">No connected neurons.</p>
+      )}
     </div>
   );
 }
@@ -563,13 +817,14 @@ function SliderRow({
 // ── Neuron detail overlay ────────────────────────────────────────────────────
 
 function NeuronDetailPanel({
-  node, allChunks, onClose, onAsk, onDeepDive,
+  node, allChunks, onClose, onAsk, onDeepDive, onDelete,
 }: {
   node: BrainNode;
   allChunks: ImportChunk[];
   onClose: () => void;
   onAsk: () => void;
   onDeepDive: () => void;
+  onDelete: () => void;
 }) {
   // Stop propagation on the panel so clicks inside it don't bubble to the
   // graph background (which would close it).
@@ -619,6 +874,13 @@ function NeuronDetailPanel({
           title="Pre-fill the Second Brain chat with a question about this"
         >
           Ask
+        </button>
+        <button
+          onClick={onDelete}
+          className="px-3 py-2 rounded-md bg-red-600/10 hover:bg-red-600/20 border border-red-500/20 text-red-400 transition-colors"
+          title="Delete this neuron"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
         </button>
       </footer>
     </motion.div>
