@@ -263,7 +263,7 @@ export default function AgentBuilder({ onAgentsChange }: Props) {
                     className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1.5 text-[12px] text-zinc-100 focus:outline-none focus:border-indigo-500/60"
                   >
                     <option value="inherit">inherit (use Models tab default)</option>
-                    <option value="claude-opus-4-7">claude-opus-4-7</option>
+                    <option value="claude-opus-4-8">claude-opus-4-8</option>
                     <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
                     <option value="claude-haiku-4-5-20251001">claude-haiku-4-5</option>
                   </select>

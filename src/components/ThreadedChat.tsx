@@ -1412,7 +1412,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     <div className="flex flex-wrap gap-2">
       {[
         { value: 'openai' as ModelProvider,    label: labelFor('openai', 'GPT-4o'),              color: 'green'  },
-        { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.7'),     color: 'blue'   },
+        { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.8'),     color: 'blue'   },
         { value: 'anthropic' as ModelProvider, label: labelFor('anthropic', 'Claude Sonnet 4.6'),color: 'purple' },
         { value: 'grok' as ModelProvider,      label: labelFor('grok', 'Grok 4'),                color: 'orange' }
       ].map((model) => {
