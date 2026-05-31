@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Save, FolderOpen, Plus, Copy, X, AlertCircle, MessageSquare, Trash2, Clock, Bot, Layers, BookOpen } from 'lucide-react';
+import { Save, FolderOpen, Plus, Copy, X, AlertCircle, MessageSquare, Trash2, Clock, Bot, Layers, BookOpen, Network, Search, Link2, Video, ArrowRight, ArrowDown } from 'lucide-react';
 import ThreadedChat from '../components/ThreadedChat';
 import * as db from '../lib/db';
 import { onConfiguredChange, getConfigured, type ProviderId } from '../lib/providers';
@@ -20,6 +20,32 @@ export interface DeepDiveRecord {
   updatedAt: number;
 }
 
+interface UnderstandingNode {
+  id: string;
+  label: string;
+  group: 'root' | 'main' | 'thread' | 'concept' | 'source';
+  kind: string;
+  val: number;
+  detail?: string;
+  data?: any;
+  x?: number;
+  y?: number;
+}
+
+interface UnderstandingLink {
+  source: string;
+  target: string;
+  kind: 'contains' | 'context' | 'parent' | 'mentions' | 'source';
+  value: number;
+}
+
+interface UnderstandingGraph {
+  nodes: UnderstandingNode[];
+  links: UnderstandingLink[];
+}
+
+type UnderstandingLayout = 'horizontal' | 'vertical';
+
 export default function DeepDivesTab() {
   const threadedChatRef = useRef<any>(null);
   const [saved, setSaved] = useState<DeepDiveRecord[]>([]);
@@ -31,6 +57,11 @@ export default function DeepDivesTab() {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [configured, setConfigured] = useState<Set<ProviderId>>(getConfigured());
   const [showNewChatConfirm, setShowNewChatConfirm] = useState(false);
+  const [showUnderstanding, setShowUnderstanding] = useState(false);
+  const [understanding, setUnderstanding] = useState<UnderstandingGraph>({ nodes: [], links: [] });
+  const [selectedNode, setSelectedNode] = useState<UnderstandingNode | null>(null);
+  const [understandingQuery, setUnderstandingQuery] = useState('');
+  const [understandingLayout, setUnderstandingLayout] = useState<UnderstandingLayout>('horizontal');
 
   useEffect(() => onConfiguredChange(setConfigured), []);
   useEffect(() => { refresh(); }, []);
@@ -140,12 +171,40 @@ export default function DeepDivesTab() {
 
   const handleCopy = () => threadedChatRef.current?.copyAllAIResponses?.();
 
+  const handleUnderstand = () => {
+    threadedChatRef.current?.forceUpdateThreadMessages?.();
+    setTimeout(() => {
+      const state = threadedChatRef.current?.getCurrentState?.();
+      const graph = buildUnderstandingGraph(state, understandingLayout);
+      setUnderstanding(graph);
+      setSelectedNode(graph.nodes[0] ?? null);
+      setShowUnderstanding(true);
+    }, 120);
+  };
+
+  const relayoutUnderstanding = (layout: UnderstandingLayout) => {
+    setUnderstandingLayout(layout);
+    setUnderstanding(prev => layoutUnderstandingGraph({
+      ...prev,
+      nodes: prev.nodes.map(n => ({ ...n, x: undefined, y: undefined })),
+    }, layout));
+  };
+
   const formatDate = (ts: number) => {
     try { return new Date(ts).toLocaleString(); } catch { return ''; }
   };
 
   const chatProviders: ProviderId[] = ['openai', 'anthropic', 'grok'];
   const hasAnyChatProvider = chatProviders.some(p => configured.has(p));
+  const filteredUnderstandingNodes = useMemo(() => {
+    const q = understandingQuery.trim().toLowerCase();
+    if (!q) return understanding.nodes;
+    return understanding.nodes.filter(n =>
+      n.label.toLowerCase().includes(q) ||
+      n.kind.toLowerCase().includes(q) ||
+      (n.detail || '').toLowerCase().includes(q)
+    );
+  }, [understanding.nodes, understandingQuery]);
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden relative">
@@ -176,6 +235,11 @@ export default function DeepDivesTab() {
           <button onClick={() => { if (!saveTitle) setSaveTitle(`DeepDive ${new Date().toLocaleDateString()}`); setShowSave(true); }}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900/60 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white text-[11px] font-bold uppercase tracking-wider rounded-lg transition-colors">
             <Save className="w-3.5 h-3.5" />Save
+          </button>
+          <button onClick={handleUnderstand}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900/60 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white text-[11px] font-bold uppercase tracking-wider rounded-lg transition-colors"
+            title="Generate an understanding graph from the current DeepDive">
+            <Network className="w-3.5 h-3.5" />Understand
           </button>
           <button onClick={handleNewChat}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold rounded-lg transition-all active:scale-95 shadow-lg shadow-indigo-600/10 uppercase tracking-wider"
@@ -240,6 +304,144 @@ export default function DeepDivesTab() {
                       {isSaving ? 'Saving…' : currentId ? 'Update' : 'Save'}
                     </button>
                   </div>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Understanding graph modal */}
+      <AnimatePresence>
+        {showUnderstanding && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[155] bg-black/90 backdrop-blur-xl overflow-hidden"
+            onClick={() => setShowUnderstanding(false)}>
+            <div className="h-full w-full p-6">
+              <div className="h-full bg-zinc-950/95 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl flex flex-col" onClick={(e) => e.stopPropagation()}>
+                <header className="h-16 px-5 border-b border-zinc-800 flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-indigo-600/10 border border-indigo-500/20 rounded-lg"><Network className="w-4 h-4 text-indigo-400" /></div>
+                    <div>
+                      <h2 className="text-sm font-bold uppercase tracking-widest text-zinc-100">DeepDive Understanding</h2>
+                      <p className="text-[11px] text-zinc-500">{understanding.nodes.length} nodes · {understanding.links.length} relationships</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-1">
+                      <button
+                        onClick={() => relayoutUnderstanding('horizontal')}
+                        className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${understandingLayout === 'horizontal' ? 'bg-indigo-600/20 text-indigo-300' : 'text-zinc-500 hover:text-white hover:bg-zinc-800'}`}
+                        title="Lay out left to right"
+                      >
+                        <ArrowRight className="w-3.5 h-3.5" />Left to Right
+                      </button>
+                      <button
+                        onClick={() => relayoutUnderstanding('vertical')}
+                        className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${understandingLayout === 'vertical' ? 'bg-indigo-600/20 text-indigo-300' : 'text-zinc-500 hover:text-white hover:bg-zinc-800'}`}
+                        title="Lay out top to bottom"
+                      >
+                        <ArrowDown className="w-3.5 h-3.5" />Top to Bottom
+                      </button>
+                    </div>
+                    <button onClick={() => setShowUnderstanding(false)} className="p-2 rounded-full bg-white/10 hover:bg-white/20 transition-colors">
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+                </header>
+
+                <div className="flex-1 min-h-0 grid grid-cols-[320px_minmax(0,1fr)_360px]">
+                  <aside className="border-r border-zinc-800 p-4 overflow-y-auto">
+                    <div className="relative mb-3">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
+                      <input
+                        value={understandingQuery}
+                        onChange={(e) => setUnderstandingQuery(e.target.value)}
+                        placeholder="Search graph..."
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 pl-9 pr-3 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      {filteredUnderstandingNodes.map(node => (
+                        <button
+                          key={node.id}
+                          onClick={() => {
+                            setSelectedNode(node);
+                          }}
+                          className={`w-full text-left rounded-lg border p-3 transition-colors ${selectedNode?.id === node.id ? 'bg-indigo-600/10 border-indigo-500/40' : 'bg-zinc-900/50 border-zinc-800 hover:border-zinc-700'}`}
+                        >
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <span className="text-sm font-semibold text-zinc-100 truncate">{node.label}</span>
+                            <span className="text-[9px] uppercase tracking-widest text-zinc-500">{node.kind}</span>
+                          </div>
+                          {node.detail && <p className="text-[11px] text-zinc-500 line-clamp-2">{node.detail}</p>}
+                        </button>
+                      ))}
+                    </div>
+                  </aside>
+
+                  <main className="relative min-h-0 bg-zinc-950 overflow-auto">
+                    {understanding.nodes.length === 0 ? (
+                      <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500">
+                        No DeepDive content to map yet.
+                      </div>
+                    ) : (
+                      <UnderstandingMap
+                        graph={understanding}
+                        layout={understandingLayout}
+                        selectedId={selectedNode?.id || null}
+                        onSelect={setSelectedNode}
+                        onMoveNode={(id, x, y) => {
+                          setUnderstanding(prev => ({
+                            ...prev,
+                            nodes: prev.nodes.map(n => (n.id === id ? { ...n, x, y } : n)),
+                          }));
+                          setSelectedNode(prev => (prev?.id === id ? { ...prev, x, y } : prev));
+                        }}
+                      />
+                    )}
+                  </main>
+
+                  <aside className="border-l border-zinc-800 p-5 overflow-y-auto bg-zinc-950/70">
+                    {selectedNode ? (
+                      <div className="space-y-4">
+                        <div>
+                          <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">{selectedNode.kind}</p>
+                          <h3 className="text-xl font-bold text-zinc-100 leading-tight">{selectedNode.label}</h3>
+                        </div>
+                        {selectedNode.detail && (
+                          <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
+                            <p className="text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed">{selectedNode.detail}</p>
+                          </div>
+                        )}
+                        {selectedNode.group === 'source' && selectedNode.data?.url && (
+                          <a href={selectedNode.data.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-xs text-indigo-300 hover:text-indigo-200">
+                            {selectedNode.kind === 'video' ? <Video className="w-3.5 h-3.5" /> : <Link2 className="w-3.5 h-3.5" />}
+                            Open source
+                          </a>
+                        )}
+                        <div className="border-t border-zinc-800 pt-4">
+                          <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Connected relationships</p>
+                          <div className="space-y-1">
+                            {understanding.links
+                              .filter(l => String(l.source) === selectedNode.id || String(l.target) === selectedNode.id || (l.source as any)?.id === selectedNode.id || (l.target as any)?.id === selectedNode.id)
+                              .slice(0, 12)
+                              .map((l, idx) => {
+                                const sourceId = typeof l.source === 'string' ? l.source : (l.source as any).id;
+                                const targetId = typeof l.target === 'string' ? l.target : (l.target as any).id;
+                                const otherId = sourceId === selectedNode.id ? targetId : sourceId;
+                                const other = understanding.nodes.find(n => n.id === otherId);
+                                return <p key={idx} className="text-xs text-zinc-500"><span className="text-zinc-400">{l.kind}</span> · {other?.label || otherId}</p>;
+                              })}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-sm text-zinc-500 text-center">
+                        Select a node to inspect context, findings, and sources.
+                      </div>
+                    )}
+                  </aside>
                 </div>
               </div>
             </div>
@@ -372,4 +574,339 @@ function buildSeedPrompt(seed: DeepDiveSeed): string {
     '---',
     'Help me drill into this. What are the most interesting angles to explore?',
   ].join('\n');
+}
+
+function buildUnderstandingGraph(state: any, layout: UnderstandingLayout = 'horizontal'): UnderstandingGraph {
+  const nodes: UnderstandingNode[] = [];
+  const links: UnderstandingLink[] = [];
+  const addNode = (node: UnderstandingNode) => {
+    if (!nodes.some(n => n.id === node.id)) nodes.push(node);
+  };
+  const addLink = (link: UnderstandingLink) => {
+    if (link.source !== link.target && !links.some(l => l.source === link.source && l.target === link.target && l.kind === link.kind)) links.push(link);
+  };
+
+  const mainMessages = Array.isArray(state?.mainMessages) ? state.mainMessages : [];
+  const threads = Array.isArray(state?.threads) ? state.threads : [];
+  const attachments = Array.isArray(state?.attachments) ? state.attachments : [];
+
+  if (!mainMessages.length && !threads.length && !attachments.length) return { nodes, links };
+
+  addNode({
+    id: 'root',
+    label: 'Current DeepDive',
+    group: 'root',
+    kind: 'overview',
+    val: 14,
+    detail: `${mainMessages.length} main messages, ${threads.length} context threads, ${attachments.length} attachments.`,
+  });
+
+  if (mainMessages.length) {
+    const assistantText = mainMessages.filter((m: any) => m?.role === 'assistant').map((m: any) => m.content || '').join('\n\n');
+    addNode({
+      id: 'main',
+      label: 'Main Chat',
+      group: 'main',
+      kind: 'conversation',
+      val: 10,
+      detail: summarizeText(assistantText || mainMessages.map((m: any) => m.content || '').join('\n\n')),
+    });
+    addLink({ source: 'root', target: 'main', kind: 'contains', value: 3 });
+  }
+
+  const conceptCounts = new Map<string, { count: number; threadIds: Set<string>; samples: string[] }>();
+
+  for (const [idx, thread] of threads.entries()) {
+    const threadId = `thread:${thread.id || idx}`;
+    const label = thread.title || `${actionLabel(thread.actionType)} ${idx + 1}`;
+    const threadText = [
+      thread.selectedContext || '',
+      ...(thread.messages || []).map((m: any) => m?.content || ''),
+      thread.research?.intro || '',
+    ].join('\n\n');
+
+    addNode({
+      id: threadId,
+      label,
+      group: 'thread',
+      kind: actionLabel(thread.actionType),
+      val: 8 + Math.min(8, (thread.messages?.length || 0) * 1.2),
+      detail: [
+        thread.selectedContext ? `Context:\n${thread.selectedContext}` : '',
+        summarizeText(threadText) ? `\nSummary:\n${summarizeText(threadText)}` : '',
+      ].filter(Boolean).join('\n').trim(),
+      data: thread,
+    });
+    addLink({ source: 'root', target: threadId, kind: 'context', value: 2 });
+
+    if (thread.parentThreadId) {
+      addLink({ source: `thread:${thread.parentThreadId}`, target: threadId, kind: 'parent', value: 4 });
+    } else if (thread.sourceType === 'main' && mainMessages.length) {
+      addLink({ source: 'main', target: threadId, kind: 'context', value: 2 });
+    }
+
+    for (const concept of extractConcepts(threadText)) {
+      const current = conceptCounts.get(concept) || { count: 0, threadIds: new Set<string>(), samples: [] };
+      current.count += 1;
+      current.threadIds.add(threadId);
+      if (current.samples.length < 3 && thread.selectedContext) current.samples.push(thread.selectedContext.slice(0, 180));
+      conceptCounts.set(concept, current);
+    }
+
+    const researchLinks = thread.research?.links || [];
+    const researchVideos = thread.research?.videos || [];
+    for (const [sourceIdx, source] of [...researchLinks, ...researchVideos].slice(0, 8).entries()) {
+      const isVideo = !!source.videoId;
+      const sourceId = `source:${thread.id || idx}:${sourceIdx}`;
+      addNode({
+        id: sourceId,
+        label: source.title || source.url || source.channel || 'Source',
+        group: 'source',
+        kind: isVideo ? 'video' : 'link',
+        val: 4,
+        detail: source.reason || source.channel || source.source || source.url || '',
+        data: source,
+      });
+      addLink({ source: threadId, target: sourceId, kind: 'source', value: 1.5 });
+    }
+  }
+
+  const topConcepts = Array.from(conceptCounts.entries())
+    .filter(([, info]) => info.count >= 2 || info.threadIds.size >= 2)
+    .sort((a, b) => (b[1].threadIds.size - a[1].threadIds.size) || (b[1].count - a[1].count))
+    .slice(0, 24);
+
+  for (const [concept, info] of topConcepts) {
+    const conceptId = `concept:${concept.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+    addNode({
+      id: conceptId,
+      label: concept,
+      group: 'concept',
+      kind: 'concept',
+      val: 5 + Math.min(10, info.threadIds.size * 2),
+      detail: `Appears across ${info.threadIds.size} thread${info.threadIds.size === 1 ? '' : 's'}.`,
+      data: { samples: info.samples },
+    });
+    for (const threadId of info.threadIds) {
+      addLink({ source: threadId, target: conceptId, kind: 'mentions', value: 1 + info.count * 0.2 });
+    }
+  }
+
+  return layoutUnderstandingGraph({ nodes, links }, layout);
+}
+
+function layoutUnderstandingGraph(graph: UnderstandingGraph, layout: UnderstandingLayout): UnderstandingGraph {
+  const columns: UnderstandingNode['group'][] = ['root', 'main', 'thread', 'concept', 'source'];
+  const xByGroup: Record<string, number> = {};
+  const yByGroup: Record<string, number> = {};
+  const nextOffset: Record<string, number> = {};
+  for (const [idx, group] of columns.entries()) {
+    xByGroup[group] = layout === 'horizontal' ? 80 + idx * 340 : 100;
+    yByGroup[group] = layout === 'horizontal' ? 80 : 80 + idx * 260;
+    nextOffset[group] = 0;
+  }
+
+  const nodes = graph.nodes.map(node => {
+    const group = node.group;
+    const size = cardSize(node);
+    const gap = group === 'thread' ? 36 : 26;
+    const x = layout === 'horizontal'
+      ? xByGroup[group] ?? 760
+      : (xByGroup[group] ?? 100) + nextOffset[group];
+    const y = layout === 'horizontal'
+      ? (yByGroup[group] ?? 80) + nextOffset[group]
+      : yByGroup[group] ?? 80;
+    nextOffset[group] += layout === 'horizontal' ? size.h + gap : size.w + gap;
+    return { ...node, x, y };
+  });
+  return { ...graph, nodes };
+}
+
+function UnderstandingMap({
+  graph, layout, selectedId, onSelect, onMoveNode,
+}: {
+  graph: UnderstandingGraph;
+  layout: UnderstandingLayout;
+  selectedId: string | null;
+  onSelect: (node: UnderstandingNode) => void;
+  onMoveNode: (id: string, x: number, y: number) => void;
+}) {
+  const width = Math.max(1900, ...graph.nodes.map(n => (n.x || 0) + cardSize(n).w + 120));
+  const height = Math.max(900, ...graph.nodes.map(n => (n.y || 0) + cardSize(n).h + 120));
+  const byId = new Map(graph.nodes.map(n => [n.id, n]));
+  const columns = [
+    { id: 'root', label: 'Overview', x: 80 },
+    { id: 'main', label: 'Main Chat', x: 420 },
+    { id: 'thread', label: 'Context Threads', x: 760 },
+    { id: 'concept', label: 'Concepts', x: 1120 },
+    { id: 'source', label: 'Sources', x: 1480 },
+  ];
+  const [dragging, setDragging] = useState<{ id: string; dx: number; dy: number } | null>(null);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e: MouseEvent) => {
+      onMoveNode(dragging.id, Math.max(20, e.clientX + dragging.dx), Math.max(45, e.clientY + dragging.dy));
+    };
+    const onUp = () => setDragging(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [dragging, onMoveNode]);
+
+  return (
+    <div className="relative" style={{ width, height }}>
+      <svg className="absolute inset-0 pointer-events-none" width={width} height={height}>
+        <defs>
+          <marker id="arrow-understand" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L0,6 L7,3 z" fill="rgba(161,161,170,0.65)" />
+          </marker>
+        </defs>
+        {columns.map((col, idx) => layout === 'horizontal' ? (
+          <line key={col.id} x1={80 + idx * 340 - 24} y1={0} x2={80 + idx * 340 - 24} y2={height} stroke="rgba(39,39,42,0.55)" strokeDasharray="6 8" />
+        ) : (
+          <line key={col.id} x1={0} y1={80 + idx * 260 - 30} x2={width} y2={80 + idx * 260 - 30} stroke="rgba(39,39,42,0.55)" strokeDasharray="6 8" />
+        ))}
+        {graph.links.map((link, idx) => {
+          const sourceId = typeof link.source === 'string' ? link.source : (link.source as any).id;
+          const targetId = typeof link.target === 'string' ? link.target : (link.target as any).id;
+          const source = byId.get(sourceId);
+          const target = byId.get(targetId);
+          if (!source || !target) return null;
+          const sSize = cardSize(source);
+          const tSize = cardSize(target);
+          const x1 = (source.x || 0) + sSize.w;
+          const y1 = (source.y || 0) + sSize.h / 2;
+          const x2 = target.x || 0;
+          const y2 = (target.y || 0) + tSize.h / 2;
+          const mid = layout === 'horizontal'
+            ? Math.max(60, Math.abs(x2 - x1) / 2)
+            : Math.max(60, Math.abs(y2 - y1) / 2);
+          const color = link.kind === 'parent' ? 'rgba(129,140,248,0.7)' : link.kind === 'mentions' ? 'rgba(34,197,94,0.45)' : 'rgba(113,113,122,0.42)';
+          return (
+            <path
+              key={`${sourceId}-${targetId}-${idx}`}
+              d={layout === 'horizontal'
+                ? `M ${x1} ${y1} C ${x1 + mid} ${y1}, ${x2 - mid} ${y2}, ${x2} ${y2}`
+                : `M ${x1} ${y1} C ${x1} ${y1 + mid}, ${x2} ${y2 - mid}, ${x2} ${y2}`}
+              fill="none"
+              stroke={color}
+              strokeWidth={Math.max(1, Math.min(3, link.value || 1))}
+              markerEnd="url(#arrow-understand)"
+            />
+          );
+        })}
+      </svg>
+
+      {columns.map((col, idx) => (
+        <div
+          key={col.id}
+          className="absolute text-[10px] uppercase tracking-widest text-zinc-600 font-bold"
+          style={layout === 'horizontal' ? { left: 80 + idx * 340, top: 20 } : { left: 24, top: 80 + idx * 260 - 22 }}
+        >
+          {col.label}
+        </div>
+      ))}
+
+      {graph.nodes.map(node => {
+        const size = cardSize(node);
+        return (
+          <button
+            key={node.id}
+            onClick={() => onSelect(node)}
+            onMouseDown={(e) => {
+              if ((e.target as HTMLElement).closest('[data-no-drag]')) return;
+              onSelect(node);
+              setDragging({ id: node.id, dx: (node.x || 0) - e.clientX, dy: (node.y || 0) - e.clientY });
+            }}
+            className={`absolute text-left rounded-xl border bg-zinc-900/95 shadow-xl transition-all hover:-translate-y-0.5 hover:border-indigo-500/50 ${
+              selectedId === node.id ? 'border-indigo-400 ring-2 ring-indigo-500/20' : 'border-zinc-800'
+            }`}
+            style={{ left: node.x, top: node.y, width: size.w, minHeight: size.h }}
+          >
+            <div className={`h-1.5 rounded-t-xl ${node.group === 'thread' ? 'bg-indigo-500' : node.group === 'concept' ? 'bg-emerald-500' : node.group === 'source' ? 'bg-amber-500' : node.group === 'main' ? 'bg-sky-500' : 'bg-zinc-500'}`} />
+            <div className="p-4">
+              <div className="flex items-start justify-between gap-3 mb-2">
+                <h3 className="text-sm font-bold text-zinc-100 leading-snug">{node.label}</h3>
+                <span className="shrink-0 text-[9px] uppercase tracking-widest text-zinc-500">{node.kind}</span>
+              </div>
+              {node.detail && <p className="text-xs text-zinc-400 leading-relaxed line-clamp-5 whitespace-pre-wrap">{node.detail}</p>}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function cardSize(node: UnderstandingNode) {
+  if (node.group === 'thread') return { w: 290, h: 170 };
+  if (node.group === 'concept') return { w: 230, h: 115 };
+  if (node.group === 'source') return { w: 270, h: 120 };
+  return { w: 270, h: 135 };
+}
+
+function actionLabel(action?: string) {
+  switch (action) {
+    case 'details': return 'Details';
+    case 'simplify': return 'Simplify';
+    case 'examples': return 'Examples';
+    case 'learning': return 'Learning';
+    case 'links': return 'Links';
+    case 'videos': return 'Videos';
+    default: return 'Ask';
+  }
+}
+
+const STOP_WORDS = new Set([
+  'about', 'after', 'again', 'also', 'because', 'being', 'between', 'could', 'every', 'first', 'from', 'have', 'into',
+  'just', 'like', 'more', 'most', 'other', 'should', 'some', 'than', 'that', 'their', 'there', 'these', 'thing', 'this',
+  'those', 'through', 'under', 'using', 'very', 'what', 'when', 'where', 'which', 'while', 'with', 'would', 'your',
+  'please', 'provide', 'related', 'context', 'thread', 'response', 'example', 'examples',
+]);
+
+function extractConcepts(text: string): string[] {
+  const cleaned = (text || '')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[`*_#>()[\]{}]/g, ' ')
+    .replace(/[^\w\s.-]/g, ' ');
+  const phrases = new Map<string, number>();
+  const add = (value: string) => {
+    const words = value.split(/\s+/).map(w => w.trim()).filter(Boolean);
+    if (!words.length || words.length > 4) return;
+    const normalized = words.join(' ');
+    const key = normalized.toLowerCase();
+    if (key.length < 4 || STOP_WORDS.has(key)) return;
+    phrases.set(titleCase(normalized), (phrases.get(titleCase(normalized)) || 0) + 1);
+  };
+
+  for (const match of cleaned.matchAll(/\b[A-Z][A-Za-z0-9.-]*(?:\s+[A-Z][A-Za-z0-9.-]*){0,3}\b/g)) {
+    add(match[0]);
+  }
+
+  const words = cleaned.toLowerCase().split(/\s+/).filter(w => w.length > 4 && !STOP_WORDS.has(w));
+  const freq = new Map<string, number>();
+  for (const word of words) freq.set(word, (freq.get(word) || 0) + 1);
+  for (const [word, count] of freq) {
+    if (count >= 2) add(word);
+  }
+
+  return Array.from(phrases.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([value]) => value);
+}
+
+function summarizeText(text: string) {
+  const compact = (text || '').replace(/\s+/g, ' ').trim();
+  if (!compact) return '';
+  const sentences = compact.split(/(?<=[.!?])\s+/).filter(Boolean);
+  return sentences.slice(0, 3).join(' ').slice(0, 900);
+}
+
+function titleCase(value: string) {
+  return value.replace(/\b\w/g, ch => ch.toUpperCase());
 }
