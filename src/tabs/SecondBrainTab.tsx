@@ -713,9 +713,9 @@ interface PhysicsSettings {
 }
 
 const DEFAULT_PHYSICS: PhysicsSettings = {
-  linkDistance: 30,
-  linkStrength: 0.6,
-  chargeStrength: -80,
+  linkDistance: 100,
+  linkStrength: 1,
+  chargeStrength: -100,
 };
 
 function PhysicsPanel({
