@@ -3,13 +3,14 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
   KanbanSquare, Sparkles, Plus, Trash2, X, Loader2, AlertCircle, Tag as TagIcon,
   Clock, Wand2, GripVertical, Bot, Play, CheckCircle2, Square as StopSquare,
-  FolderOpen, Folder, Music, MousePointer2, Users, PlayCircle,
+  FolderOpen, Folder, Music, MousePointer2, Users, PlayCircle, Save, FolderInput,
 } from 'lucide-react';
 import {
   loadBoard, saveBoard, newCard, planTasks, assistPlanBrief, resolveWorkingDir, COLUMNS,
   type KanbanBoard, type KanbanCard, type ColumnId, type Priority,
 } from '../lib/kanban';
 import { REVIEW_WATCHER_AGENT_SLUG, type AgentDef } from '../lib/agents';
+import { saveProject, loadProjectFromFolder, applyProject } from '../lib/project';
 import {
   startRun, cancelRun, recordRun, parseRunStream, listRuns,
   type AgentRun,
@@ -95,6 +96,17 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   const [openRunCardId, setOpenRunCardId] = useState<string | null>(null);
   const boardRef = useRef<KanbanBoard | null>(null);
   boardRef.current = board;
+
+  // Project save/load
+  const [clearPromptOpen, setClearPromptOpen] = useState(false);
+  const [projectBusy, setProjectBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const noticeTimer = useRef<number | undefined>(undefined);
+  const showNotice = (msg: string) => {
+    setNotice(msg);
+    if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(null), 4000);
+  };
 
   // Maestro state
   const [maestro, setMaestro] = useState<MaestroState>(DEFAULT_MAESTRO);
@@ -187,6 +199,91 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
   const deleteDoneCards = () => {
     if (!board) return;
     persist({ ...board, cards: board.cards.filter(c => c.column !== 'done') });
+  };
+
+  // Save the active board (+ agents, Maestro, run summary) to its project
+  // folder. Prompts for a folder if none is set yet. Returns whether it saved.
+  const saveProjectNow = async (): Promise<boolean> => {
+    let b = boardRef.current;
+    if (!b) return false;
+    if (!b.projectRoot?.trim()) {
+      const picked = await window.aios?.pickFolder({ title: 'Pick a folder to save this project in' });
+      if (!picked) return false;
+      persist({ ...b, projectRoot: picked }); // updates boardRef synchronously
+      b = boardRef.current;
+    }
+    setProjectBusy(true);
+    try {
+      const { path } = await saveProject(boardRef.current!);
+      showNotice(`Saved project to ${path.replace(/\\/g, '/')}`);
+      return true;
+    } catch (e: any) {
+      showNotice(`Save failed: ${e?.message ?? e}`);
+      return false;
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
+  // Load the saved project at `folder` and make it the active board. If there's
+  // no project there, just adopt the folder as the project root.
+  const loadProjectFrom = async (folder: string, opts?: { confirmReplace?: boolean }) => {
+    setProjectBusy(true);
+    try {
+      const project = await loadProjectFromFolder(folder);
+      if (!project) {
+        const b = boardRef.current;
+        if (b) persist({ ...b, projectRoot: folder });
+        showNotice('No saved AIOS project in that folder — set it as the project root.');
+        return;
+      }
+      if (opts?.confirmReplace && (boardRef.current?.cards.length ?? 0) > 0) {
+        const ok = window.confirm(
+          'Load this project? It replaces the current board. Unsaved changes to the current board will be lost.',
+        );
+        if (!ok) return;
+      }
+      const loaded = await applyProject(project, folder);
+      boardRef.current = loaded;
+      setBoard(loaded);
+      setMaestro(await loadMaestroState());
+      await hydrateLatestRuns().catch(() => {});
+      showNotice(`Loaded project — ${loaded.cards.length} card${loaded.cards.length === 1 ? '' : 's'}.`);
+    } catch (e: any) {
+      showNotice(`Load failed: ${e?.message ?? e}`);
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
+  const openProject = async () => {
+    const picked = await window.aios?.pickFolder({
+      title: 'Open an AIOS project folder',
+      defaultPath: boardRef.current?.projectRoot,
+    });
+    if (picked) await loadProjectFrom(picked, { confirmReplace: true });
+  };
+
+  // Clear opens a prompt offering to save first; doClear does the wipe.
+  const clearBoard = () => {
+    if (!board || board.cards.length === 0) return;
+    setClearPromptOpen(true);
+  };
+
+  const doClear = async (save: boolean) => {
+    if (save) {
+      const ok = await saveProjectNow();
+      if (!ok) return; // save failed or was cancelled — keep the board intact
+    }
+    // Stop any in-flight runs before wiping the cards they belong to.
+    await Promise.all(
+      Array.from(runsRef.current.values())
+        .filter(r => r.status === 'running')
+        .map(r => cancelRun(r.id).catch(e => console.error('clear board: cancel run failed', e))),
+    );
+    const b = boardRef.current;
+    if (b) persist({ ...b, cards: [] });
+    setClearPromptOpen(false);
   };
 
   const moveCard = (id: string, target: ColumnId, beforeId?: string) => {
@@ -597,11 +694,11 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
         <KanbanSquare className="w-3.5 h-3.5 text-indigo-400" />
         <span className="text-[11px] uppercase tracking-widest text-zinc-300">Board</span>
 
-        {/* Project root inline */}
+        {/* Project root inline — picking a folder auto-loads a saved project if one is there */}
         <button
           onClick={async () => {
             const picked = await window.aios?.pickFolder({ title: 'Pick the project folder for this board', defaultPath: board.projectRoot });
-            if (picked) persist({ ...board, projectRoot: picked });
+            if (picked) await loadProjectFrom(picked, { confirmReplace: true });
           }}
           title={board.projectRoot ? `Project root: ${board.projectRoot} — click to change` : 'No project root set — agents will refuse to run. Click to pick.'}
           className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] min-w-0 max-w-[44ch] border transition-colors ${
@@ -615,6 +712,26 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
             {board.projectRoot ? board.projectRoot.replace(/\\/g, '/') : 'Pick project folder'}
           </span>
           <FolderOpen className="w-3 h-3 shrink-0 opacity-60" />
+        </button>
+
+        {/* Project save / open */}
+        <button
+          onClick={saveProjectNow}
+          disabled={projectBusy}
+          title="Save this board, its agents, and Maestro settings into the project folder (.aios/project.json)"
+          className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] border bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {projectBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+          Save
+        </button>
+        <button
+          onClick={openProject}
+          disabled={projectBusy}
+          title="Open a saved project from another folder (replaces the current board)"
+          className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] border bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <FolderInput className="w-3 h-3" />
+          Open
         </button>
 
         <span className="text-[10px] text-zinc-500">
@@ -637,6 +754,15 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
         )}
 
         <div className="ml-auto flex items-center gap-1.5">
+          <button
+            onClick={clearBoard}
+            disabled={board.cards.length === 0}
+            title="Delete every card and reset the board. The project folder is kept."
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider border transition-colors bg-red-600/15 text-red-300 border-red-500/30 hover:bg-red-600/25 hover:text-red-200 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Trash2 className="w-3 h-3" />
+            Clear Board
+          </button>
           <button
             onClick={() => updateMaestro({ ...maestro, enabled: !maestro.enabled })}
             title={maestro.enabled ? 'Maestro is on — autonomous mode. Click to switch to manual.' : 'Manual mode — you assign and run cards. Click to enable Maestro.'}
@@ -785,6 +911,26 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
             onClose={() => setOpenRunCardId(null)}
             onCancel={() => cancelCardRun(openRunCardId)}
           />
+        )}
+        {clearPromptOpen && (
+          <ClearBoardModal
+            cardCount={board.cards.length}
+            hasProjectRoot={!!board.projectRoot?.trim()}
+            busy={projectBusy}
+            onCancel={() => setClearPromptOpen(false)}
+            onClear={doClear}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {notice && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-50 max-w-[80%] px-3 py-1.5 rounded-md border border-zinc-700 bg-zinc-900/95 text-zinc-200 text-[11px] shadow-lg truncate"
+          >
+            {notice}
+          </motion.div>
         )}
       </AnimatePresence>
     </div>
@@ -1179,6 +1325,72 @@ function CardItem({
         </div>
       </div>
     </div>
+  );
+}
+
+function ClearBoardModal({
+  cardCount, hasProjectRoot, busy, onCancel, onClear,
+}: {
+  cardCount: number;
+  hasProjectRoot: boolean;
+  busy: boolean;
+  onCancel: () => void;
+  onClear: (save: boolean) => void;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      onClick={busy ? undefined : onCancel}
+      className="fixed inset-0 z-50 bg-black/90 backdrop-blur-xl overflow-y-auto"
+    >
+      <div className="min-h-full flex items-center justify-center p-8">
+        <motion.div
+          initial={{ scale: 0.97, y: 12 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.97, y: 12 }}
+          onClick={e => e.stopPropagation()}
+          className="w-full max-w-md bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden"
+        >
+          <header className="h-14 px-5 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/30">
+            <Trash2 className="w-4 h-4 text-red-400" />
+            <h3 className="text-sm font-semibold">Clear board</h3>
+          </header>
+          <div className="px-5 py-4 space-y-2 text-[12px] text-zinc-300">
+            <p>
+              This deletes all {cardCount} card{cardCount === 1 ? '' : 's'} and resets the board.
+              The project folder is kept. Any running agents will be stopped.
+            </p>
+            <p className="text-zinc-500">
+              {hasProjectRoot
+                ? 'Save first to snapshot the board, its agents, and Maestro settings into the project folder.'
+                : 'No project folder is set yet — choosing “Save & clear” will ask you to pick one.'}
+            </p>
+          </div>
+          <div className="px-5 py-4 border-t border-zinc-800 flex items-center justify-end gap-2">
+            <button
+              onClick={onCancel}
+              disabled={busy}
+              className="px-3 py-1.5 rounded-md text-[11px] font-medium border border-zinc-700 text-zinc-300 hover:border-zinc-600 hover:text-zinc-100 disabled:opacity-40"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => onClear(false)}
+              disabled={busy}
+              className="px-3 py-1.5 rounded-md text-[11px] font-medium border border-red-500/30 bg-red-600/15 text-red-300 hover:bg-red-600/25 hover:text-red-200 disabled:opacity-40"
+            >
+              Clear without saving
+            </button>
+            <button
+              onClick={() => onClear(true)}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold border border-indigo-400/60 bg-indigo-500/25 text-indigo-100 hover:bg-indigo-500/35 disabled:opacity-40"
+            >
+              {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+              Save &amp; clear
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    </motion.div>
   );
 }
 

@@ -830,6 +830,57 @@ function start() {
     }
   });
 
+  // --- Project save/load: <projectRoot>/.aios/project.json ---
+  // A self-contained snapshot of a board (cards + layout), the agents it uses,
+  // Maestro settings, and a light run-history summary. Lets you point the board
+  // at a folder, build it out, save, then move on to the next project folder.
+  app.post('/api/project/save', async (req, res) => {
+    try {
+      const { projectRoot, project } = req.body || {};
+      if (!projectRoot || typeof projectRoot !== 'string') {
+        return res.status(400).json({ error: 'Missing projectRoot.' });
+      }
+      if (!project || typeof project !== 'object') {
+        return res.status(400).json({ error: 'Missing project payload.' });
+      }
+      const dir = path.resolve(projectRoot, '.aios');
+      const file = path.join(dir, 'project.json');
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(file, JSON.stringify(project, null, 2), 'utf8');
+      res.json({ path: file });
+    } catch (err) {
+      console.error('project save error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to save project.' });
+    }
+  });
+
+  app.post('/api/project/load', async (req, res) => {
+    try {
+      const { projectRoot } = req.body || {};
+      if (!projectRoot || typeof projectRoot !== 'string') {
+        return res.status(400).json({ error: 'Missing projectRoot.' });
+      }
+      const file = path.resolve(projectRoot, '.aios', 'project.json');
+      let raw;
+      try {
+        raw = await fs.readFile(file, 'utf8');
+      } catch (e) {
+        if (e?.code === 'ENOENT') return res.json({ exists: false });
+        throw e;
+      }
+      let project;
+      try {
+        project = JSON.parse(raw);
+      } catch {
+        return res.status(422).json({ error: 'project.json is not valid JSON.' });
+      }
+      res.json({ exists: true, project, path: file });
+    } catch (err) {
+      console.error('project load error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to load project.' });
+    }
+  });
+
   // --- Agent Builder: per-field AI assist ---
   // Asks Claude to fill or refine a single agent field given the rest of the
   // partial agent as context. Returns plain text (or JSON-stringified array

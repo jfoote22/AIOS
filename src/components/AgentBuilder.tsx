@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import {
   listAgents, saveAgent, deleteAgent, newAgent, draftAgentField, slugify, ensureBuiltInAgents,
+  onAgentsChanged,
   TOOL_CATALOG, DEFAULT_TOOLS,
   type AgentDef, type DraftField,
 } from '../lib/agents';
@@ -29,6 +30,12 @@ export default function AgentBuilder({ onAgentsChange }: Props) {
     refresh();
     loadBoard().then(board => setBoardProjectRoot(board.projectRoot?.trim() || '')).catch(() => setBoardProjectRoot(''));
   }, []);
+  // Re-read agents when something mutates them outside this view (e.g. loading
+  // a saved project merges its agents in).
+  useEffect(() => onAgentsChanged(() => {
+    refresh();
+    loadBoard().then(board => setBoardProjectRoot(board.projectRoot?.trim() || '')).catch(() => {});
+  }), []);
 
   const refresh = async () => {
     await ensureBuiltInAgents();

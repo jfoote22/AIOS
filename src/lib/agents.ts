@@ -79,6 +79,18 @@ export function newAgent(partial: Partial<AgentDef> & { name: string }): AgentDe
 
 export const listAgents = () => db.getAllAgents<AgentDef>();
 
+// Lightweight pub/sub so views that own a copy of the agent list (e.g. the
+// Agent Builder) can re-read from IndexedDB when something mutates agents
+// outside their own flow — notably loading a saved project.
+const agentsChangedListeners = new Set<() => void>();
+export function onAgentsChanged(fn: () => void): () => void {
+  agentsChangedListeners.add(fn);
+  return () => { agentsChangedListeners.delete(fn); };
+}
+export function emitAgentsChanged(): void {
+  agentsChangedListeners.forEach(fn => { try { fn(); } catch {} });
+}
+
 export const FRONTEND_MONITOR_AGENT_SLUG = 'frontend-monitor';
 export const BACKEND_ENGINEER_AGENT_SLUG = 'backend-engineer';
 export const NETWORKING_AGENT_SLUG = 'networking-diagnostics';
