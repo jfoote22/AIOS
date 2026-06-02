@@ -167,13 +167,14 @@ const VERDICT_STYLE: Record<string, { dot: string; text: string; label: string }
 // Renders the autonomous Deep Research thread: live progress, the streaming
 // cited report, adversarial verification, source transparency, and export.
 function DeepResearchPanel({
-  research, onCancel, onRetry, onVerify, onExport,
+  research, onCancel, onRetry, onVerify, onExport, onReportMouseUp,
 }: {
   research: ThreadResearch;
   onCancel: () => void;
   onRetry: () => void;
   onVerify: () => void;
   onExport: (format: 'md' | 'pdf' | 'docx') => void;
+  onReportMouseUp?: () => void;
 }) {
   const [showSources, setShowSources] = React.useState(false);
   const sources = research.sources || [];
@@ -250,10 +251,15 @@ function DeepResearchPanel({
               </div>
             )}
           </div>
-          <div className="max-w-none">
+          <div className="max-w-none cursor-text select-text" onMouseUp={onReportMouseUp}>
             <ReactMarkdown components={reportMarkdownComponents}>{research.report || ''}</ReactMarkdown>
             {isLoading && <span className="inline-block w-2 h-4 bg-indigo-400/70 animate-pulse align-middle ml-0.5" />}
           </div>
+          {!isLoading && (
+            <div className="mt-2 text-xs text-zinc-500 opacity-60">
+              Select text in the report to spin off a new thread
+            </div>
+          )}
         </div>
       )}
 
@@ -2293,6 +2299,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
               onRetry={() => runDeepDive(thread.id, thread.research!.query || thread.selectedContext || thread.title || '')}
               onVerify={() => verifyDeepDive(thread.id)}
               onExport={(format) => exportDeepDive(thread.id, format)}
+              onReportMouseUp={!isMobileDevice ? () => handleTextSelection(`deep-${thread.id}`, true, thread.id) : undefined}
             />
           )}
           {!thread.research && threadChat.messages.length === 0 && (
