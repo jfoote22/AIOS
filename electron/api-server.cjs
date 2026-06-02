@@ -163,8 +163,10 @@ async function fetchHermes(pathname, options = {}) {
   if (!baseUrl) throw new Error('Hermes base URL is not configured.');
   if (!apiKey) throw new Error('Hermes API key is not configured.');
 
-  const healthPath = pathname.startsWith('/health');
-  const root = healthPath ? hermesRootUrl(baseUrl) : baseUrl;
+  // `/health` and the `/api/*` admin routes (jobs, sessions) live at the server
+  // root, not under the OpenAI-compatible `/v1` prefix.
+  const rootRelative = pathname.startsWith('/health') || pathname.startsWith('/api/');
+  const root = rootRelative ? hermesRootUrl(baseUrl) : baseUrl;
   const response = await fetch(`${root}${pathname}`, {
     ...options,
     headers: {
@@ -228,31 +230,73 @@ function extractJsonFromText(text) {
   return null;
 }
 
-async function runHermesCronCommand(instruction) {
-  const completion = await fetchHermes('/chat/completions', {
-    method: 'POST',
-    body: JSON.stringify({
-      model: getModelId('hermes'),
-      stream: false,
-      messages: [
-        {
-          role: 'system',
-          content: [
-            'You are an API bridge for Hermes cron management.',
-            'Use the Hermes cronjob tool to satisfy the request.',
-            'Return ONLY one valid JSON object. No markdown, no prose.',
-            'For list responses, use { "jobs": [...] }.',
-            'For mutations, use { "ok": true, "job": object|null, "message": string }.',
-          ].join('\n'),
-        },
-        { role: 'user', content: instruction },
-      ],
-    }),
-  });
-  const text = extractOpenAIText(completion);
-  const parsed = extractJsonFromText(text);
-  if (!parsed) throw new Error(`Hermes cron returned no parsable JSON: ${text.slice(0, 500)}`);
-  return parsed;
+// Hermes exposes a direct, deterministic cron REST API under `/api/jobs`.
+// We call it straight rather than asking the chat model to drive the cronjob
+// tool — routing prompts through an LLM was rewording them on every save/list.
+//
+//   GET    /api/jobs              -> { jobs: [...] }
+//   GET    /api/jobs/{id}         -> { job: {...} }
+//   POST   /api/jobs              -> { job: {...} }   (create)
+//   PATCH  /api/jobs/{id}         -> { job: {...} }   (update)
+//   DELETE /api/jobs/{id}         -> { ok: true }
+//   POST   /api/jobs/{id}/pause | /resume | /run
+
+// Translate Hermes's job object into the flat shape the AIOS UI expects.
+function hermesJobToAios(job) {
+  if (!job || typeof job !== 'object') return null;
+  const sched = job.schedule;
+  const schedule =
+    typeof sched === 'string' ? sched
+    : (sched && typeof sched === 'object' ? (sched.expr || sched.display || '') : '')
+    || job.schedule_display || '';
+  const repeat = job.repeat;
+  const repeatTimes =
+    repeat && typeof repeat === 'object' ? (repeat.times ?? null)
+    : (typeof repeat === 'number' ? repeat : null);
+  const runCount =
+    repeat && typeof repeat === 'object' && typeof repeat.completed === 'number' ? repeat.completed
+    : (typeof job.run_count === 'number' ? job.run_count : 0);
+  let state = job.state || '';
+  if (!state) state = job.enabled === false ? 'paused' : 'scheduled';
+  return {
+    id: job.id,
+    name: job.name || '',
+    prompt: job.prompt || '',
+    schedule,
+    skills: Array.isArray(job.skills) ? job.skills : [],
+    deliver: job.deliver || '',
+    repeat: repeatTimes,
+    state,
+    next_run: job.next_run_at || job.next_run || null,
+    next_run_at: job.next_run_at || null,
+    run_count: runCount,
+    created_at: job.created_at || null,
+    provider: job.provider ?? null,
+    model: job.model ?? null,
+    script: job.script ?? null,
+    workdir: job.workdir ?? null,
+    enabled: job.enabled !== false,
+  };
+}
+
+// Build the request body for create (POST) / update (PATCH) from an AIOS draft.
+// Only include fields that were actually provided so PATCH stays partial.
+function aiosJobToHermesBody(job) {
+  const body = {};
+  if (typeof job.name === 'string') body.name = job.name;
+  if (typeof job.prompt === 'string') body.prompt = job.prompt;
+  if (typeof job.schedule === 'string' && job.schedule.trim()) body.schedule = job.schedule.trim();
+  if (Array.isArray(job.skills)) body.skills = job.skills;
+  if (typeof job.deliver === 'string' && job.deliver.trim()) body.deliver = job.deliver.trim();
+  if (job.provider) body.provider = job.provider;
+  if (job.model) body.model = job.model;
+  if (job.script) body.script = job.script;
+  if (job.workdir) body.workdir = job.workdir;
+  const repeat = job.repeat === '' ? null : job.repeat;
+  if (repeat !== null && repeat !== undefined && Number.isFinite(Number(repeat))) {
+    body.repeat = Number(repeat);
+  }
+  return body;
 }
 
 function start() {
@@ -330,12 +374,10 @@ function start() {
 
   app.get('/api/hermes/cron/jobs', async (_req, res) => {
     try {
-      const data = await runHermesCronCommand([
-        'Call cronjob(action="list") to list all scheduled jobs.',
-        'Return JSON only in this shape:',
-        '{ "jobs": [ { "id": string, "name": string, "prompt": string, "schedule": string, "skills": string[], "deliver": string, "repeat": number|null, "state": string, "next_run": string|null, "next_run_at": string|null, "run_count": number, "created_at": string|null, "provider": string|null, "model": string|null, "script": string|null, "workdir": string|null } ] }',
-      ].join('\n'));
-      res.json({ jobs: Array.isArray(data.jobs) ? data.jobs : [] });
+      // include_disabled keeps paused jobs in the list so the UI can re-enable them.
+      const data = await fetchHermes('/api/jobs?include_disabled=true', { method: 'GET' });
+      const jobs = Array.isArray(data?.jobs) ? data.jobs.map(hermesJobToAios).filter(Boolean) : [];
+      res.json({ jobs });
     } catch (err) {
       res.status(502).json({ error: err?.message || 'Failed to list Hermes cron jobs.' });
     }
@@ -344,27 +386,12 @@ function start() {
   app.post('/api/hermes/cron/jobs', async (req, res) => {
     try {
       const job = req.body || {};
-      const isUpdate = typeof job.id === 'string' && job.id.trim();
-      const instruction = [
-        isUpdate
-          ? `Update cron job ${JSON.stringify(job.id.trim())} using cronjob(action="update", job_id=${JSON.stringify(job.id.trim())}, ...).`
-          : 'Create a new cron job using cronjob(action="create", ...).',
-        'Use these fields exactly where provided:',
-        JSON.stringify({
-          name: job.name || undefined,
-          schedule: job.schedule || undefined,
-          prompt: job.prompt || undefined,
-          skills: Array.isArray(job.skills) ? job.skills : undefined,
-          deliver: job.deliver || undefined,
-          repeat: job.repeat === '' ? null : job.repeat,
-          provider: job.provider || null,
-          model: job.model || null,
-          script: job.script || null,
-          workdir: job.workdir || null,
-        }),
-        'Return JSON only: { "ok": true, "job": <updated-or-created-job-or-null>, "message": "saved" }',
-      ].join('\n');
-      res.json(await runHermesCronCommand(instruction));
+      const id = typeof job.id === 'string' ? job.id.trim() : '';
+      const body = aiosJobToHermesBody(job);
+      const data = id
+        ? await fetchHermes(`/api/jobs/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) })
+        : await fetchHermes('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
+      res.json({ ok: true, job: hermesJobToAios(data?.job), message: id ? 'updated' : 'created' });
     } catch (err) {
       res.status(502).json({ error: err?.message || 'Failed to save Hermes cron job.' });
     }
@@ -377,11 +404,13 @@ function start() {
         return res.status(400).json({ error: 'Unsupported cron action.' });
       }
       const jobId = String(req.params.jobId || '').trim();
-      const data = await runHermesCronCommand([
-        `Call cronjob(action=${JSON.stringify(action)}, job_id=${JSON.stringify(jobId)}).`,
-        'Return JSON only: { "ok": true, "job": null, "message": string }',
-      ].join('\n'));
-      res.json(data);
+      const path = `/api/jobs/${encodeURIComponent(jobId)}`;
+      if (action === 'remove') {
+        await fetchHermes(path, { method: 'DELETE' });
+        return res.json({ ok: true, job: null, message: 'removed' });
+      }
+      const data = await fetchHermes(`${path}/${action}`, { method: 'POST' });
+      res.json({ ok: true, job: hermesJobToAios(data?.job) || null, message: `${action} requested` });
     } catch (err) {
       res.status(502).json({ error: err?.message || 'Failed to update Hermes cron job.' });
     }
