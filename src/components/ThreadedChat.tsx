@@ -7,21 +7,40 @@ import {
   Eye, EyeOff, Palette, ClipboardList, FileX2, Lightbulb, Sparkles, RefreshCw,
   ChevronsUp, ChevronsDown, Globe, Loader2, Paperclip, ExternalLink, PlayCircle, AlertCircle,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import { apiUrl } from '../lib/apiBase';
 import {
   type Attachment, type LinkItem, type VideoItem,
+  type DeepSource, type Citation, type DeepResearchConfig, type VerifyResult,
   detectUrls, newAttachmentId, fetchUrlAttachment, fetchFileAttachment, buildSourcesBlock,
   findLinks, findVideos, formatCount, timeAgo,
+  runDeepResearch, cancelDeepResearch, verifyDeepReport,
 } from '../lib/research';
+import { exportReport } from '../lib/exportReport';
 
-// Verified results attached to a "Get Links" / "Get Videos" thread.
+// Verified results attached to a "Get Links" / "Get Videos" / "Deep Dive" thread.
 interface ThreadResearch {
-  kind: 'links' | 'videos';
+  kind: 'links' | 'videos' | 'deep';
   status: 'loading' | 'ready' | 'error';
   intro?: string;
   links?: LinkItem[];
   videos?: VideoItem[];
   error?: string;
+  // --- Deep Research (kind === 'deep') ---
+  runId?: string;
+  query?: string;
+  phase?: string;            // 'planning' | 'searching' | 'writing'
+  message?: string;          // live status line
+  config?: DeepResearchConfig;
+  plan?: string[];           // planner's sub-questions
+  depthLevel?: number;       // current recursion level (1-based)
+  depthTotal?: number;
+  depthQuestions?: string[]; // questions being explored at the current level
+  sources?: DeepSource[];    // attributed, read sources (grow live)
+  report?: string;           // streaming cited report (markdown)
+  citations?: Citation[];
+  verify?: VerifyResult;     // adversarial claim verification (on demand)
+  verifying?: boolean;
 }
 
 // Renders verified link/video results (curated intro + cards) for a thread.
@@ -124,6 +143,186 @@ function ResearchResultsPanel({ research, onRetry }: { research: ThreadResearch;
     </div>
   );
 }
+// Markdown renderer tuned for the streaming research report (compact, dark).
+const reportMarkdownComponents = {
+  h1: (p: any) => <h1 className="text-lg font-bold text-zinc-100 mt-4 mb-2" {...p} />,
+  h2: (p: any) => <h2 className="text-base font-bold text-zinc-100 mt-4 mb-2 border-b border-zinc-800 pb-1" {...p} />,
+  h3: (p: any) => <h3 className="text-sm font-bold text-zinc-200 mt-3 mb-1.5" {...p} />,
+  p: (p: any) => <p className="text-sm text-zinc-300 leading-relaxed my-2" {...p} />,
+  ul: (p: any) => <ul className="list-disc pl-5 my-2 space-y-1 text-sm text-zinc-300" {...p} />,
+  ol: (p: any) => <ol className="list-decimal pl-5 my-2 space-y-1 text-sm text-zinc-300" {...p} />,
+  li: (p: any) => <li className="leading-relaxed" {...p} />,
+  a: (p: any) => <a className="text-indigo-400 hover:text-indigo-300 underline break-words" target="_blank" rel="noreferrer" {...p} />,
+  code: (p: any) => <code className="bg-zinc-800 text-emerald-300 px-1 py-0.5 rounded text-[12px]" {...p} />,
+  blockquote: (p: any) => <blockquote className="border-l-2 border-indigo-500/40 pl-3 italic text-zinc-400 my-2" {...p} />,
+  strong: (p: any) => <strong className="text-zinc-100 font-semibold" {...p} />,
+};
+
+const VERDICT_STYLE: Record<string, { dot: string; text: string; label: string }> = {
+  supported:   { dot: 'bg-emerald-500', text: 'text-emerald-400', label: 'Supported' },
+  partial:     { dot: 'bg-amber-400',   text: 'text-amber-400',   label: 'Partial' },
+  unsupported: { dot: 'bg-red-500',     text: 'text-red-400',     label: 'Unsupported' },
+};
+
+// Renders the autonomous Deep Research thread: live progress, the streaming
+// cited report, adversarial verification, source transparency, and export.
+function DeepResearchPanel({
+  research, onCancel, onRetry, onVerify, onExport,
+}: {
+  research: ThreadResearch;
+  onCancel: () => void;
+  onRetry: () => void;
+  onVerify: () => void;
+  onExport: (format: 'md' | 'pdf' | 'docx') => void;
+}) {
+  const [showSources, setShowSources] = React.useState(false);
+  const sources = research.sources || [];
+  const isLoading = research.status === 'loading';
+  const hasReport = !!(research.report && research.report.trim());
+
+  if (research.status === 'error') {
+    return (
+      <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm text-red-300">
+        <div className="flex items-center gap-2 font-semibold mb-1">
+          <AlertCircle className="w-4 h-4" /> Deep research failed
+        </div>
+        <p className="text-red-300/80 text-xs leading-relaxed mb-3">{research.error}</p>
+        <button onClick={onRetry} className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold rounded-lg transition-colors">
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Live progress header */}
+      {isLoading && (
+        <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm text-zinc-200">
+              <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+              <span className="font-semibold">{research.message || 'Researching…'}</span>
+            </div>
+            <button onClick={onCancel} className="px-2.5 py-1 bg-zinc-800 hover:bg-red-600/30 border border-zinc-700 hover:border-red-500/40 text-zinc-300 hover:text-red-300 text-[11px] font-bold rounded-lg transition-colors">
+              Cancel
+            </button>
+          </div>
+          {research.depthTotal ? (
+            <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+              <span className="px-2 py-0.5 bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 rounded-full font-bold uppercase tracking-wider">
+                Level {research.depthLevel}/{research.depthTotal}
+              </span>
+              <span>{sources.length} source{sources.length === 1 ? '' : 's'} read</span>
+            </div>
+          ) : null}
+          {research.plan && research.plan.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-[10px] uppercase tracking-widest text-zinc-600 font-bold">Research plan</p>
+              {research.plan.map((q, i) => (
+                <div key={i} className="text-xs text-zinc-400 flex gap-2">
+                  <span className="text-indigo-400/70">{i + 1}.</span><span>{q}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* The streaming / final report */}
+      {hasReport && (
+        <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-4">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2 text-[11px] text-zinc-500 uppercase tracking-widest font-bold">
+              <Brain className="w-3.5 h-3.5 text-indigo-400" /> Research Report
+            </div>
+            {!isLoading && (
+              <div className="flex items-center gap-1.5">
+                <button onClick={onVerify} disabled={research.verifying}
+                  title="Adversarially fact-check each cited claim against its source"
+                  className="flex items-center gap-1 px-2 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-300 text-[10px] font-bold rounded-md transition-colors">
+                  {research.verifying ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                  Verify
+                </button>
+                <button onClick={() => onExport('md')} title="Export as Markdown" className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] font-bold rounded-md transition-colors">MD</button>
+                <button onClick={() => onExport('pdf')} title="Export as PDF" className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] font-bold rounded-md transition-colors">PDF</button>
+                <button onClick={() => onExport('docx')} title="Export as Word" className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] font-bold rounded-md transition-colors">DOCX</button>
+              </div>
+            )}
+          </div>
+          <div className="max-w-none">
+            <ReactMarkdown components={reportMarkdownComponents}>{research.report || ''}</ReactMarkdown>
+            {isLoading && <span className="inline-block w-2 h-4 bg-indigo-400/70 animate-pulse align-middle ml-0.5" />}
+          </div>
+        </div>
+      )}
+
+      {/* Verification results */}
+      {research.verify && research.verify.claims.length > 0 && (
+        <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-4 space-y-2">
+          <div className="flex items-center gap-2 text-[11px] text-zinc-500 uppercase tracking-widest font-bold mb-1">
+            <Sparkles className="w-3.5 h-3.5 text-indigo-400" /> Claim Verification
+            {research.verify.tally && (
+              <span className="ml-auto flex items-center gap-2 normal-case tracking-normal">
+                {Object.entries(research.verify.tally).map(([v, n]) => (
+                  <span key={v} className={`flex items-center gap-1 ${VERDICT_STYLE[v]?.text || 'text-zinc-400'}`}>
+                    <span className={`w-2 h-2 rounded-full ${VERDICT_STYLE[v]?.dot || 'bg-zinc-500'}`} />{n}
+                  </span>
+                ))}
+              </span>
+            )}
+          </div>
+          {research.verify.claims.map((c, i) => {
+            const style = VERDICT_STYLE[c.verdict] || VERDICT_STYLE.partial;
+            return (
+              <div key={i} className="flex items-start gap-2 text-xs">
+                <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${style.dot}`} />
+                <div className="min-w-0">
+                  <span className="text-zinc-300">{c.claim}</span>
+                  {c.citation != null && <span className="text-indigo-400/80"> [{c.citation}]</span>}
+                  <span className={`ml-1 font-semibold ${style.text}`}>· {style.label}</span>
+                  {c.note && <span className="text-zinc-500"> — {c.note}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Source transparency (the research trail) */}
+      {sources.length > 0 && (
+        <div className="bg-zinc-900/40 border border-zinc-800 rounded-xl overflow-hidden">
+          <button onClick={() => setShowSources(s => !s)}
+            className="w-full flex items-center justify-between px-4 py-2.5 text-[11px] uppercase tracking-widest font-bold text-zinc-400 hover:text-white transition-colors">
+            <span className="flex items-center gap-2"><Globe className="w-3.5 h-3.5 text-emerald-400" /> {sources.length} Sources & Process</span>
+            {showSources ? <ChevronsUp className="w-4 h-4" /> : <ChevronsDown className="w-4 h-4" />}
+          </button>
+          {showSources && (
+            <div className="px-4 pb-4 space-y-2">
+              {sources.map((s) => (
+                <a key={s.n} href={s.url} target="_blank" rel="noreferrer"
+                  className="block group bg-zinc-900/70 hover:bg-zinc-800/70 border border-zinc-800 hover:border-indigo-500/40 rounded-lg p-3 transition-all">
+                  <div className="flex items-start gap-2">
+                    <span className="shrink-0 w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 text-[10px] font-bold flex items-center justify-center mt-0.5">{s.n}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm font-semibold text-zinc-100 group-hover:text-white truncate">{s.title}</span>
+                        <ExternalLink className="w-3 h-3 text-zinc-600 group-hover:text-indigo-400 shrink-0" />
+                      </div>
+                      <div className="text-[10px] text-zinc-600 truncate mb-1">{s.subQuestion}</div>
+                      <div className="text-xs text-zinc-400 leading-snug whitespace-pre-wrap line-clamp-4">{s.summary}</div>
+                    </div>
+                  </div>
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 import { getCachedModels, onModelsChange, type ModelSlot } from '../lib/models';
 import { getConfigured, onConfiguredChange, type ProviderId } from '../lib/providers';
 import {
@@ -147,7 +346,7 @@ export interface Thread {
   title?: string;
   rowId?: number; // Track which row this thread belongs to
   sourceType?: 'main' | 'thread'; // Track if created from main chat or another thread
-  actionType?: 'ask' | 'details' | 'simplify' | 'examples' | 'learning' | 'links' | 'videos'; // Track which context action was used
+  actionType?: 'ask' | 'details' | 'simplify' | 'examples' | 'learning' | 'links' | 'videos' | 'deep'; // Track which context action was used
   research?: ThreadResearch; // Verified links/videos for 'links'/'videos' threads
 }
 
@@ -1126,7 +1325,109 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     }
   };
 
-  const createNewThread = (context: string, autoExpand: boolean = false, autoSend: boolean = false, actionType: 'ask' | 'details' | 'simplify' | 'examples' | 'learning' | 'links' | 'videos' = 'ask') => {
+  // Drives the autonomous Deep Research loop for a thread, patching its
+  // `research` object as streamed events arrive.
+  const runDeepDive = async (threadId: string, query: string) => {
+    const runId = `deep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // Merge a patch into this thread's existing research object.
+    const patch = (p: Partial<ThreadResearch>) =>
+      setThreads(prev => prev.map(t =>
+        t.id === threadId ? { ...t, research: { ...(t.research as ThreadResearch), ...p } } : t));
+
+    setThreads(prev => prev.map(t => t.id === threadId ? {
+      ...t,
+      research: {
+        kind: 'deep', status: 'loading', runId, query,
+        phase: 'planning', message: 'Planning the investigation…',
+        plan: [], sources: [], report: '', citations: [],
+      },
+    } : t));
+
+    try {
+      await runDeepResearch(query, { runId, authMode: anthropicAuthMode }, (e) => {
+        switch (e.type) {
+          case 'status':
+            patch({ phase: e.phase, message: e.message }); break;
+          case 'plan':
+            patch({ plan: e.questions, config: e.config, phase: 'searching' }); break;
+          case 'depth':
+            patch({ depthLevel: e.level, depthTotal: e.total, depthQuestions: e.questions, phase: 'searching' }); break;
+          case 'source':
+            setThreads(prev => prev.map(t => {
+              if (t.id !== threadId) return t;
+              const r = (t.research || {}) as ThreadResearch;
+              return { ...t, research: { ...r, sources: [...(r.sources || []), e.source] } };
+            }));
+            break;
+          case 'report-delta':
+            setThreads(prev => prev.map(t => {
+              if (t.id !== threadId) return t;
+              const r = (t.research || {}) as ThreadResearch;
+              return { ...t, research: { ...r, phase: 'writing', report: (r.report || '') + e.delta } };
+            }));
+            break;
+          case 'report':
+            patch({ report: e.report, citations: e.citations }); break;
+          case 'result':
+            patch({
+              status: 'ready',
+              plan: e.result.plan, config: e.result.config,
+              sources: e.result.sources, report: e.result.report, citations: e.result.citations,
+            });
+            break;
+          case 'done':
+            patch({ status: 'ready', message: '' }); break;
+          case 'canceled':
+            patch({ status: 'error', error: 'Research canceled.' }); break;
+          case 'error':
+            patch({ status: 'error', error: e.error }); break;
+          default:
+            break;
+        }
+      });
+    } catch (err: any) {
+      patch({ status: 'error', error: err?.message || 'Deep research failed.' });
+    }
+  };
+
+  const cancelDeepDive = (threadId: string) => {
+    const thread = threads.find(t => t.id === threadId);
+    const runId = thread?.research?.runId;
+    if (runId) cancelDeepResearch(runId);
+  };
+
+  // Adversarially fact-check the report's cited claims against their sources.
+  const verifyDeepDive = async (threadId: string) => {
+    const thread = threads.find(t => t.id === threadId);
+    const r = thread?.research;
+    if (!r?.report || !r.sources?.length) return;
+    const patch = (p: Partial<ThreadResearch>) =>
+      setThreads(prev => prev.map(t =>
+        t.id === threadId ? { ...t, research: { ...(t.research as ThreadResearch), ...p } } : t));
+    patch({ verifying: true });
+    try {
+      const verify = await verifyDeepReport(r.query || thread?.selectedContext || '', r.report, r.sources, anthropicAuthMode);
+      patch({ verify, verifying: false });
+    } catch (e: any) {
+      patch({ verifying: false, verify: { claims: [{ claim: `Verification failed: ${e?.message || e}`, citation: null, verdict: 'partial', note: '' }] } });
+    }
+  };
+
+  // Export a finished report. Markdown is assembled client-side; PDF/DOCX go
+  // through the main process (printToPDF / docx) via the preload bridge.
+  const exportDeepDive = async (threadId: string, format: 'md' | 'pdf' | 'docx') => {
+    const thread = threads.find(t => t.id === threadId);
+    const r = thread?.research;
+    if (!r?.report) return;
+    const safeTitle = (r.query || thread?.title || 'deep-research').slice(0, 60).replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'deep-research';
+    try {
+      await exportReport(format, safeTitle, r);
+    } catch (e: any) {
+      alert(`Export failed: ${e?.message || e}`);
+    }
+  };
+
+  const createNewThread = (context: string, autoExpand: boolean = false, autoSend: boolean = false, actionType: 'ask' | 'details' | 'simplify' | 'examples' | 'learning' | 'links' | 'videos' | 'deep' = 'ask') => {
     // Auto-exit fullscreen mode when creating new thread to ensure proper functionality
     const wasInFullscreen = !!fullscreenThread;
     if (fullscreenThread) {
@@ -1249,6 +1550,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     if (actionType === 'links' || actionType === 'videos') {
       runThreadResearch(newThreadId, actionType, context);
     }
+    // "Deep Dive": run the autonomous multi-step research loop.
+    if (actionType === 'deep') {
+      runDeepDive(newThreadId, context);
+    }
   };
 
   const closeThread = (threadId: string) => {
@@ -1308,6 +1613,15 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         label: 'Get videos',
         onClick: () => createNewThread(selectedText, false, false, 'videos'),
         colorScheme: getActionColorScheme('videos')
+      },
+      {
+        action: 'deep',
+        icon: <Brain className="w-3.5 h-3.5 text-white" />,
+        label: 'Deep Dive (autonomous research)',
+        // Kicks off the multi-step plan → search → read → synthesize loop and
+        // produces a cited report — no model prompt, real web research.
+        onClick: () => createNewThread(selectedText, false, false, 'deep'),
+        colorScheme: getActionColorScheme('deep')
       },
       {
         action: 'examples',
@@ -1604,6 +1918,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         return 'Get links';
       case 'videos':
         return 'Get videos';
+      case 'deep':
+        return 'Deep Dive';
       default:
         return 'Thread';
     }
@@ -1681,6 +1997,14 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           badgeText: 'text-white',
           badgeBg: 'bg-indigo-400',
           badgeBorder: 'border-indigo-400'
+        };
+      case 'deep':
+        return {
+          bg: 'bg-violet-500',
+          border: 'border-violet-500',
+          badgeText: 'text-white',
+          badgeBg: 'bg-violet-500',
+          badgeBorder: 'border-violet-500'
         };
       default:
         return {
@@ -1955,10 +2279,20 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         {/* Thread Messages */}
         <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-gradient-to-b from-transparent to-zinc-900/10 min-h-0">
           {/* Verified link/video results for 'links'/'videos' threads */}
-          {thread.research && (
+          {thread.research && thread.research.kind !== 'deep' && (
             <ResearchResultsPanel
               research={thread.research}
-              onRetry={() => runThreadResearch(thread.id, thread.research!.kind, thread.selectedContext || thread.title || '')}
+              onRetry={() => runThreadResearch(thread.id, thread.research!.kind as 'links' | 'videos', thread.selectedContext || thread.title || '')}
+            />
+          )}
+          {/* Autonomous Deep Research for 'deep' threads */}
+          {thread.research && thread.research.kind === 'deep' && (
+            <DeepResearchPanel
+              research={thread.research}
+              onCancel={() => cancelDeepDive(thread.id)}
+              onRetry={() => runDeepDive(thread.id, thread.research!.query || thread.selectedContext || thread.title || '')}
+              onVerify={() => verifyDeepDive(thread.id)}
+              onExport={(format) => exportDeepDive(thread.id, format)}
             />
           )}
           {!thread.research && threadChat.messages.length === 0 && (
@@ -2901,6 +3235,13 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                 label: 'Give examples',
                 onClick: () => createNewThread(`Please provide 3-5 concrete, practical examples that illustrate or relate to: &quot;${selectedText}&quot;. Make the examples diverse and easy to understand.`, false, true, 'examples'),
                 colorScheme: getActionColorScheme('examples')
+              },
+              {
+                action: 'deep',
+                icon: <Brain className="w-3.5 h-3.5 text-white" />,
+                label: 'Deep Dive (autonomous research)',
+                onClick: () => createNewThread(selectedText, false, false, 'deep'),
+                colorScheme: getActionColorScheme('deep')
               },
               {
                 action: 'links',

@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('aios', {
   pickFolder: (opts) => ipcRenderer.invoke('dialog:pick-folder', opts || {}),
   // Native multi-file picker (DeepDive research attachments)
   pickFiles: (opts) => ipcRenderer.invoke('dialog:pick-files', opts || {}),
+  // Deep Research report export (md/pdf/docx) — save dialog handled in main.
+  exportReport: (payload) => ipcRenderer.invoke('research:export', payload),
   // Multi-provider keys
   getProviderKey: (providerId) => ipcRenderer.invoke('keys:get', providerId),
   setProviderKey: (providerId, key) => ipcRenderer.invoke('keys:set', providerId, key),

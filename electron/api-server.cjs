@@ -17,6 +17,7 @@ const { getProviderKey, setProviderKey } = require('./keystore.cjs');
 const { getModelId, setModelId } = require('./modelstore.cjs');
 const extract = require('./extract.cjs');
 const research = require('./research.cjs');
+const deepResearch = require('./deep-research.cjs');
 
 // Dynamic imports for ESM-only ai SDK packages.
 async function loadAi() {
@@ -974,6 +975,7 @@ function start() {
   // which signals the AbortController held in `activeRuns`.
 
   const activeRuns = new Map(); // runId -> AbortController
+  const activeDeepRuns = new Map(); // deep-research runId -> AbortController
 
   app.post('/api/agents/run', async (req, res) => {
     const { runId, card, agent, authMode } = req.body || {};
@@ -1410,6 +1412,82 @@ Be specific and faithful to what is actually visible. Do not invent details. If 
     } catch (e) {
       console.error('find-videos error:', e);
       res.status(400).json({ error: e?.message || 'Failed to find videos' });
+    }
+  });
+
+  // --- DeepDive Deep Research: autonomous plan → search → read → synthesize ---
+  // Streams newline-delimited JSON events (NDJSON): the renderer reads them with
+  // a stream reader to render live progress, per-source cards, and the report.
+  // Gemini grounds search + summarizes sources; Claude synthesizes the report.
+  app.post('/api/research/deep', async (req, res) => {
+    const { runId, query, breadth, depth, perQuery, concurrency, totalWords, authMode } = req.body || {};
+    if (!query || typeof query !== 'string' || !query.trim()) {
+      return res.status(400).json({ error: 'query is required' });
+    }
+    const id = (typeof runId === 'string' && runId) ? runId : `deep-${Date.now()}`;
+    const controller = new AbortController();
+    activeDeepRuns.set(id, controller);
+
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    const emit = (event) => {
+      if (res.writableEnded) return;
+      try { res.write(JSON.stringify(event) + '\n'); } catch { /* client gone */ }
+    };
+
+    // If the client disconnects, abort the in-flight research. Listen on the
+    // RESPONSE stream — `req`'s 'close' fires as soon as express.json() finishes
+    // reading the POST body (i.e. immediately), which would abort every run.
+    // `res` 'close' fires only when the response connection actually ends, and
+    // the writableEnded guard means our own res.end() never counts as a cancel.
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+
+    try {
+      emit({ type: 'run', runId: id });
+      const result = await deepResearch.runDeepResearch({
+        query: query.trim(),
+        breadth, depth, perQuery, concurrency, totalWords,
+        authMode,
+        signal: controller.signal,
+        onEvent: emit,
+      });
+      // Final consolidated payload the renderer persists on the thread.
+      emit({ type: 'result', result });
+    } catch (err) {
+      if (err?.canceled || controller.signal.aborted) {
+        emit({ type: 'canceled' });
+      } else {
+        console.error('deep research error:', err);
+        emit({ type: 'error', error: err?.message || 'Deep research failed.' });
+      }
+    } finally {
+      activeDeepRuns.delete(id);
+      if (!res.writableEnded) res.end();
+    }
+  });
+
+  app.post('/api/research/deep/cancel', (req, res) => {
+    const { runId } = req.body || {};
+    const c = runId ? activeDeepRuns.get(runId) : null;
+    if (c) { try { c.abort(); } catch {} }
+    res.json({ canceled: !!c });
+  });
+
+  // --- DeepDive Deep Research: adversarial claim verification ---
+  // Judges each cited claim in a finished report against its source summary.
+  app.post('/api/research/verify', async (req, res) => {
+    try {
+      const { query, report, sources, authMode } = req.body || {};
+      if (!report || !Array.isArray(sources)) {
+        return res.status(400).json({ error: 'report and sources are required' });
+      }
+      const result = await deepResearch.verifyReport({ query: query || '', report, sources, authMode });
+      res.json(result);
+    } catch (e) {
+      console.error('verify error:', e);
+      res.status(400).json({ error: e?.message || 'Verification failed' });
     }
   });
 

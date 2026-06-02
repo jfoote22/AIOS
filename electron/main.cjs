@@ -5,6 +5,7 @@ const { getProviderKey, setProviderKey, listConfiguredProviders } = require('./k
 const modelstore = require('./modelstore.cjs');
 const apiServer = require('./api-server.cjs');
 const terminal = require('./terminal.cjs');
+const reportExport = require('./report-export.cjs');
 
 // --- Legacy single-key compatibility (Gemini) ---
 function migrateLegacyKey() {
@@ -288,6 +289,25 @@ ipcMain.handle('dialog:pick-files', async (_e, opts = {}) => {
   });
   if (result.canceled || !result.filePaths.length) return [];
   return result.filePaths;
+});
+
+// Export a Deep Research report (md/pdf/docx). Shows a save dialog and writes
+// the file. Returns { ok, path } or { canceled: true }.
+ipcMain.handle('research:export', async (_e, { format, title, markdown } = {}) => {
+  if (!markdown || typeof markdown !== 'string') throw new Error('markdown is required');
+  const fmt = ['md', 'pdf', 'docx'].includes(format) ? format : 'md';
+  const built = await reportExport.buildExport(fmt, title || 'Research Report', markdown);
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  const safeName = (title || 'research-report').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'research-report';
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Export research report',
+    defaultPath: path.join(app.getPath('downloads'), `${safeName}.${built.ext}`),
+    filters: [{ name: built.ext.toUpperCase(), extensions: [built.ext] }],
+  });
+  if (result.canceled || !result.filePath) return { canceled: true };
+  if (built.buffer) fs.writeFileSync(result.filePath, built.buffer);
+  else fs.writeFileSync(result.filePath, built.text, 'utf8');
+  return { ok: true, path: result.filePath };
 });
 
 // Multi-provider key handlers

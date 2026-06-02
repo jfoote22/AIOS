@@ -164,6 +164,159 @@ export async function findVideos(context: string): Promise<ResearchResult<VideoI
   return { intro: data.intro || '', items: Array.isArray(data.items) ? data.items : [] };
 }
 
+// ---------------------------------------------------------------------------
+// Deep Research: autonomous plan → search → read → synthesize, streamed as NDJSON.
+// ---------------------------------------------------------------------------
+
+export interface DeepSource {
+  n: number;
+  title: string;
+  url: string;
+  subQuestion: string;
+  summary: string;
+}
+
+export interface Citation {
+  n: number;
+  title: string;
+  url: string;
+}
+
+export interface ClaimVerdict {
+  claim: string;
+  citation: number | null;
+  verdict: 'supported' | 'partial' | 'unsupported';
+  note: string;
+}
+
+export interface VerifyResult {
+  claims: ClaimVerdict[];
+  tally?: Record<string, number>;
+}
+
+export interface DeepResearchConfig {
+  breadth: number;
+  depth: number;
+  perQuery: number;
+  concurrency: number;
+  totalWords: number;
+}
+
+// One streamed event from /api/research/deep. Discriminated by `type`.
+export type DeepEvent =
+  | { type: 'run'; runId: string }
+  | { type: 'status'; phase: string; message: string }
+  | { type: 'plan'; query: string; questions: string[]; config: DeepResearchConfig }
+  | { type: 'depth'; level: number; total: number; questions: string[] }
+  | { type: 'source'; source: DeepSource }
+  | { type: 'note'; message: string }
+  | { type: 'report-delta'; delta: string }
+  | { type: 'report'; report: string; citations: Citation[] }
+  | { type: 'done'; sources: number }
+  | { type: 'result'; result: DeepResearchData }
+  | { type: 'canceled' }
+  | { type: 'error'; error: string };
+
+// The consolidated payload persisted on a deep-research thread.
+export interface DeepResearchData {
+  query: string;
+  config: DeepResearchConfig;
+  plan: string[];
+  sources: DeepSource[];
+  report: string;
+  citations: Citation[];
+}
+
+export interface DeepResearchOptions {
+  runId?: string;
+  breadth?: number;
+  depth?: number;
+  perQuery?: number;
+  concurrency?: number;
+  totalWords?: number;
+  authMode?: string;
+  signal?: AbortSignal;
+}
+
+// Open the deep-research stream and invoke onEvent for each NDJSON event.
+// Resolves when the stream ends. Throwing inside onEvent is swallowed so a
+// single bad render can't tear down the whole stream.
+export async function runDeepResearch(
+  query: string,
+  opts: DeepResearchOptions,
+  onEvent: (e: DeepEvent) => void,
+): Promise<void> {
+  const res = await fetch(apiUrl('/api/research/deep'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query,
+      runId: opts.runId,
+      breadth: opts.breadth,
+      depth: opts.depth,
+      perQuery: opts.perQuery,
+      concurrency: opts.concurrency,
+      totalWords: opts.totalWords,
+      authMode: opts.authMode,
+    }),
+    signal: opts.signal,
+  });
+  if (!res.ok || !res.body) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error((data as any)?.error || `HTTP ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const dispatch = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let event: DeepEvent | null = null;
+    try { event = JSON.parse(trimmed); } catch { return; }
+    if (event) { try { onEvent(event); } catch (e) { console.error('deep event handler error:', e); } }
+  };
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      dispatch(buffer.slice(0, nl));
+      buffer = buffer.slice(nl + 1);
+    }
+  }
+  if (buffer) dispatch(buffer);
+}
+
+export async function cancelDeepResearch(runId: string): Promise<void> {
+  try {
+    await fetch(apiUrl('/api/research/deep/cancel'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ runId }),
+    });
+  } catch { /* best effort */ }
+}
+
+export async function verifyDeepReport(
+  query: string,
+  report: string,
+  sources: DeepSource[],
+  authMode?: string,
+): Promise<VerifyResult> {
+  const res = await fetch(apiUrl('/api/research/verify'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, report, sources, authMode }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as any)?.error || `HTTP ${res.status}`);
+  return { claims: Array.isArray(data.claims) ? data.claims : [], tally: data.tally };
+}
+
 // Compact number formatting for view/like counts (e.g. 1.2M, 45K).
 export function formatCount(n?: number): string {
   if (!n || n < 0) return '0';

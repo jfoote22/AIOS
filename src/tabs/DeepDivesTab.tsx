@@ -619,10 +619,12 @@ function buildUnderstandingGraph(state: any, layout: UnderstandingLayout = 'hori
   for (const [idx, thread] of threads.entries()) {
     const threadId = `thread:${thread.id || idx}`;
     const label = thread.title || `${actionLabel(thread.actionType)} ${idx + 1}`;
+    const isDeep = thread.research?.kind === 'deep';
     const threadText = [
       thread.selectedContext || '',
       ...(thread.messages || []).map((m: any) => m?.content || ''),
       thread.research?.intro || '',
+      isDeep ? (thread.research?.report || '') : '',
     ].join('\n\n');
 
     addNode({
@@ -651,6 +653,48 @@ function buildUnderstandingGraph(state: any, layout: UnderstandingLayout = 'hori
       current.threadIds.add(threadId);
       if (current.samples.length < 3 && thread.selectedContext) current.samples.push(thread.selectedContext.slice(0, 180));
       conceptCounts.set(concept, current);
+    }
+
+    // Deep Research threads: render the planner's real decomposition —
+    // sub-questions become concept nodes, and each read source attaches to the
+    // sub-question it answered. This replaces the regex heuristics with the
+    // agent's actual research tree.
+    if (isDeep) {
+      const plan: string[] = thread.research?.plan || [];
+      const planNodeId = (qi: number) => `deepq:${thread.id || idx}:${qi}`;
+      plan.forEach((q, qi) => {
+        addNode({
+          id: planNodeId(qi),
+          label: `Q${qi + 1}. ${q.length > 70 ? q.slice(0, 70) + '…' : q}`,
+          group: 'concept',
+          kind: 'question',
+          val: 7,
+          detail: q,
+        });
+        addLink({ source: threadId, target: planNodeId(qi), kind: 'mentions', value: 2 });
+      });
+
+      const deepSources: any[] = thread.research?.sources || [];
+      for (const [sourceIdx, source] of deepSources.slice(0, 16).entries()) {
+        const sourceId = `deepsrc:${thread.id || idx}:${sourceIdx}`;
+        addNode({
+          id: sourceId,
+          label: source.title || source.url || 'Source',
+          group: 'source',
+          kind: 'link',
+          val: 4,
+          detail: source.summary || source.url || '',
+          data: { url: source.url },
+        });
+        const matchedQ = plan.findIndex(q => q === source.subQuestion);
+        addLink({
+          source: matchedQ >= 0 ? planNodeId(matchedQ) : threadId,
+          target: sourceId,
+          kind: 'source',
+          value: 1.5,
+        });
+      }
+      continue;
     }
 
     const researchLinks = thread.research?.links || [];
@@ -857,6 +901,7 @@ function actionLabel(action?: string) {
     case 'learning': return 'Learning';
     case 'links': return 'Links';
     case 'videos': return 'Videos';
+    case 'deep': return 'Deep Dive';
     default: return 'Ask';
   }
 }
