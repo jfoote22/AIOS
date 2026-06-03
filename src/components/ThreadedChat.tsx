@@ -3,8 +3,8 @@ import { useChat } from 'ai/react';
 import React from 'react';
 import {
   Search, Link2, Video, FileText, Target, MessageSquare, Scissors, Brain,
-  RotateCw, Maximize2, Minimize2, ChevronLeft, ChevronRight, X,
-  Eye, EyeOff, Palette, ClipboardList, FileX2, Lightbulb, Sparkles, RefreshCw,
+  RotateCw, Maximize2, Minimize2, ChevronLeft, ChevronRight, ChevronDown, X,
+  Eye, EyeOff, Palette, ClipboardList, FileX2, Lightbulb, Sparkles, RefreshCw, BrainCircuit,
   ChevronsUp, ChevronsDown, Globe, Loader2, Paperclip, ExternalLink, PlayCircle, AlertCircle,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -371,6 +371,31 @@ interface MobileSelection {
 
 type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'grok';
 
+// Build the background context a deep-dive thread should carry into its chat.
+// The Deep Research report lives in `thread.research`, separate from the chat
+// messages, so without this the model has no idea what the thread is about.
+// Returned text is sent as system context on every thread request (it streams
+// in as the report is written, and persists across follow-up questions).
+function buildThreadContext(thread: Thread): string {
+  if (thread.actionType !== 'deep' || !thread.research) return '';
+  const r = thread.research;
+  const parts: string[] = [
+    'You are answering the user\'s follow-up questions about a Deep Research report that was generated earlier in this thread. Treat the report below as the primary source for your answers. If the answer is not covered by it, say so and answer from general knowledge.',
+  ];
+  if (thread.selectedContext?.trim()) {
+    parts.push(`ORIGINAL TOPIC (what the user selected):\n${thread.selectedContext.trim()}`);
+  }
+  if (r.report?.trim()) {
+    parts.push(`RESEARCH REPORT:\n${r.report.trim()}`);
+  }
+  if (r.sources && r.sources.length > 0) {
+    const list = r.sources.map(s => `[${s.n}] ${s.title} — ${s.url}`).join('\n');
+    parts.push(`SOURCES:\n${list}`);
+  }
+  // Nothing useful yet (report hasn't started) → no context.
+  return r.report?.trim() || thread.selectedContext?.trim() ? parts.join('\n\n') : '';
+}
+
 // Custom hook for thread chat instances - creates isolated chat for each thread
 function useThreadChat(
   selectedModel: ModelProvider,
@@ -380,6 +405,7 @@ function useThreadChat(
   anthropicAuthMode: AnthropicAuthMode = 'api',
   openaiAuthMode: AuthMode = 'api',
   grokAuthMode: AuthMode = 'api',
+  contextText: string = '',
 ) {
   const [showReasoning, setShowReasoning] = useState(false);
 
@@ -411,6 +437,7 @@ function useThreadChat(
     initialMessages: formattedInitialMessages,
     body: {
       showReasoning,
+      ...(contextText ? { context: contextText } : {}),
       ...(selectedModel === 'grok' && { mode: grokMode }),
       ...(selectedModel === 'claude' && { variant: 'opus' }),
       ...(selectedModel === 'anthropic' && { variant: 'sonnet' }),
@@ -443,7 +470,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const [selectedMessageId, setSelectedMessageId] = useState<string>('');
   const [mainShowReasoning, setMainShowReasoning] = useState(false);
 
-  const [grokMode, setGrokMode] = useState<'normal' | 'fun' | 'creative' | 'precise'>('normal');
+  const [grokMode, setGrokMode] = useState<'normal' | 'fun' | 'creative' | 'precise' | 'caveman'>('normal');
 
   // Add state for thread expansion
   const [expandedThread, setExpandedThread] = useState<string | 'main' | null>('main');
@@ -1671,6 +1698,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const [configuredProviders, setConfiguredProviders] = useState<Set<ProviderId>>(getConfigured());
   useEffect(() => onConfiguredChange(setConfiguredProviders), []);
   const labelFor = (slot: ModelSlot, fallback: string) => configuredModels[slot]?.trim() || fallback;
+  // Model picker dropdown (lives near the chat input)
+  const [showModelMenu, setShowModelMenu] = useState(false);
 
   // Map each model button to the provider whose API key it requires.
   const providerForModel = (m: ModelProvider): ProviderId => {
@@ -1688,40 +1717,61 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     return configuredProviders.has(providerForModel(m));
   };
 
-  const ModelSelector = () => (
-    <div className="flex flex-wrap gap-2">
-      {[
-        { value: 'openai' as ModelProvider,    label: labelFor('openai', 'GPT-4o'),              color: 'green'  },
-        { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.8'),     color: 'blue'   },
-        { value: 'anthropic' as ModelProvider, label: labelFor('anthropic', 'Claude Sonnet 4.6'),color: 'purple' },
-        { value: 'grok' as ModelProvider,      label: labelFor('grok', 'Grok 4'),                color: 'orange' }
-      ].map((model) => {
-        const ready = isModelReady(model.value);
-        const isActive = selectedModel === model.value;
-        const activeClasses =
-          model.color === 'green'  ? 'bg-emerald-500/20 text-emerald-500 border-emerald-500/50 shadow-lg' :
-          model.color === 'blue'   ? 'bg-indigo-500/20 text-indigo-500 border-indigo-500/50 shadow-lg' :
-          model.color === 'purple' ? 'bg-indigo-400/20 text-indigo-400 border-indigo-400/50 shadow-lg' :
-                                     'bg-orange-500/20 text-orange-500 border-orange-500/50 shadow-lg';
-        return (
-          <button
-            key={model.value}
-            onClick={() => setSelectedModel(model.value)}
-            disabled={!ready}
-            title={ready ? `Use ${model.label}` : `${providerForModel(model.value)} key not configured — add it in the Models tab`}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 border backdrop-blur-sm flex items-center gap-2 ${
-              isActive
-                ? activeClasses
-                : 'bg-zinc-900/60 text-zinc-500 hover:bg-zinc-800 hover:text-white border-zinc-800'
-            } ${!ready ? 'opacity-50 cursor-not-allowed hover:bg-zinc-900/60 hover:text-zinc-500' : ''}`}
-          >
-            <span>{model.label}</span>
-            {!ready && <span className="text-[10px] uppercase tracking-widest text-amber-400">(no key)</span>}
-          </button>
-        );
-      })}
-    </div>
-  );
+  const modelOptions = [
+    { value: 'openai' as ModelProvider,    label: labelFor('openai', 'GPT-4o'),               dot: 'bg-emerald-500' },
+    { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.8'),      dot: 'bg-indigo-500'  },
+    { value: 'anthropic' as ModelProvider, label: labelFor('anthropic', 'Claude Sonnet 4.6'), dot: 'bg-indigo-400'  },
+    { value: 'grok' as ModelProvider,      label: labelFor('grok', 'Grok 4'),                 dot: 'bg-orange-500'  },
+  ];
+
+  // Compact model picker that lives in the lower input bar. Opens upward so the
+  // list doesn't get clipped at the bottom of the screen.
+  const ModelDropdown = () => {
+    const current = modelOptions.find(m => m.value === selectedModel) || modelOptions[0];
+    return (
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setShowModelMenu(v => !v)}
+          title="Select AI model"
+          className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-zinc-800 bg-zinc-900/60 text-zinc-200 hover:bg-zinc-800 hover:text-white transition-colors"
+        >
+          <span className={`w-2 h-2 rounded-full ${current.dot}`} />
+          <span>{current.label}</span>
+          <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showModelMenu ? 'rotate-180' : ''}`} />
+        </button>
+        {showModelMenu && (
+          <>
+            {/* Click-away backdrop */}
+            <div className="fixed inset-0 z-10" onClick={() => setShowModelMenu(false)} />
+            <div className="absolute bottom-full left-0 mb-2 z-20 w-60 bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl overflow-hidden py-1">
+              {modelOptions.map((model) => {
+                const ready = isModelReady(model.value);
+                const isActive = selectedModel === model.value;
+                return (
+                  <button
+                    key={model.value}
+                    type="button"
+                    disabled={!ready}
+                    onClick={() => { setSelectedModel(model.value); setShowModelMenu(false); }}
+                    title={ready ? `Use ${model.label}` : `${providerForModel(model.value)} key not configured — add it in the Models tab`}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                      isActive ? 'bg-zinc-800 text-white' : 'text-zinc-300 hover:bg-zinc-800/70 hover:text-white'
+                    } ${!ready ? 'opacity-40 cursor-not-allowed hover:bg-transparent' : ''}`}
+                  >
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${model.dot}`} />
+                    <span className="flex-1 truncate">{model.label}</span>
+                    {!ready && <span className="text-[9px] uppercase tracking-widest text-amber-400 shrink-0">no key</span>}
+                    {isActive && ready && <span className="text-indigo-400 text-xs shrink-0">✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
 
   const handleMainSubmit = (e: any) => {
     e.preventDefault();
@@ -1781,43 +1831,23 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
     return (
       <div className="w-full space-y-2">
-        {/* Grok Settings - Only show in main chat, not in threads */}
+        {/* Grok persona / response mode — only in main chat, not in threads */}
         {selectedModel === 'grok' && !isThread && (
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            {/* Response Mode Buttons */}
-            <div className="flex gap-2 flex-wrap">
-              {['normal', 'fun', 'creative', 'precise'].map(mode => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setGrokMode(mode as 'normal' | 'fun' | 'creative' | 'precise')}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 border ${
-                    grokMode === mode
-                      ? 'bg-indigo-500/20 text-indigo-500 border-indigo-500/50'
-                      : 'bg-zinc-900/40 text-zinc-500 hover:bg-zinc-800 hover:text-white border-zinc-800'
-                  }`}
-                >
-                  {mode.charAt(0).toUpperCase() + mode.slice(1)}
-                </button>
-              ))}
-            </div>
-            
-            {/* Think Mode Toggle */}
-            <button
-              type="button"
-              onClick={() => setShowReasoning(!showReasoning)}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all duration-200 ${
-                showReasoning 
-                  ? 'bg-indigo-500/20 text-indigo-500 border border-indigo-500/50' 
-                  : 'bg-zinc-900/40 text-zinc-500 border border-zinc-800 hover:bg-zinc-900/60'
-              }`}
-              title="Toggle reasoning mode (like grok.com Think Mode)"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-              </svg>
-              <span>{showReasoning ? 'Think Mode: ON' : 'Think Mode: OFF'}</span>
-            </button>
+          <div className="flex gap-2 flex-wrap">
+            {(['normal', 'fun', 'creative', 'precise', 'caveman'] as const).map(mode => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setGrokMode(mode)}
+                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 border ${
+                  grokMode === mode
+                    ? 'bg-indigo-500/20 text-indigo-500 border-indigo-500/50'
+                    : 'bg-zinc-900/40 text-zinc-500 hover:bg-zinc-800 hover:text-white border-zinc-800'
+                }`}
+              >
+                {mode.charAt(0).toUpperCase() + mode.slice(1)}
+              </button>
+            ))}
           </div>
         )}
 
@@ -1856,13 +1886,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             )}
           </button>
         </form>
-
-        {/* Status indicator */}
-        {selectedModel === 'grok' && showReasoning && (
-          <div className="text-xs text-indigo-500/70 text-center">
-            Reasoning mode enabled — AI will show its thinking process.
-          </div>
-        )}
       </div>
     );
   };
@@ -2057,9 +2080,13 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const ThreadPanel = ({ thread, rowThreadCount }: { thread: Thread, rowThreadCount?: number }) => {
     // Get initial messages for this thread if available
     const initialMessages = threadMessagesToLoad[thread.id] || thread.messages || [];
-    
+
+    // For deep-dive threads, carry the research report into the chat as system
+    // context so follow-up questions actually know what was researched.
+    const threadContext = buildThreadContext(thread);
+
     // Create a dedicated, isolated chat instance for this specific thread with initial messages
-    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode, openaiAuthMode, grokAuthMode);
+    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode, openaiAuthMode, grokAuthMode, threadContext);
     
     // Store the thread chat instance reference for accessing messages during save
     React.useEffect(() => {
@@ -2764,8 +2791,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
               <div className="text-center mb-4 -mt-2">
                 <h1 className="text-5xl font-bold text-white tracking-wide">DeepDive</h1>
               </div>
-              
-                              <ModelSelector />
+
                 {hasActiveThreads && (
                 <div className="mt-2 text-sm text-zinc-500 flex items-center justify-center gap-2">
                   <Lightbulb className="w-4 h-4 text-amber-400 shrink-0" />
@@ -2823,6 +2849,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             {/* Research attachments bar */}
             <div className="mx-auto max-w-full mb-3 space-y-2">
               <div className="flex items-center gap-2 flex-wrap">
+                <ModelDropdown />
+                <div className="w-px h-6 bg-zinc-800" />
                 <button
                   type="button"
                   onClick={() => setShowUrlInput(v => !v)}
@@ -3160,6 +3188,20 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           <div className="py-1">
             {[
               {
+                action: 'deep',
+                icon: <BrainCircuit className="w-3.5 h-3.5 text-white" />,
+                label: 'Deep Dive (autonomous research)',
+                onClick: () => createNewThread(selectedText, false, false, 'deep'),
+                colorScheme: getActionColorScheme('deep')
+              },
+              {
+                action: 'snippet',
+                icon: <Brain className="w-3.5 h-3.5 text-white" />,
+                label: 'Remember',
+                onClick: () => saveSelectionAsSnippet(selectedText),
+                colorScheme: getActionColorScheme('snippet')
+              },
+              {
                 action: 'ask',
                 icon: <MessageSquare className="w-3.5 h-3.5 text-white" />,
                 label: 'Ask about this',
@@ -3188,13 +3230,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                 colorScheme: getActionColorScheme('examples')
               },
               {
-                action: 'deep',
-                icon: <Brain className="w-3.5 h-3.5 text-white" />,
-                label: 'Deep Dive (autonomous research)',
-                onClick: () => createNewThread(selectedText, false, false, 'deep'),
-                colorScheme: getActionColorScheme('deep')
-              },
-              {
                 action: 'links',
                 icon: <Link2 className="w-3.5 h-3.5 text-white" />,
                 label: 'Get links',
@@ -3207,13 +3242,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                 label: 'Get videos',
                 onClick: () => createNewThread(`Please suggest relevant YouTube videos, tutorials, and video content related to: "${selectedText}". Include educational videos, tutorials, documentaries, and other video resources that would help understand this topic better.`, false, true, 'videos'),
                 colorScheme: getActionColorScheme('videos')
-              },
-              {
-                action: 'snippet',
-                icon: <Scissors className="w-3.5 h-3.5 text-white" />,
-                label: 'Save to Vault',
-                onClick: () => saveSelectionAsSnippet(selectedText),
-                colorScheme: getActionColorScheme('snippet')
               }
             ].map((item) => (
               <button

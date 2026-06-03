@@ -30,16 +30,25 @@ async function loadAi() {
   return { ai, createOpenAI, createAnthropic };
 }
 
+// Fold optional caller-supplied background context (e.g. a Deep Research report
+// a thread is following up on) into a base system prompt. Kept out of the
+// visible chat — it rides along as system context so the model can answer
+// questions about it.
+function withContext(base, context) {
+  const c = typeof context === 'string' ? context.trim() : '';
+  return c ? `${base}\n\n${c}` : base;
+}
+
 function streamHandler(buildModel, defaultSystem) {
   return async (req, res) => {
     try {
-      const { messages, showReasoning = false, mode = 'normal', variant } = req.body || {};
+      const { messages, showReasoning = false, mode = 'normal', variant, context } = req.body || {};
       const { ai, createOpenAI, createAnthropic } = await loadAi();
-      const { model, system } = buildModel({ showReasoning, mode, variant, createOpenAI, createAnthropic });
+      const { model, system, steer } = buildModel({ showReasoning, mode, variant, createOpenAI, createAnthropic });
       const result = await ai.streamText({
         model,
-        messages: ai.convertToCoreMessages(messages),
-        system: system ?? defaultSystem,
+        messages: ai.convertToCoreMessages(appendSteer(messages, steer)),
+        system: withContext(system ?? defaultSystem, context),
         maxTokens: 4000,
       });
       result.pipeDataStreamToResponse(res);
@@ -142,12 +151,53 @@ function buildGrokSystemPrompt({ showReasoning, mode }) {
 
 Always show your work like on grok.com's Think Mode. Be thorough in your reasoning process, even for simple questions.`;
   }
+  // Persona is chosen per-message and can change mid-conversation. The model
+  // sees its own earlier replies in the history and tends to keep imitating
+  // their style, so every persona ends with an explicit override clause that
+  // tells it to ignore the tone/format of prior messages from THIS reply on.
+  const OVERRIDE =
+    ' IMPORTANT: This style governs your next reply and every reply after it. ' +
+    'Ignore and override the tone, length, and formatting of any earlier ' +
+    'messages in this conversation — even if your own previous answers used a ' +
+    'completely different style. Switch fully to this style now.';
+
   switch (mode) {
-    case 'fun':      return "You are Grok4, a maximally truth-seeking AI with a witty, humorous personality inspired by the Hitchhiker's Guide to the Galaxy. Respond with clever jokes, sarcasm, and fun insights while being helpful.";
-    case 'creative': return 'You are Grok4, a creative and imaginative AI. Provide innovative, out-of-the-box ideas and responses while maintaining accuracy and helpfulness.';
-    case 'precise':  return 'You are Grok4, a precise and factual AI. Provide concise, accurate information without unnecessary elaboration or humor.';
-    default:         return 'You are Grok4, a witty and helpful AI assistant created by X.AI. You provide thoughtful, accurate, and engaging responses with a touch of humor when appropriate.';
+    case 'fun':      return "You are Grok4 in Fun mode — a witty, irreverent AI inspired by the Hitchhiker's Guide to the Galaxy. Lean into clever jokes, playful sarcasm, and entertaining asides while still being genuinely helpful and accurate." + OVERRIDE;
+    case 'creative': return 'You are Grok4 in Creative mode. Think laterally: offer imaginative, original, out-of-the-box ideas, vivid analogies, and unexpected angles, while keeping the underlying substance accurate and useful.' + OVERRIDE;
+    case 'precise':  return 'You are Grok4 in Precise mode. Prioritize accuracy and clarity: give well-structured, detailed, factual answers in complete sentences. Be thorough and specific, define key terms, and avoid humor, hedging, and filler.' + OVERRIDE;
+    case 'caveman':  return 'You are Grok4 in Caveman mode. Talk like primitive caveman: very short, blunt sentences. Few words. Drop "the", "a", "is", and filler. Grunt-style speech — but answer must still be correct, efficient, and effective. Example: "Code broke. Missing comma line 5. Add comma. Fixed. Good."' + OVERRIDE;
+    default:         return 'You are Grok4, a helpful AI assistant by xAI. Write clear, well-structured responses in full sentences with a light touch of wit when it fits.' + OVERRIDE;
   }
+}
+
+// A short, recency-weighted style directive appended to ONLY the latest user
+// message. The system prompt sets the persona, but when a conversation was
+// started in one style (e.g. caveman) the model tends to keep imitating its own
+// earlier replies. Putting the directive on the most recent turn — the highest-
+// weighted position — reliably overrides that without touching the history.
+function buildGrokSteer(mode) {
+  switch (mode) {
+    case 'fun':      return '[Answer THIS message in Fun mode: witty and playful with jokes — ignore the style of earlier replies.]';
+    case 'creative': return '[Answer THIS message in Creative mode: imaginative and out-of-the-box — ignore the style of earlier replies.]';
+    case 'precise':  return '[Answer THIS message in Precise mode: detailed, well-structured, factual, no filler — ignore the style of earlier replies.]';
+    case 'caveman':  return '[Answer THIS message in Caveman mode: very short, blunt, primitive grunt-speech — ignore the style of earlier replies.]';
+    default:         return '[Answer THIS message in Normal mode: clear, well-structured full sentences — ignore the style of earlier replies.]';
+  }
+}
+
+// Return a copy of `messages` with `steer` appended to the most recent user
+// message. Only mutates plain-string content; never persisted (the renderer
+// keeps its own history and re-sends it each request).
+function appendSteer(messages, steer) {
+  if (!steer || !Array.isArray(messages) || messages.length === 0) return messages;
+  let idx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i] && messages[i].role === 'user') { idx = i; break; }
+  }
+  if (idx === -1 || typeof messages[idx].content !== 'string') return messages;
+  const copy = messages.slice();
+  copy[idx] = { ...copy[idx], content: `${copy[idx].content}\n\n${steer}` };
+  return copy;
 }
 
 // Resolve the `grok` CLI binary. The Electron process can have a stale PATH
@@ -551,7 +601,7 @@ function start() {
       const key = getProviderKey('grok');
       if (!key) throw new Error('Grok (xAI) key not configured. Add it in Models tab.');
       const client = createOpenAI({ baseURL: 'https://api.x.ai/v1', apiKey: key });
-      return { model: client(getModelId('grok')), system: buildGrokSystemPrompt({ showReasoning, mode }) };
+      return { model: client(getModelId('grok')), system: buildGrokSystemPrompt({ showReasoning, mode }), steer: buildGrokSteer(mode) };
     }
   ));
 
@@ -600,7 +650,7 @@ function start() {
 
   app.post('/api/claude-agent/chat', async (req, res) => {
     try {
-      const { messages = [], variant } = req.body || {};
+      const { messages = [], variant, context } = req.body || {};
       const last = messages[messages.length - 1];
       if (!last || last.role !== 'user') {
         return res.status(400).json({ error: 'Last message must be from user.' });
@@ -626,7 +676,7 @@ function start() {
         prompt,
         options: {
           model: modelId,
-          systemPrompt: 'You are a helpful AI assistant. Respond conversationally and concisely.',
+          systemPrompt: withContext('You are a helpful AI assistant. Respond conversationally and concisely.', context),
           allowedTools: [],
           permissionMode: 'bypassPermissions',
         },
@@ -1263,7 +1313,7 @@ function start() {
   // The renderer routes here when the user picks "ChatGPT subscription" auth in Models tab.
   app.post('/api/codex-agent/chat', async (req, res) => {
     try {
-      const { messages = [] } = req.body || {};
+      const { messages = [], context } = req.body || {};
       const last = messages[messages.length - 1];
       if (!last || last.role !== 'user') {
         return res.status(400).json({ error: 'Last message must be from user.' });
@@ -1296,7 +1346,10 @@ function start() {
       res.setHeader('x-vercel-ai-data-stream', 'v1');
       res.setHeader('Cache-Control', 'no-cache');
 
-      const streamed = await thread.runStreamed(prompt);
+      // Codex has no separate system channel here, so prepend any background
+      // context (e.g. a Deep Research report) ahead of the conversation.
+      const ctxPrefix = typeof context === 'string' && context.trim() ? `${context.trim()}\n\n` : '';
+      const streamed = await thread.runStreamed(`${ctxPrefix}${prompt}`);
 
       // Codex emits agent_message items whose `text` accumulates over events.
       // Track prev length per item id to emit only the new delta to the client.
@@ -1350,7 +1403,7 @@ function start() {
   app.post('/api/grok-agent/chat', async (req, res) => {
     let child = null;
     try {
-      const { messages = [], showReasoning = false, mode = 'normal' } = req.body || {};
+      const { messages = [], showReasoning = false, mode = 'normal', context } = req.body || {};
       const last = messages[messages.length - 1];
       if (!last || last.role !== 'user') {
         return res.status(400).json({ error: 'Last message must be from user.' });
@@ -1359,11 +1412,15 @@ function start() {
       const history = messages.slice(0, -1).map(m =>
         `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`
       ).join('\n\n');
-      const prompt = history ? `${history}\n\nUser: ${last.content}` : last.content;
+      // Recency reinforcement so a mid-conversation persona switch overrides the
+      // style of earlier replies (see appendSteer / buildGrokSteer).
+      const steeredLast = `${last.content}\n\n${buildGrokSteer(mode)}`;
+      const prompt = history ? `${history}\n\nUser: ${steeredLast}` : steeredLast;
 
       // Reasoning is delivered via real `thought` events, so the system prompt
       // never needs the inline THINKING/ANSWER scaffold — pass showReasoning:false.
-      const systemPrompt = buildGrokSystemPrompt({ showReasoning: false, mode });
+      // Any background context (e.g. a Deep Research report) is folded in too.
+      const systemPrompt = withContext(buildGrokSystemPrompt({ showReasoning: false, mode }), context);
 
       // Grok Build with a grok.com login auto-selects the model for the plan.
       // Override with AIOS_GROK_MODEL (e.g. `grok-composer-2.5-fast`) if desired.
