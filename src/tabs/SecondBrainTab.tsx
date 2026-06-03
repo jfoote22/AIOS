@@ -532,13 +532,17 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     }
   }, [nodeById, onNodeClick]);
 
-  // Keep the editable snippet draft in sync with the focused node. Keyed on id
-  // only, so a graph rebuild (same id) won't clobber in-progress edits.
+  // Keep the editable snippet draft in sync with the focused node — including
+  // when its underlying data changes out from under us (e.g. an "Add Shot"
+  // capture OCRs in the background and appends an image + extracted text).
+  // Depending on the focusedNode object (re-resolved on every rebuild) means
+  // external updates flow into the open editor live. Active typing is safe:
+  // edits persist + emit, and the reload that rebuilds the graph is debounced
+  // 300ms after the last keystroke, so node.data has caught up by then.
   useEffect(() => {
     if (focusedNode?.kind === 'snippet') setSnippetDraft(focusedNode.data as CapturedItem);
     else setSnippetDraft(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusedNode?.id, focusedNode?.kind]);
+  }, [focusedNode]);
 
   // Persist an edit from the snippet editor: update the synchronous draft now,
   // write to SQLite, and notify other tabs (which triggers a debounced reload

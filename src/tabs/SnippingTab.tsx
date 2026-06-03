@@ -36,6 +36,9 @@ export default function SnippingTab() {
   const [selection, setSelection] = useState<Region | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
   const [vault, setVault] = useState<CapturedItem[]>([]);
+  // Always-fresh view of the vault for async callbacks (e.g. add-shot OCR).
+  const vaultRef = useRef<CapturedItem[]>([]);
+  vaultRef.current = vault;
   const [showFlash, setShowFlash] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -266,10 +269,39 @@ export default function SnippingTab() {
     updateItem(id, { entities: [...item.entities, blank] });
   };
 
-  const appendImageToItem = (id: string, dataUrl: string) => {
-    const item = vault.find(i => i.id === id);
-    if (!item) return;
-    updateItem(id, { subImages: [...item.subImages, dataUrl] });
+  // Add Shot: attach the captured image to the existing snippet immediately,
+  // then OCR/analyze it and merge the new shot's extracted text, tags, and
+  // entities into the same neuron (title/summary/category/source are left
+  // alone so the neuron keeps its identity). Re-embeds so the added text is
+  // searchable. Does NOT create a new neuron.
+  const appendImageToItem = async (id: string, dataUrl: string) => {
+    const base = vaultRef.current.find(i => i.id === id);
+    if (!base) return;
+    updateItem(id, {
+      subImages: [...base.subImages, dataUrl],
+      status: aiReady ? 'analyzing' : base.status,
+    });
+    if (!aiReady) return;
+
+    try {
+      const analysis = await analyzeSnip(dataUrl);
+      const cur = vaultRef.current.find(i => i.id === id);
+      if (!cur) return;
+      const mergedTags = Array.from(new Set([...(cur.tags ?? []), ...analysis.tags.map(t => t.toLowerCase())]));
+      const mergedEntities = [...(cur.entities ?? []), ...analysis.entities];
+      const mergedText = [cur.extractedText, analysis.extractedText]
+        .filter(t => t && t.trim())
+        .join('\n\n──── added shot ────\n\n');
+      updateItem(id, {
+        extractedText: mergedText,
+        tags: mergedTags,
+        entities: mergedEntities,
+        status: 'ready',
+      }, { reembed: true });
+    } catch (err) {
+      console.error('Add-shot OCR failed:', err);
+      updateItem(id, { status: 'ready' });
+    }
   };
 
   const removeSubImage = (id: string, index: number) => {
