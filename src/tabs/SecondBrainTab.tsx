@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject, type LinkObject } from 'react-force-graph-2d';
-import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Tag, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle } from 'lucide-react';
+import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle, Search } from 'lucide-react';
 import * as db from '../lib/db';
 import {
   embedText, cosineSimilarity, chatWithVault, isGeminiReady, onGeminiReadyChange, buildEmbedSource,
@@ -15,7 +15,9 @@ import {
 import { listImports, listAllChunks, onImportsChange, deleteImport, type ImportedConversation, type ImportChunk } from '../lib/imports';
 import { setSeed as setDeepDiveSeed } from '../lib/deepdiveSeed';
 import { onDeepDivesChange } from '../lib/deepdiveStore';
+import { onSnippetsChange, emitSnippetsChange } from '../lib/snippetStore';
 import { navigateTo } from '../lib/navigate';
+import SnippetEditor, { type CapturedItem } from '../components/SnippetEditor';
 
 interface ChatMessage extends ChatTurn { citedIds?: string[]; }
 
@@ -52,6 +54,19 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const [pendingDelete, setPendingDelete] = useState<BrainNode | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [backfill, setBackfill] = useState<{ done: number; total: number } | null>(null);
+
+  // Left-panel mode + search state (search reuses the snippet keyword+semantic
+  // logic, but ranks across every neuron kind that carries an embedding).
+  const [leftView, setLeftView] = useState<'ask' | 'search'>('ask');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [queryEmbedding, setQueryEmbedding] = useState<number[] | null>(null);
+  const [isSemanticSearching, setIsSemanticSearching] = useState(false);
+
+  // Live editable copy of the focused snippet. Kept as a synchronous mirror so
+  // typing in the editor reflects instantly (the graph reload is debounced).
+  const [snippetDraft, setSnippetDraft] = useState<CapturedItem | null>(null);
+
+  const isElectron = !!window.aios?.isElectron;
 
   // ── Physics controls (persist to db.meta so they survive reloads) ──────────
   const [physics, setPhysics] = useState<PhysicsSettings>(DEFAULT_PHYSICS);
@@ -121,16 +136,27 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const dirtyRef = useRef(false);
   const activeRef = useRef(active);
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Id (snip:<id>) of a freshly captured snippet to auto-focus once it appears.
+  const pendingFocusRef = useRef<string | null>(null);
   useEffect(() => { activeRef.current = active; }, [active]);
 
-  useEffect(() => onDeepDivesChange(() => {
+  const scheduleReload = useCallback(() => {
     if (activeRef.current) {
       if (reloadTimer.current) clearTimeout(reloadTimer.current);
       reloadTimer.current = setTimeout(() => { dirtyRef.current = false; loadData(); }, 300);
     } else {
       dirtyRef.current = true;
     }
-  }), [loadData]);
+  }, [loadData]);
+
+  useEffect(() => onDeepDivesChange(scheduleReload), [scheduleReload]);
+
+  // Same reactive reload for snippet captures/edits/deletes. A capture carries
+  // its new id so we can auto-focus + open the editor once the graph rebuilds.
+  useEffect(() => onSnippetsChange((detail) => {
+    if (detail?.newId) pendingFocusRef.current = `snip:${detail.newId}`;
+    scheduleReload();
+  }), [scheduleReload]);
 
   useEffect(() => {
     if (active && dirtyRef.current) {
@@ -397,7 +423,30 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     } finally { setChatBusy(false); }
   };
 
-  // Node color: cited > focused > grouped (by category)
+  // Search across every neuron that carries an embedding (snippets, deepdives,
+  // imports) plus a keyword fallback over label/summary/tags/extractedText.
+  // Returns null when there's no active query so the graph renders normally.
+  const SEARCH_SIM_THRESHOLD = 0.5;
+  const searchResults = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (q.length < 2) return null;
+    const keyword = (n: BrainNode) => {
+      const d: any = n.data || {};
+      return (n.label || '').toLowerCase().includes(q)
+        || (d.summary || '').toLowerCase().includes(q)
+        || (d.extractedText || '').toLowerCase().includes(q)
+        || (Array.isArray(d.tags) && d.tags.some((t: string) => (t || '').toLowerCase().includes(q)));
+    };
+    const scored = graph.nodes.map(n => {
+      const emb = (n.data as any)?.embedding;
+      const sim = (queryEmbedding && emb?.length) ? cosineSimilarity(queryEmbedding, emb) : 0;
+      return { node: n, sim, kw: keyword(n) };
+    }).filter(x => x.sim >= SEARCH_SIM_THRESHOLD || x.kw)
+      .sort((a, b) => b.sim - a.sim);
+    return { results: scored.map(x => x.node), ids: new Set(scored.map(x => x.node.id)) };
+  }, [searchQuery, queryEmbedding, graph]);
+
+  // Node color: cited > focused > search-dim > grouped (by category)
   const groupColors = useMemo(() => {
     const palette = ['#7c9cff', '#5ee6b0', '#ffb86b', '#ff7ad9', '#a78bfa', '#f87171', '#22d3ee', '#facc15', '#fb923c', '#34d399'];
     const groups = Array.from(new Set(graph.nodes.map(n => n.group)));
@@ -410,8 +459,10 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     const node = n as BrainNode;
     if (citedIds.has(node.id)) return '#fde047'; // bright yellow for cited
     if (focusedNode?.id === node.id) return '#ffffff';
+    // When a search is active, dim everything that doesn't match.
+    if (searchResults && !searchResults.ids.has(node.id)) return 'rgba(110,114,128,0.18)';
     return groupColors[node.group] || '#9ca3af';
-  }, [citedIds, focusedNode, groupColors]);
+  }, [citedIds, focusedNode, groupColors, searchResults]);
 
   const linkColor = useCallback((l: LinkObject) => {
     const link = l as unknown as BrainLink;
@@ -454,6 +505,55 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     return m;
   }, [graph]);
 
+  // Debounced query embedding for semantic search (mirrors the Snippit tab).
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!aiReady || q.length < 3) { setQueryEmbedding(null); setIsSemanticSearching(false); return; }
+    setIsSemanticSearching(true);
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      embedText(q)
+        .then(vec => { if (!cancelled) { setQueryEmbedding(vec); setIsSemanticSearching(false); } })
+        .catch(err => { if (!cancelled) { console.error('Search embedding failed:', err); setQueryEmbedding(null); setIsSemanticSearching(false); } });
+    }, 350);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [searchQuery, aiReady]);
+
+  // After every graph rebuild, re-resolve the focused node by id so the open
+  // detail/editor panel survives the rebuild (buildGraph creates fresh node
+  // objects). If it vanished (e.g. deleted), close the panel. Also fire any
+  // pending auto-focus for a freshly captured snippet.
+  useEffect(() => {
+    setFocusedNode(prev => (prev ? (nodeById.get(prev.id) ?? null) : prev));
+    const pid = pendingFocusRef.current;
+    if (pid && activeRef.current) {
+      const node = nodeById.get(pid);
+      if (node) { pendingFocusRef.current = null; onNodeClick(node as any); }
+    }
+  }, [nodeById, onNodeClick]);
+
+  // Keep the editable snippet draft in sync with the focused node. Keyed on id
+  // only, so a graph rebuild (same id) won't clobber in-progress edits.
+  useEffect(() => {
+    if (focusedNode?.kind === 'snippet') setSnippetDraft(focusedNode.data as CapturedItem);
+    else setSnippetDraft(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedNode?.id, focusedNode?.kind]);
+
+  // Persist an edit from the snippet editor: update the synchronous draft now,
+  // write to SQLite, and notify other tabs (which triggers a debounced reload
+  // here that rebuilds the graph once edits settle).
+  const persistSnippet = useCallback((next: CapturedItem) => {
+    setSnippetDraft(next);
+    db.putSnippet(next).then(() => emitSnippetsChange()).catch(e => console.error('Failed to persist snippet edit:', e));
+  }, []);
+
+  // Category suggestions for the snippet editor's datalist.
+  const categories = useMemo(
+    () => Array.from(new Set(snippets.map((s: any) => s.category).filter(Boolean))) as string[],
+    [snippets],
+  );
+
   const adjacency = useMemo(() => {
     const idOf = (x: any) => (x && typeof x === 'object' ? x.id : x);
     const m = new Map<string, Set<string>>();
@@ -477,6 +577,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       if (node.kind === 'snippet') {
         await db.removeSnippet(node.data.id);
         setSnippets(prev => prev.filter(s => s.id !== node.data.id));
+        emitSnippetsChange(); // keep the Snippit tab in sync
       } else if (node.kind === 'deepdive') {
         await db.removeThread(node.data.id);
         setDeepDives(prev => prev.filter(d => d.id !== node.data.id));
@@ -527,74 +628,141 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       </header>
 
       <div className="flex-1 min-h-0 flex overflow-hidden">
-        {/* Left 1/3 — chat */}
+        {/* Left 1/3 — Ask (chat) or Search */}
         <aside className="w-1/3 min-w-[320px] max-w-[480px] border-r border-zinc-800 flex flex-col bg-zinc-950">
           <div className="px-5 py-4 border-b border-zinc-800">
-            <div className="flex items-center gap-2 mb-1">
-              <Sparkles className="w-4 h-4 text-indigo-400" />
-              <h3 className="text-sm font-bold">Ask your Second Brain</h3>
+            <div className="flex items-center gap-1 bg-zinc-900/60 p-1 rounded-lg border border-zinc-800 mb-3">
+              <button onClick={() => setLeftView('ask')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1 rounded text-xs font-bold uppercase tracking-wider transition-colors ${leftView === 'ask' ? 'bg-indigo-600/20 text-indigo-300' : 'text-zinc-500 hover:text-white'}`}>
+                <Sparkles className="w-3.5 h-3.5" />Ask
+              </button>
+              <button onClick={() => setLeftView('search')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1 rounded text-xs font-bold uppercase tracking-wider transition-colors ${leftView === 'search' ? 'bg-indigo-600/20 text-indigo-300' : 'text-zinc-500 hover:text-white'}`}>
+                <Search className="w-3.5 h-3.5" />Search
+              </button>
             </div>
-            <p className="text-[11px] text-zinc-500">Queries retrieve across all snippets and DeepDive sessions. Cited items light up in the graph.</p>
-          </div>
-
-          <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3 scrollbar-hide">
-            {chatHistory.length === 0 && (
-              <div className="h-full flex flex-col items-center justify-center text-center py-12 space-y-3">
-                <Brain className="w-8 h-8 text-indigo-500/40" />
-                <p className="text-xs text-zinc-500 max-w-[240px] leading-relaxed">
-                  Ask anything across your captured knowledge. Try: <em>"what did I learn about Houdini cameras"</em>, <em>"summarize my recent research"</em>, or click a node in the graph.
-                </p>
-              </div>
-            )}
-
-            {chatHistory.map((msg, i) => (
-              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[90%] rounded-2xl px-3.5 py-2.5 ${msg.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-zinc-900 border border-zinc-800 text-zinc-200'}`}>
-                  <p className="text-xs whitespace-pre-wrap leading-relaxed">{msg.text || (chatBusy && i === chatHistory.length - 1 ? '…' : '')}</p>
-                  {msg.role === 'model' && msg.citedIds && msg.citedIds.length > 0 && (
-                    <div className="mt-2 pt-2 border-t border-zinc-800/80 flex flex-wrap gap-1.5">
-                      {msg.citedIds.slice(0, 8).map(id => {
-                        const node = graph.nodes.find(n => n.id === id);
-                        if (!node) return null;
-                        const Icon = node.kind === 'snippet' ? Scissors : Compass;
-                        return (
-                          <button key={id} onClick={() => onNodeClick(node as any)}
-                            className="text-[9px] px-2 py-0.5 bg-yellow-500/10 border border-yellow-500/30 rounded-full text-yellow-300 hover:bg-yellow-500/20 transition-colors inline-flex items-center gap-1">
-                            <Icon className="w-2.5 h-2.5" />
-                            {node.label.slice(0, 28)}
-                          </button>
-                        );
-                      })}
-                    </div>
+            {leftView === 'ask' ? (
+              <p className="text-[11px] text-zinc-500">Queries retrieve across all snippets and DeepDive sessions. Cited items light up in the graph.</p>
+            ) : (
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
+                <input type="text"
+                  autoFocus
+                  placeholder={aiReady ? "Search your neurons in plain English…" : "Search titles, summaries, tags…"}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 pl-9 pr-20 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
+                  value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+                <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
+                  {isSemanticSearching && <span className="text-[9px] text-amber-400 uppercase tracking-widest animate-pulse">Embedding…</span>}
+                  {!isSemanticSearching && queryEmbedding && <span className="text-[9px] text-indigo-400 uppercase tracking-widest">Semantic</span>}
+                  {searchQuery && (
+                    <button onClick={() => setSearchQuery('')} title="Clear search"
+                      className="p-0.5 rounded text-zinc-500 hover:text-white hover:bg-zinc-700/60 transition-colors">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
                   )}
                 </div>
               </div>
-            ))}
-          </div>
-
-          <div className="border-t border-zinc-800 p-3">
-            <div className="flex gap-1.5 items-end">
-              <textarea
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                rows={1}
-                disabled={chatBusy || !aiReady}
-                placeholder={aiReady ? 'Ask anything…' : 'Add Gemini key in Models tab'}
-                className="flex-1 resize-none bg-zinc-900 border border-zinc-800 rounded-xl py-2.5 px-3 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all max-h-32 disabled:opacity-50"
-              />
-              <button onClick={send} disabled={chatBusy || !aiReady || !chatInput.trim()}
-                className="p-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-xl text-white transition-colors">
-                <Send className="w-3.5 h-3.5" />
-              </button>
-            </div>
-            {chatHistory.length > 0 && (
-              <button onClick={() => { setChatHistory([]); setCitedIds(new Set()); db.setMeta('second-brain-chat-history', []).catch(() => {}); }}
-                className="mt-1.5 text-[9px] text-zinc-600 hover:text-zinc-400 uppercase tracking-widest">
-                Clear conversation
-              </button>
             )}
           </div>
+
+          {leftView === 'ask' ? (
+            <>
+              <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3 scrollbar-hide">
+                {chatHistory.length === 0 && (
+                  <div className="h-full flex flex-col items-center justify-center text-center py-12 space-y-3">
+                    <Brain className="w-8 h-8 text-indigo-500/40" />
+                    <p className="text-xs text-zinc-500 max-w-[240px] leading-relaxed">
+                      Ask anything across your captured knowledge. Try: <em>"what did I learn about Houdini cameras"</em>, <em>"summarize my recent research"</em>, or click a node in the graph.
+                    </p>
+                  </div>
+                )}
+
+                {chatHistory.map((msg, i) => (
+                  <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[90%] rounded-2xl px-3.5 py-2.5 ${msg.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-zinc-900 border border-zinc-800 text-zinc-200'}`}>
+                      <p className="text-xs whitespace-pre-wrap leading-relaxed">{msg.text || (chatBusy && i === chatHistory.length - 1 ? '…' : '')}</p>
+                      {msg.role === 'model' && msg.citedIds && msg.citedIds.length > 0 && (
+                        <div className="mt-2 pt-2 border-t border-zinc-800/80 flex flex-wrap gap-1.5">
+                          {msg.citedIds.slice(0, 8).map(id => {
+                            const node = graph.nodes.find(n => n.id === id);
+                            if (!node) return null;
+                            const Icon = node.kind === 'snippet' ? Scissors : Compass;
+                            return (
+                              <button key={id} onClick={() => onNodeClick(node as any)}
+                                className="text-[9px] px-2 py-0.5 bg-yellow-500/10 border border-yellow-500/30 rounded-full text-yellow-300 hover:bg-yellow-500/20 transition-colors inline-flex items-center gap-1">
+                                <Icon className="w-2.5 h-2.5" />
+                                {node.label.slice(0, 28)}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="border-t border-zinc-800 p-3">
+                <div className="flex gap-1.5 items-end">
+                  <textarea
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+                    rows={1}
+                    disabled={chatBusy || !aiReady}
+                    placeholder={aiReady ? 'Ask anything…' : 'Add Gemini key in Models tab'}
+                    className="flex-1 resize-none bg-zinc-900 border border-zinc-800 rounded-xl py-2.5 px-3 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all max-h-32 disabled:opacity-50"
+                  />
+                  <button onClick={send} disabled={chatBusy || !aiReady || !chatInput.trim()}
+                    className="p-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-xl text-white transition-colors">
+                    <Send className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                {chatHistory.length > 0 && (
+                  <button onClick={() => { setChatHistory([]); setCitedIds(new Set()); db.setMeta('second-brain-chat-history', []).catch(() => {}); }}
+                    className="mt-1.5 text-[9px] text-zinc-600 hover:text-zinc-400 uppercase tracking-widest">
+                    Clear conversation
+                  </button>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1.5 scrollbar-hide">
+              {!searchResults && (
+                <div className="h-full flex flex-col items-center justify-center text-center py-12 space-y-3">
+                  <Search className="w-8 h-8 text-indigo-500/40" />
+                  <p className="text-xs text-zinc-500 max-w-[240px] leading-relaxed">
+                    Search every neuron — snippets, DeepDives, and imports. Matches light up in the graph; click one to open it.
+                  </p>
+                </div>
+              )}
+              {searchResults && searchResults.results.length === 0 && (
+                <p className="text-xs text-zinc-500 italic px-2 py-4 text-center">No neurons match "{searchQuery}".</p>
+              )}
+              {searchResults && searchResults.results.length > 0 && (
+                <>
+                  <div className="px-2 pb-1 text-[10px] uppercase tracking-widest text-zinc-600 font-bold">
+                    {searchResults.results.length} match{searchResults.results.length === 1 ? '' : 'es'}
+                  </div>
+                  {searchResults.results.map(node => {
+                    const Icon = kindIcon(node.kind);
+                    const d: any = node.data || {};
+                    return (
+                      <button key={node.id} onClick={() => onNodeClick(node as any)}
+                        className={`w-full flex items-start gap-2 px-2.5 py-2 rounded-lg text-left transition-colors ${focusedNode?.id === node.id ? 'bg-indigo-600/20 border border-indigo-500/30' : 'hover:bg-zinc-800/60 border border-transparent'}`}>
+                        <Icon className="w-3.5 h-3.5 mt-0.5 shrink-0 text-indigo-300" />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[12px] font-semibold text-zinc-100 truncate">{node.label}</div>
+                          <div className="text-[10px] text-zinc-500 uppercase tracking-widest">{node.group}</div>
+                          {d.summary && <div className="text-[11px] text-zinc-400 leading-snug line-clamp-2 mt-0.5">{d.summary}</div>}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          )}
         </aside>
 
         {/* Right 2/3 — force-directed graph */}
@@ -672,6 +840,11 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               <NeuronDetailPanel
                 node={focusedNode}
                 allChunks={chunks}
+                snippetDraft={snippetDraft}
+                onPersistSnippet={persistSnippet}
+                aiReady={aiReady}
+                categories={categories}
+                isElectron={isElectron}
                 onClose={() => setFocusedNode(null)}
                 onAsk={askAboutFocused}
                 onDelete={() => setPendingDelete(focusedNode)}
@@ -1064,10 +1237,16 @@ function SliderRow({
 // ── Neuron detail overlay ────────────────────────────────────────────────────
 
 function NeuronDetailPanel({
-  node, allChunks, onClose, onAsk, onDeepDive, onDelete,
+  node, allChunks, snippetDraft, onPersistSnippet, aiReady, categories, isElectron,
+  onClose, onAsk, onDeepDive, onDelete,
 }: {
   node: BrainNode;
   allChunks: ImportChunk[];
+  snippetDraft: CapturedItem | null;
+  onPersistSnippet: (next: CapturedItem) => void;
+  aiReady: boolean;
+  categories: string[];
+  isElectron: boolean;
   onClose: () => void;
   onAsk: () => void;
   onDeepDive: () => void;
@@ -1101,7 +1280,17 @@ function NeuronDetailPanel({
       </header>
 
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 text-[12px] text-zinc-300 space-y-3">
-        {node.kind === 'snippet'  && <SnippetBody data={node.data} />}
+        {node.kind === 'snippet'  && (
+          <SnippetEditor
+            item={snippetDraft ?? (node.data as CapturedItem)}
+            onChange={onPersistSnippet}
+            onDelete={onDelete}
+            aiReady={aiReady}
+            categories={categories}
+            isElectron={isElectron}
+            compact
+          />
+        )}
         {node.kind === 'deepdive' && <DeepDiveBody data={node.data} />}
         {node.kind === 'import'   && <ImportBody data={node.data} allChunks={allChunks} />}
       </div>
@@ -1122,56 +1311,17 @@ function NeuronDetailPanel({
         >
           Ask
         </button>
-        <button
-          onClick={onDelete}
-          className="px-3 py-2 rounded-md bg-red-600/10 hover:bg-red-600/20 border border-red-500/20 text-red-400 transition-colors"
-          title="Delete this neuron"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
+        {node.kind !== 'snippet' && (
+          <button
+            onClick={onDelete}
+            className="px-3 py-2 rounded-md bg-red-600/10 hover:bg-red-600/20 border border-red-500/20 text-red-400 transition-colors"
+            title="Delete this neuron"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        )}
       </footer>
     </motion.div>
-  );
-}
-
-function SnippetBody({ data }: { data: any }) {
-  return (
-    <>
-      {data.imageDataUrl && (
-        <img src={data.imageDataUrl} alt="" className="w-full rounded border border-zinc-800" />
-      )}
-      {data.summary && <p className="text-zinc-300 leading-relaxed">{data.summary}</p>}
-      <div className="grid grid-cols-2 gap-2 text-[11px]">
-        {data.category && <Field label="Category" value={data.category} />}
-        {data.source && <Field label="Source" value={data.source} />}
-      </div>
-      {data.tags?.length > 0 && (
-        <div className="flex flex-wrap gap-1">
-          {data.tags.map((t: string) => (
-            <span key={t} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-800/80 text-[10px] text-zinc-300">
-              <Tag className="w-2.5 h-2.5 text-zinc-500" />{t}
-            </span>
-          ))}
-        </div>
-      )}
-      {data.entities?.length > 0 && (
-        <div className="space-y-1">
-          <div className="text-[10px] uppercase tracking-wider text-zinc-500">Entities</div>
-          {data.entities.map((e: any, i: number) => (
-            <div key={i} className="text-[11px]">
-              <span className="text-zinc-500">{e.label}:</span>{' '}
-              <span className="text-zinc-200">{e.value}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      {data.extractedText && (
-        <details>
-          <summary className="text-[10px] uppercase tracking-wider text-zinc-500 cursor-pointer hover:text-zinc-300">Extracted text</summary>
-          <pre className="mt-2 text-[11px] text-zinc-400 whitespace-pre-wrap break-words">{data.extractedText.slice(0, 4000)}</pre>
-        </details>
-      )}
-    </>
   );
 }
 

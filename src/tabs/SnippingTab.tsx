@@ -1,154 +1,24 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
-  Camera, X, Scissors, Copy, History, Search, Bell, PauseCircle, PlayCircle,
+  Camera, X, Scissors, History, Search, Bell, PauseCircle, PlayCircle,
   MoreVertical, LayoutGrid, List, MessageSquare, Send, Sparkles,
-  ChevronDown, ChevronRight, GripVertical, Trash2
+  ChevronDown, ChevronRight, Trash2
 } from 'lucide-react';
-import {
-  DndContext, closestCenter, PointerSensor, useSensor, useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core';
-import { SortableContext, useSortable, rectSortingStrategy } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
 import * as db from '../lib/db';
 import {
-  analyzeSnip, analyzeText, isGeminiReady, setGeminiKey, onGeminiReadyChange,
+  analyzeSnip, analyzeText, isGeminiReady, onGeminiReadyChange,
   embedText, cosineSimilarity, buildEmbedSource, chatWithVault,
   type ChatTurn, type VaultContextItem,
 } from '../lib/ai';
+import SnippetEditor, {
+  SortableTags, SortableEntities,
+  type CapturedItem, type Entity, type ExtractedChunk,
+} from '../components/SnippetEditor';
+import { emitSnippetsChange, onSnippetsChange } from '../lib/snippetStore';
 
 interface Region { startX: number; startY: number; width: number; height: number; }
-interface Entity { type: 'link' | 'number' | 'address' | 'info'; value: string; label: string; }
-interface ExtractedChunk {
-  id: string; text: string; label: string; summary: string;
-  entities: Entity[]; tags: string[]; timestamp: number;
-  status: 'analyzing' | 'ready' | 'error'; error?: string;
-}
-export interface CapturedItem {
-  id: string; image: string; timestamp: number; tags: string[]; title: string;
-  summary: string; source: string; category: string; entities: Entity[];
-  subImages: string[]; extractedText: string;
-  status: 'analyzing' | 'ready' | 'error'; error?: string;
-  embedding?: number[]; chunks?: ExtractedChunk[];
-  /** Optional cross-link back to a DeepDive thread when the snippet was saved from there. */
-  originThreadId?: string;
-}
-
-// Shared pointer sensor: a small drag threshold so clicks on the remove/copy
-// buttons still register as clicks, not drags.
-function useDragSensors() {
-  return useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
-}
-
-// --- Sortable tag chips (drag any chip into any slot; the rest trickle over) ---
-function SortableTagChip({ id, onRemove }: { id: string; onRemove: () => void }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
-  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
-  return (
-    <span ref={setNodeRef} style={style} {...attributes} {...listeners}
-      className={`group flex items-center gap-1 text-[11px] pl-1.5 pr-2 py-1 bg-indigo-600/10 border border-indigo-500/20 rounded-full text-indigo-300 cursor-grab active:cursor-grabbing select-none ${isDragging ? 'ring-1 ring-indigo-400/60' : ''}`}
-      title="Drag to reorder">
-      <GripVertical className="w-3 h-3 text-indigo-400/40 group-hover:text-indigo-400/80" />
-      {id}
-      <button onPointerDown={(e) => e.stopPropagation()} onClick={onRemove} className="text-indigo-400/60 hover:text-red-400 transition-colors" title="Remove tag"><X className="w-3 h-3" /></button>
-    </span>
-  );
-}
-
-function SortableTags({ tags, onAdd, onRemove, onReorder }: {
-  tags: string[];
-  onAdd: (tag: string) => void;
-  onRemove: (tag: string) => void;
-  onReorder: (from: number, to: number) => void;
-}) {
-  const [draft, setDraft] = useState('');
-  const sensors = useDragSensors();
-  const commit = () => { const t = draft.trim(); if (t) { onAdd(t); setDraft(''); } };
-  const onDragEnd = (e: DragEndEvent) => {
-    const { active, over } = e;
-    if (over && active.id !== over.id) {
-      onReorder(tags.indexOf(String(active.id)), tags.indexOf(String(over.id)));
-    }
-  };
-  return (
-    <div>
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-        <SortableContext items={tags} strategy={rectSortingStrategy}>
-          <div className="flex flex-wrap gap-2 mb-3">
-            {tags.map(tag => <SortableTagChip key={tag} id={tag} onRemove={() => onRemove(tag)} />)}
-            {tags.length === 0 && <span className="text-[11px] text-zinc-600 italic">No tags yet</span>}
-          </div>
-        </SortableContext>
-      </DndContext>
-      <input
-        type="text"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(); } }}
-        onBlur={commit}
-        placeholder="Add tag (Enter to confirm)"
-        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
-      />
-    </div>
-  );
-}
-
-// --- Sortable entity "value" blocks — drag any block into any slot in the grid ---
-function SortableEntityCard({ id, ent, onEdit, onRemove, onCopy }: {
-  id: string; ent: Entity;
-  onEdit: (patch: Partial<Entity>) => void;
-  onRemove: () => void;
-  onCopy: () => void;
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
-  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, zIndex: isDragging ? 10 : undefined };
-  return (
-    <div ref={setNodeRef} style={style}
-      className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl group hover:border-indigo-500/50 transition-colors flex items-center gap-2">
-      <button {...attributes} {...listeners} className="cursor-grab active:cursor-grabbing text-zinc-600 hover:text-indigo-400 transition-colors shrink-0 touch-none" title="Drag to reorder"><GripVertical className="w-4 h-4" /></button>
-      <div className="space-y-1 min-w-0 flex-1">
-        <input type="text" value={ent.label} onChange={(e) => onEdit({ label: e.target.value })} placeholder="LABEL"
-          className="w-full bg-transparent text-[9px] font-bold text-zinc-500 uppercase tracking-tighter focus:outline-none focus:text-indigo-400" />
-        <input type="text" value={ent.value} onChange={(e) => onEdit({ value: e.target.value })} placeholder="value"
-          className="w-full bg-transparent text-sm font-mono text-indigo-300 focus:outline-none focus:text-indigo-200" />
-      </div>
-      <button onClick={onCopy} className="p-2 hover:bg-indigo-600/20 rounded-lg text-zinc-500 hover:text-indigo-400 transition-colors shrink-0" title="Copy value"><Copy className="w-4 h-4" /></button>
-      <button onClick={onRemove} className="p-2 hover:bg-red-500/20 rounded-lg text-zinc-500 hover:text-red-400 transition-colors shrink-0" title="Remove entity"><X className="w-4 h-4" /></button>
-    </div>
-  );
-}
-
-function SortableEntities({ entities, onReorder, onEdit, onRemove, onCopy }: {
-  entities: Entity[];
-  onReorder: (from: number, to: number) => void;
-  onEdit: (index: number, patch: Partial<Entity>) => void;
-  onRemove: (index: number) => void;
-  onCopy: (value: string) => void;
-}) {
-  const sensors = useDragSensors();
-  // Positional ids — stable for the duration of a single drag (the list only
-  // changes on drop), which is all dnd-kit needs.
-  const ids = entities.map((_, i) => `ent-${i}`);
-  const onDragEnd = (e: DragEndEvent) => {
-    const { active, over } = e;
-    if (over && active.id !== over.id) {
-      onReorder(ids.indexOf(String(active.id)), ids.indexOf(String(over.id)));
-    }
-  };
-  return (
-    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-      <SortableContext items={ids} strategy={rectSortingStrategy}>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {entities.map((ent, idx) => (
-            <SortableEntityCard key={ids[idx]} id={ids[idx]} ent={ent}
-              onEdit={(patch) => onEdit(idx, patch)} onRemove={() => onRemove(idx)} onCopy={() => onCopy(ent.value)} />
-          ))}
-        </div>
-      </SortableContext>
-    </DndContext>
-  );
-}
+export type { CapturedItem };
 
 export default function SnippingTab() {
   const [view, setView] = useState<'vault' | 'chat'>('vault');
@@ -216,6 +86,19 @@ export default function SnippingTab() {
       .catch(err => console.error('Failed to load vault:', err));
   }, []);
 
+  // Reload the vault when snippets change elsewhere (e.g. edited or deleted from
+  // the Second Brain tab). Idempotent — just refreshes from SQLite.
+  useEffect(() => onSnippetsChange(() => {
+    db.getAllSnippets<CapturedItem>()
+      .then(items => setVault(items.map(i => ({
+        ...i,
+        title: i.title || '',
+        extractedText: i.extractedText || '',
+        status: i.status || 'ready' as const,
+      }))))
+      .catch(err => console.error('Failed to reload vault:', err));
+  }), []);
+
   useEffect(() => {
     const q = searchQuery.trim();
     if (!aiReady || q.length < 3) { setQueryEmbedding(null); setIsSemanticSearching(false); return; }
@@ -248,7 +131,7 @@ export default function SnippingTab() {
     e.stopPropagation();
     setVault(prev => prev.filter(i => i.id !== id));
     if (selectedItem?.id === id) setSelectedItem(null);
-    db.removeSnippet(id).catch(err => console.error('Failed to delete:', err));
+    db.removeSnippet(id).then(() => emitSnippetsChange()).catch(err => console.error('Failed to delete:', err));
   };
 
   const captureRegion = () => {
@@ -287,7 +170,7 @@ export default function SnippingTab() {
       error: aiReady ? undefined : 'Gemini key not set',
     };
     setVault(prev => [placeholder, ...prev]);
-    db.putSnippet(placeholder).catch(err => console.error('Failed to persist snip:', err));
+    db.putSnippet(placeholder).then(() => emitSnippetsChange()).catch(err => console.error('Failed to persist snip:', err));
     setShowFlash(true);
     setTimeout(() => setShowFlash(false), 800);
 
@@ -302,13 +185,15 @@ export default function SnippingTab() {
           extractedText: analysis.extractedText, status: 'ready', error: undefined,
         };
         setVault(prev => prev.map(i => (i.id === id ? updated : i)));
-        db.putSnippet(updated).catch(err => console.error('Failed to persist analyzed snip:', err));
+        // Emit with the new id so Second Brain can auto-focus this freshly
+        // analyzed neuron and open its editor.
+        db.putSnippet(updated).then(() => emitSnippetsChange({ newId: id })).catch(err => console.error('Failed to persist analyzed snip:', err));
 
         embedText(buildEmbedSource(updated))
           .then(embedding => {
             const withEmbed = { ...updated, embedding };
             setVault(prev => prev.map(i => (i.id === id ? withEmbed : i)));
-            db.putSnippet(withEmbed).catch(e => console.error('Failed to persist embedding:', e));
+            db.putSnippet(withEmbed).then(() => emitSnippetsChange()).catch(e => console.error('Failed to persist embedding:', e));
           })
           .catch(e => console.error('Embedding failed:', e));
       })
@@ -320,7 +205,7 @@ export default function SnippingTab() {
           category: 'Unprocessed', status: 'error', error: err?.message ?? String(err),
         };
         setVault(prev => prev.map(i => (i.id === id ? failed : i)));
-        db.putSnippet(failed).catch(e => console.error('Failed to persist error state:', e));
+        db.putSnippet(failed).then(() => emitSnippetsChange()).catch(e => console.error('Failed to persist error state:', e));
       });
   };
 
@@ -333,7 +218,7 @@ export default function SnippingTab() {
     }));
     setSelectedItem(prev => (prev && prev.id === id ? { ...prev, ...patch } : prev));
     if (!updatedItem) return;
-    db.putSnippet(updatedItem).catch(err => console.error('Failed to persist edit:', err));
+    db.putSnippet(updatedItem).then(() => emitSnippetsChange()).catch(err => console.error('Failed to persist edit:', err));
     if (options.reembed && aiReady) {
       const target = updatedItem as CapturedItem;
       embedText(buildEmbedSource(target))
@@ -341,7 +226,7 @@ export default function SnippingTab() {
           const withEmbed = { ...target, embedding };
           setVault(prev => prev.map(i => (i.id === id ? withEmbed : i)));
           setSelectedItem(prev => (prev && prev.id === id ? withEmbed : prev));
-          db.putSnippet(withEmbed).catch(e => console.error('Failed to persist re-embed:', e));
+          db.putSnippet(withEmbed).then(() => emitSnippetsChange()).catch(e => console.error('Failed to persist re-embed:', e));
         })
         .catch(e => console.error('Re-embed failed:', e));
     }
@@ -590,197 +475,31 @@ export default function SnippingTab() {
             <div className="max-w-4xl w-full my-auto bg-zinc-900/50 border border-zinc-800 rounded-3xl overflow-hidden shadow-2xl relative" onClick={(e) => e.stopPropagation()}>
               <button onClick={() => setSelectedItem(null)} className="absolute top-6 right-6 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-10"><X className="w-5 h-5" /></button>
 
-              <div className="p-8 space-y-8">
-                <header>
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="px-3 py-1 bg-indigo-600/20 border border-indigo-500/30 rounded-lg text-indigo-400 font-bold text-[10px] uppercase tracking-widest">Original Capture</div>
-                    <span className="text-zinc-500 text-xs font-mono">{selectedItem.id}</span>
-                    {selectedItem.originThreadId && (
-                      <span className="text-[10px] text-indigo-400/80 font-mono">from thread {selectedItem.originThreadId.slice(0, 8)}</span>
-                    )}
-                  </div>
-                  <input
-                    type="text"
-                    value={selectedItem.title}
-                    onChange={(e) => updateItem(selectedItem.id, { title: e.target.value }, { reembed: true })}
-                    placeholder="Untitled capture"
-                    className="w-full bg-transparent text-xl font-bold text-zinc-100 leading-tight mb-2 focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded px-1 -mx-1"
-                  />
-                  <textarea
-                    value={selectedItem.summary}
-                    onChange={(e) => updateItem(selectedItem.id, { summary: e.target.value }, { reembed: true })}
-                    rows={2}
-                    placeholder="No summary"
-                    className="w-full resize-none bg-transparent text-sm text-zinc-400 leading-relaxed focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded px-1 -mx-1"
-                  />
-                  {selectedItem.status === 'analyzing' && <p className="mt-3 text-[10px] text-indigo-400 uppercase tracking-widest">Analyzing…</p>}
-                  {selectedItem.status === 'error' && <p className="mt-3 text-[10px] text-red-400 uppercase tracking-widest">Error: {selectedItem.error}</p>}
-                </header>
-
-                {/* 1. Image on top */}
-                <section>
-                  <div className="bg-zinc-800 rounded-2xl overflow-hidden border border-zinc-700 shadow-inner flex items-center justify-center max-h-[60vh]">
-                    <img src={selectedItem.image} alt="High resolution capture" className="max-w-full max-h-[60vh] object-contain" />
-                  </div>
-
-                  <div className="mt-4 grid grid-cols-6 gap-3">
-                    {selectedItem.subImages.slice(1).map((img, i) => {
-                      const realIndex = i + 1;
-                      return (
-                        <div key={realIndex} className="aspect-square bg-zinc-800 rounded-xl border border-zinc-700 overflow-hidden group relative">
-                          <img src={img} alt="Extra capture" className="w-full h-full object-cover group-hover:scale-110 transition-transform" />
-                          <button onClick={() => removeSubImage(selectedItem.id, realIndex)} className="absolute top-1 right-1 p-1 bg-black/60 hover:bg-red-500/80 rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity" title="Remove this capture"><X className="w-3 h-3" /></button>
-                        </div>
-                      );
-                    })}
-                    <button
-                      onClick={() => {
-                        if (!isElectron) { alert('Adding extra screenshots is only available in the desktop app.'); return; }
-                        window.aios?.requestCaptureForItem(selectedItem.id);
-                      }}
-                      className="aspect-square bg-zinc-900 border border-dashed border-zinc-700 rounded-xl flex flex-col items-center justify-center text-zinc-500 hover:border-indigo-500/60 hover:text-indigo-400 transition-colors"
-                      title="Add another screenshot to this snippet">
-                      <LayoutGrid className="w-5 h-5 mb-1" />
-                      <span className="text-[9px] uppercase tracking-widest font-bold">Add Shot</span>
-                    </button>
-                  </div>
-                </section>
-
-                {/* 2. Extracted text underneath */}
-                {selectedItem.extractedText && (
-                  <section>
-                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Extracted Text</p>
-                    <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl max-h-64 overflow-y-auto">
-                      <pre ref={extractedTextRef} className="text-xs text-zinc-300 whitespace-pre-wrap font-mono select-text" onMouseUp={() => {
-                        const sel = window.getSelection();
-                        const node = extractedTextRef.current;
-                        if (!sel || !node || sel.isCollapsed) { setTextSelection(''); return; }
-                        const text = sel.toString();
-                        if (text && node.contains(sel.anchorNode) && node.contains(sel.focusNode)) setTextSelection(text);
-                        else setTextSelection('');
-                      }}>{selectedItem.extractedText}</pre>
-                    </div>
-                    <div className="mt-2 flex items-center justify-between gap-3">
-                      <button onClick={() => copyToClipboard(selectedItem.extractedText)} className="text-[10px] text-indigo-400 hover:text-indigo-300 uppercase tracking-widest">Copy all text</button>
-                      <button disabled={!textSelection.trim()} onClick={() => { const sel = textSelection; setTextSelection(''); window.getSelection()?.removeAllRanges(); extractChunkFromItem(selectedItem.id, sel); }}
-                        className="text-[10px] px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-lg text-white uppercase tracking-widest font-bold transition-colors">
-                        Extract Selection
-                      </button>
-                    </div>
-                  </section>
-                )}
-
-                {/* 3. Tags underneath that — drag chips to reorder */}
-                <section>
-                  <div className="flex items-center justify-between mb-3">
-                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Tags <span className="text-zinc-600 normal-case tracking-normal">· drag to reorder</span></p>
-                    <span className="text-[10px] text-zinc-600">{selectedItem.tags.length}</span>
-                  </div>
-                  <SortableTags
-                    key={selectedItem.id}
-                    tags={selectedItem.tags}
-                    onAdd={(t) => addTagToItem(selectedItem.id, t)}
-                    onRemove={(t) => removeTagFromItem(selectedItem.id, t)}
-                    onReorder={(from, to) => reorderTagsForItem(selectedItem.id, from, to)}
-                  />
-                </section>
-
-                <section>
-                  <div className="flex items-center justify-between mb-4">
-                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Extracted Entities</p>
-                    <button onClick={() => addEntity(selectedItem.id)} className="text-[10px] px-2 py-1 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded-lg text-indigo-300 font-bold uppercase tracking-widest transition-colors">+ Add</button>
-                  </div>
-                  {selectedItem.entities.length > 0 ? (
-                    <SortableEntities
-                      entities={selectedItem.entities}
-                      onReorder={(from, to) => reorderEntitiesForItem(selectedItem.id, from, to)}
-                      onEdit={(idx, patch) => updateEntity(selectedItem.id, idx, patch)}
-                      onRemove={(idx) => removeEntity(selectedItem.id, idx)}
-                      onCopy={copyToClipboard}
-                    />
-                  ) : (
-                    <p className="text-[11px] text-zinc-600 italic">No entities yet — click "Add" to create one.</p>
+              <div className="p-8 space-y-6">
+                <div className="flex items-center gap-3">
+                  <div className="px-3 py-1 bg-indigo-600/20 border border-indigo-500/30 rounded-lg text-indigo-400 font-bold text-[10px] uppercase tracking-widest">Original Capture</div>
+                  <span className="text-zinc-500 text-xs font-mono">{selectedItem.id}</span>
+                  {selectedItem.originThreadId && (
+                    <span className="text-[10px] text-indigo-400/80 font-mono">from thread {selectedItem.originThreadId.slice(0, 8)}</span>
                   )}
-                </section>
-
-                {selectedItem.chunks && selectedItem.chunks.length > 0 && (
-                  <section>
-                    <div className="flex items-center justify-between mb-3">
-                      <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Saved Chunks</p>
-                      <span className="text-[10px] text-zinc-600">{selectedItem.chunks.length}</span>
-                    </div>
-                    <div className="space-y-3">
-                      {selectedItem.chunks.map(chunk => (
-                        <div key={chunk.id} className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl group">
-                          <div className="flex items-start justify-between gap-2 mb-2">
-                            <div className="space-y-1 min-w-0">
-                              <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest truncate">
-                                {chunk.label}
-                                {chunk.status === 'analyzing' && <span className="ml-2 text-amber-400 animate-pulse">analyzing…</span>}
-                                {chunk.status === 'error' && <span className="ml-2 text-red-400">error</span>}
-                              </p>
-                              {chunk.summary && chunk.status !== 'analyzing' && <p className="text-[11px] text-zinc-400 leading-relaxed">{chunk.summary}</p>}
-                            </div>
-                            <div className="flex gap-1 shrink-0">
-                              <button onClick={() => copyToClipboard(chunk.text)} className="p-1.5 hover:bg-indigo-600/20 rounded text-zinc-500 hover:text-indigo-400 transition-colors" title="Copy chunk text"><Copy className="w-3.5 h-3.5" /></button>
-                              <button onClick={() => removeChunk(selectedItem.id, chunk.id)} className="p-1.5 hover:bg-red-500/20 rounded text-zinc-500 hover:text-red-400 transition-colors" title="Delete chunk"><X className="w-3.5 h-3.5" /></button>
-                            </div>
-                          </div>
-                          <pre className="text-[11px] text-zinc-300 whitespace-pre-wrap font-mono bg-black/30 border border-zinc-800 rounded-lg p-2 max-h-24 overflow-y-auto">{chunk.text}</pre>
-                          {chunk.tags.length > 0 && (
-                            <div className="flex flex-wrap gap-1 mt-2">
-                              {chunk.tags.map(t => <span key={t} className="text-[9px] px-1.5 py-0.5 bg-indigo-500/10 border border-indigo-500/20 rounded-full text-indigo-300">{t}</span>)}
-                            </div>
-                          )}
-                          {chunk.entities.length > 0 && (
-                            <div className="mt-2 space-y-1">
-                              {chunk.entities.map((ent, i) => (
-                                <div key={i} className="flex items-center justify-between gap-2 text-[10px]">
-                                  <span className="text-zinc-500 uppercase tracking-tighter font-bold">{ent.label}</span>
-                                  <button onClick={() => copyToClipboard(ent.value)} className="font-mono text-indigo-300 hover:text-indigo-200 truncate max-w-[140px] text-right" title="Copy">{ent.value}</button>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                <section>
-                  <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-3">Vault Classification</p>
-                  <div className="grid grid-cols-2 gap-3 text-xs">
-                    <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl">
-                      <p className="text-zinc-500 mb-1">Category</p>
-                      <input
-                        type="text"
-                        list="category-suggestions"
-                        value={selectedItem.category}
-                        onChange={(e) => updateItem(selectedItem.id, { category: e.target.value }, { reembed: true })}
-                        className="w-full bg-transparent font-bold text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded px-1 -mx-1"
-                      />
-                      <datalist id="category-suggestions">
-                        {categories.map(c => <option key={c} value={c} />)}
-                      </datalist>
-                    </div>
-                    <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl">
-                      <p className="text-zinc-500 mb-1">Source</p>
-                      <input
-                        type="text"
-                        value={selectedItem.source}
-                        onChange={(e) => updateItem(selectedItem.id, { source: e.target.value }, { reembed: true })}
-                        className="w-full bg-transparent font-bold text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded px-1 -mx-1"
-                      />
-                    </div>
-                  </div>
-                </section>
-
-                <div className="pt-6 border-t border-zinc-800">
-                  <button onClick={(e) => deleteItem(selectedItem.id, e as any)} className="w-full py-4 bg-red-600/10 border border-red-500/20 rounded-xl text-red-500 text-sm font-bold uppercase tracking-widest hover:bg-red-600/20 transition-all">
-                    Delete from Vault
-                  </button>
                 </div>
+                <SnippetEditor
+                  item={selectedItem}
+                  aiReady={aiReady}
+                  categories={categories}
+                  isElectron={isElectron}
+                  onChange={(next) => {
+                    setVault(prev => prev.map(i => (i.id === next.id ? next : i)));
+                    setSelectedItem(next);
+                    db.putSnippet(next).then(() => emitSnippetsChange()).catch(err => console.error('Failed to persist edit:', err));
+                  }}
+                  onDelete={() => {
+                    const id = selectedItem.id;
+                    setVault(prev => prev.filter(i => i.id !== id));
+                    setSelectedItem(null);
+                    db.removeSnippet(id).then(() => emitSnippetsChange()).catch(err => console.error('Failed to delete:', err));
+                  }}
+                />
               </div>
             </div>
             </div>

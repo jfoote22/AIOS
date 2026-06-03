@@ -1,14 +1,16 @@
 import { motion } from 'motion/react';
-import { Compass, Scissors, Brain, Feather, Settings, ChevronLeft, ChevronRight, Camera, KanbanSquare, Terminal as TerminalIcon } from 'lucide-react';
+import { Scissors, Brain, BrainCircuit, Feather, Settings, ChevronLeft, ChevronRight, Camera, KanbanSquare, Terminal as TerminalIcon } from 'lucide-react';
 
 export type TabId = 'deepdives' | 'snipping' | 'secondbrain' | 'terminal' | 'kanban' | 'hermes' | 'settings';
 
 interface TabDef { id: TabId; label: string; icon: React.ComponentType<{ className?: string }>; }
+// NOTE: The 'snipping' tab is intentionally absent here — snippet capture and
+// editing now live inside Second Brain. SnippingTab stays mounted (App.tsx) as
+// the global capture host, and the Quick Snip CTA below still triggers it.
 const MAIN_TABS: TabDef[] = [
   { id: 'secondbrain',   label: 'Second Brain',  icon: Brain },
-  { id: 'deepdives',     label: 'DeepDive',      icon: Compass },
+  { id: 'deepdives',     label: 'DeepDive',      icon: BrainCircuit },
   { id: 'kanban',        label: 'Orchestra',     icon: KanbanSquare },
-  { id: 'snipping',      label: 'Snippit',       icon: Scissors },
   { id: 'terminal',      label: 'Terminal',      icon: TerminalIcon },
   { id: 'hermes',        label: 'Hermes',        icon: Feather },
 ];
