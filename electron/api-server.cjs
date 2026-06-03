@@ -4,7 +4,10 @@
 
 const express = require('express');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 const cors = (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
@@ -145,6 +148,28 @@ Always show your work like on grok.com's Think Mode. Be thorough in your reasoni
     case 'precise':  return 'You are Grok4, a precise and factual AI. Provide concise, accurate information without unnecessary elaboration or humor.';
     default:         return 'You are Grok4, a witty and helpful AI assistant created by X.AI. You provide thoughtful, accurate, and engaging responses with a touch of humor when appropriate.';
   }
+}
+
+// Resolve the `grok` CLI binary. The Electron process can have a stale PATH
+// (the user often installs grok mid-session, which appends ~/.grok/bin to the
+// *user* PATH only). So we check an explicit override, then the canonical
+// install location, then fall back to the bare command for the OS to resolve.
+let _grokBinCache;
+function resolveGrokBin() {
+  if (_grokBinCache !== undefined) return _grokBinCache;
+  const override = (process.env.AIOS_GROK_BIN || '').trim();
+  const candidates = [];
+  if (override) candidates.push(override);
+  const home = os.homedir();
+  if (home) {
+    candidates.push(path.join(home, '.grok', 'bin', process.platform === 'win32' ? 'grok.exe' : 'grok'));
+  }
+  for (const c of candidates) {
+    try { if (fsSync.existsSync(c)) { _grokBinCache = c; return c; } } catch {}
+  }
+  // Last resort: let the OS PATH-resolve it (works if grok is on PATH).
+  _grokBinCache = process.platform === 'win32' ? 'grok.exe' : 'grok';
+  return _grokBinCache;
 }
 
 function normalizeHermesBaseUrl(value) {
@@ -1310,6 +1335,137 @@ function start() {
         try { res.write(streamPart('error', message)); } catch {}
         res.end();
       }
+    }
+  });
+
+  // --- Grok CLI agent chat (uses local `grok` CLI subscription auth, not API key) ---
+  // Requires Grok Build installed and logged in: `grok login`.
+  // The renderer routes here when the user picks "Grok subscription" auth in Models tab.
+  //
+  // We spawn the CLI headless (`grok --single … --output-format streaming-json`)
+  // and translate its NDJSON event stream into the Vercel AI data-stream protocol:
+  //   {"type":"thought","data":…} → reasoning tokens (surfaced only when showReasoning)
+  //   {"type":"text","data":…}    → answer tokens
+  //   {"type":"end",…}            → turn complete
+  app.post('/api/grok-agent/chat', async (req, res) => {
+    let child = null;
+    try {
+      const { messages = [], showReasoning = false, mode = 'normal' } = req.body || {};
+      const last = messages[messages.length - 1];
+      if (!last || last.role !== 'user') {
+        return res.status(400).json({ error: 'Last message must be from user.' });
+      }
+
+      const history = messages.slice(0, -1).map(m =>
+        `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`
+      ).join('\n\n');
+      const prompt = history ? `${history}\n\nUser: ${last.content}` : last.content;
+
+      // Reasoning is delivered via real `thought` events, so the system prompt
+      // never needs the inline THINKING/ANSWER scaffold — pass showReasoning:false.
+      const systemPrompt = buildGrokSystemPrompt({ showReasoning: false, mode });
+
+      // Grok Build with a grok.com login auto-selects the model for the plan.
+      // Override with AIOS_GROK_MODEL (e.g. `grok-composer-2.5-fast`) if desired.
+      const grokModelOverride = (process.env.AIOS_GROK_MODEL || '').trim();
+
+      const args = [
+        '--single', prompt,
+        '--output-format', 'streaming-json',
+        '--permission-mode', 'dontAsk',   // never block headless on tool approval
+        '--no-memory',
+        '--no-subagents',
+        '--disable-web-search',
+        '--system-prompt-override', systemPrompt,
+      ];
+      if (grokModelOverride) args.push('--model', grokModelOverride);
+
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('x-vercel-ai-data-stream', 'v1');
+      res.setHeader('Cache-Control', 'no-cache');
+
+      child = spawn(resolveGrokBin(), args, {
+        cwd: os.tmpdir(),               // neutral dir — behave like chat, not a repo agent
+        windowsHide: true,
+        env: process.env,
+      });
+
+      // Abort the CLI if the client disconnects (e.g. user hits Stop).
+      req.on('close', () => { if (child && !child.killed) try { child.kill(); } catch {} });
+
+      let buf = '';
+      let sawAnswer = false;
+      let emittedReasoningHeader = false;
+      let stderr = '';
+
+      const handleEvent = (evt) => {
+        if (!evt || typeof evt !== 'object') return;
+        if (evt.type === 'text' && typeof evt.data === 'string') {
+          if (showReasoning && emittedReasoningHeader && !sawAnswer) {
+            res.write(streamPart('text', '\n\n💡 **ANSWER:**\n'));
+          }
+          sawAnswer = true;
+          res.write(streamPart('text', evt.data));
+        } else if (evt.type === 'thought' && typeof evt.data === 'string' && showReasoning) {
+          if (!emittedReasoningHeader) {
+            res.write(streamPart('text', '🤔 **THINKING:**\n'));
+            emittedReasoningHeader = true;
+          }
+          res.write(streamPart('text', evt.data));
+        } else if (evt.type === 'error') {
+          throw new Error(evt.message || evt.data || 'Grok stream error.');
+        }
+        // 'end' and tool/other events need no client output.
+      };
+
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        buf += chunk;
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch { continue; }
+          try { handleEvent(evt); } catch (e) {
+            try { res.write(streamPart('error', e?.message || 'Grok error.')); } catch {}
+          }
+        }
+      });
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+
+      child.on('error', (err) => {
+        const message = /ENOENT/.test(err?.code || err?.message || '')
+          ? 'Grok CLI not found. Install Grok Build and ensure `grok` is available (or set AIOS_GROK_BIN).'
+          : (err?.message || 'Failed to launch Grok CLI.');
+        if (!res.headersSent) res.status(500).json({ error: message });
+        else { try { res.write(streamPart('error', message)); } catch {} res.end(); }
+      });
+
+      child.on('close', (code) => {
+        // Flush any trailing buffered line.
+        const tail = buf.trim();
+        if (tail) {
+          try { handleEvent(JSON.parse(tail)); } catch {}
+        }
+        if (code !== 0 && !sawAnswer) {
+          const message = stderr.trim() || `Grok CLI exited with code ${code}.`;
+          try { res.write(streamPart('error', message)); } catch {}
+        }
+        res.write(streamPart('finish_message', {
+          finishReason: 'stop',
+          usage: { promptTokens: 0, completionTokens: 0 },
+        }));
+        res.end();
+      });
+    } catch (err) {
+      console.error('Grok CLI error:', err);
+      if (child && !child.killed) try { child.kill(); } catch {}
+      const message = err?.message || 'Grok CLI request failed.';
+      if (!res.headersSent) res.status(500).json({ error: message });
+      else { try { res.write(streamPart('error', message)); } catch {} res.end(); }
     }
   });
 

@@ -5,11 +5,11 @@ export type TabId = 'deepdives' | 'snipping' | 'secondbrain' | 'terminal' | 'kan
 
 interface TabDef { id: TabId; label: string; icon: React.ComponentType<{ className?: string }>; }
 const MAIN_TABS: TabDef[] = [
-  { id: 'deepdives',     label: 'DeepDive',      icon: Compass },
-  { id: 'snipping',      label: 'Snippit',       icon: Scissors },
   { id: 'secondbrain',   label: 'Second Brain',  icon: Brain },
-  { id: 'terminal',      label: 'Terminal',      icon: TerminalIcon },
+  { id: 'deepdives',     label: 'DeepDive',      icon: Compass },
   { id: 'kanban',        label: 'Orchestra',     icon: KanbanSquare },
+  { id: 'snipping',      label: 'Snippit',       icon: Scissors },
+  { id: 'terminal',      label: 'Terminal',      icon: TerminalIcon },
   { id: 'hermes',        label: 'Hermes',        icon: Feather },
 ];
 

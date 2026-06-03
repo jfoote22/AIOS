@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Terminal as TerminalIcon, Plus, X, Bot, Sparkles, AlertCircle, ShieldOff,
+  Terminal as TerminalIcon, Plus, X, Bot, Sparkles, Zap, AlertCircle, ShieldOff,
   Square, Columns2, Columns3, Rows2, Grid2x2, FolderOpen, CornerDownLeft,
 } from 'lucide-react';
 import { Terminal } from '@xterm/xterm';
@@ -376,6 +376,7 @@ function Header({
         <NewButton icon={<Bot className="w-3 h-3" />}      label="claude" onClick={() => onSpawn('claude', 'claude')} disabled={!canSpawn} />
         <NewButton icon={<ShieldOff className="w-3 h-3" />} label="claude!" onClick={() => onSpawn('claude --dangerously-skip-permissions', 'claude (skip perms)')} disabled={!canSpawn} danger title="New Claude session with --dangerously-skip-permissions" />
         <NewButton icon={<Sparkles className="w-3 h-3" />} label="codex"  onClick={() => onSpawn('codex',  'codex')}  disabled={!canSpawn} />
+        <NewButton icon={<Zap className="w-3 h-3" />}      label="grok"   onClick={() => onSpawn('grok',   'grok')}   disabled={!canSpawn} />
         <NewButton icon={<Plus className="w-3 h-3" />}     label="shell"  onClick={() => onSpawn()} disabled={!canSpawn} />
       </div>
     </header>

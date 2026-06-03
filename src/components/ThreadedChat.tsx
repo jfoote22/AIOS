@@ -334,6 +334,7 @@ import { getConfigured, onConfiguredChange, type ProviderId } from '../lib/provi
 import {
   getAnthropicAuthMode, onAnthropicAuthModeChange,
   getOpenAIAuthMode, onOpenAIAuthModeChange,
+  getGrokAuthMode, onGrokAuthModeChange,
   type AnthropicAuthMode, type AuthMode,
 } from '../lib/authMode';
 
@@ -378,6 +379,7 @@ function useThreadChat(
   grokMode: string = 'normal',
   anthropicAuthMode: AnthropicAuthMode = 'api',
   openaiAuthMode: AuthMode = 'api',
+  grokAuthMode: AuthMode = 'api',
 ) {
   const [showReasoning, setShowReasoning] = useState(false);
 
@@ -389,7 +391,7 @@ function useThreadChat(
       case 'anthropic':
         return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
       case 'grok':
-        return apiUrl('/api/grok/chat');
+        return apiUrl(grokAuthMode === 'subscription' ? '/api/grok-agent/chat' : '/api/grok/chat');
       default:
         return apiUrl('/api/openai/chat');
     }
@@ -619,6 +621,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
   const [anthropicAuthMode, setAnthropicAuthMode] = useState<AnthropicAuthMode>('api');
   const [openaiAuthMode, setOpenaiAuthMode] = useState<AuthMode>('api');
+  const [grokAuthMode, setGrokAuthMode] = useState<AuthMode>('api');
   useEffect(() => {
     getAnthropicAuthMode().then(setAnthropicAuthMode).catch(() => {});
     return onAnthropicAuthModeChange(setAnthropicAuthMode);
@@ -626,6 +629,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   useEffect(() => {
     getOpenAIAuthMode().then(setOpenaiAuthMode).catch(() => {});
     return onOpenAIAuthModeChange(setOpenaiAuthMode);
+  }, []);
+  useEffect(() => {
+    getGrokAuthMode().then(setGrokAuthMode).catch(() => {});
+    return onGrokAuthModeChange(setGrokAuthMode);
   }, []);
 
   const getApiEndpoint = (model: ModelProvider) => {
@@ -636,7 +643,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       case 'anthropic':
         return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
       case 'grok':
-        return apiUrl('/api/grok/chat');
+        return apiUrl(grokAuthMode === 'subscription' ? '/api/grok-agent/chat' : '/api/grok/chat');
       default:
         return apiUrl('/api/anthropic/chat');
     }
@@ -1725,6 +1732,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     // the local CLI (claude / codex) supplies auth from the user's plan.
     if ((m === 'claude' || m === 'anthropic') && anthropicAuthMode === 'subscription') return true;
     if (m === 'openai' && openaiAuthMode === 'subscription') return true;
+    if (m === 'grok' && grokAuthMode === 'subscription') return true;
     return configuredProviders.has(providerForModel(m));
   };
 
@@ -2101,7 +2109,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     const initialMessages = threadMessagesToLoad[thread.id] || thread.messages || [];
     
     // Create a dedicated, isolated chat instance for this specific thread with initial messages
-    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode, openaiAuthMode);
+    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode, openaiAuthMode, grokAuthMode);
     
     // Store the thread chat instance reference for accessing messages during save
     React.useEffect(() => {

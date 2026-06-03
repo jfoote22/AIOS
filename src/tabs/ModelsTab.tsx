@@ -6,6 +6,7 @@ import { type ModelSlot, SLOT_LABELS, getCachedModels, getDefaults, onModelsChan
 import {
   getAnthropicAuthMode, setAnthropicAuthMode, onAnthropicAuthModeChange,
   getOpenAIAuthMode, setOpenAIAuthMode, onOpenAIAuthModeChange,
+  getGrokAuthMode, setGrokAuthMode, onGrokAuthModeChange,
   type AnthropicAuthMode, type AuthMode,
 } from '../lib/authMode';
 
@@ -182,6 +183,8 @@ export default function ModelsTab() {
 
         <OpenAIAuthEditor />
 
+        <GrokAuthEditor />
+
         <ModelIdEditor />
       </div>
     </div>
@@ -266,6 +269,90 @@ function OpenAIAuthEditor() {
       {mode === 'subscription' && (
         <p className="mt-3 text-[10px] text-zinc-600 leading-relaxed">
           AIOS routes the OpenAI button through the Codex SDK, which picks up the auth from your <span className="font-mono">codex</span> CLI login. If responses fail, check that <span className="font-mono">codex --version</span> works and that you're signed into a plan that includes Codex (Plus / Pro / Business / Enterprise).
+        </p>
+      )}
+    </div>
+  );
+}
+
+function GrokAuthEditor() {
+  const [mode, setMode] = useState<AuthMode>('api');
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    getGrokAuthMode().then(setMode).catch(() => {});
+    return onGrokAuthModeChange(setMode);
+  }, []);
+
+  const choose = async (next: AuthMode) => {
+    if (next === mode) return;
+    setSaving(true); setMsg(null);
+    try {
+      await setGrokAuthMode(next);
+      setMsg({ kind: 'ok', text: next === 'subscription' ? 'Switched to Grok CLI subscription auth.' : 'Switched to xAI API key auth.' });
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: e?.message || 'Failed to save.' });
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="mt-10">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="p-2 bg-zinc-900 border border-zinc-800 rounded-lg"><ShieldCheck className="w-4 h-4 text-indigo-400" /></div>
+        <div>
+          <h3 className="text-lg font-bold">Grok auth mode</h3>
+          <p className="text-[11px] text-zinc-500">How AIOS authenticates the Grok button in DeepDives.</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <button
+          onClick={() => choose('api')}
+          disabled={saving}
+          className={`text-left p-4 rounded-2xl border transition-colors ${
+            mode === 'api'
+              ? 'bg-indigo-600/10 border-indigo-500/40'
+              : 'bg-zinc-900/50 border-zinc-800 hover:border-zinc-700'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <KeyRound className={`w-4 h-4 ${mode === 'api' ? 'text-indigo-400' : 'text-zinc-500'}`} />
+            <p className={`text-sm font-bold ${mode === 'api' ? 'text-indigo-300' : 'text-zinc-200'}`}>API key</p>
+            {mode === 'api' && <span className="ml-auto text-[10px] uppercase tracking-widest text-indigo-400 font-bold">Active</span>}
+          </div>
+          <p className="text-[11px] text-zinc-500 leading-relaxed">
+            Uses the xAI Grok API key above. Pay-per-token billing via <span className="font-mono">console.x.ai</span>. Works without the Grok CLI installed.
+          </p>
+        </button>
+
+        <button
+          onClick={() => choose('subscription')}
+          disabled={saving}
+          className={`text-left p-4 rounded-2xl border transition-colors ${
+            mode === 'subscription'
+              ? 'bg-indigo-600/10 border-indigo-500/40'
+              : 'bg-zinc-900/50 border-zinc-800 hover:border-zinc-700'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <Terminal className={`w-4 h-4 ${mode === 'subscription' ? 'text-indigo-400' : 'text-zinc-500'}`} />
+            <p className={`text-sm font-bold ${mode === 'subscription' ? 'text-indigo-300' : 'text-zinc-200'}`}>Grok subscription</p>
+            {mode === 'subscription' && <span className="ml-auto text-[10px] uppercase tracking-widest text-indigo-400 font-bold">Active</span>}
+          </div>
+          <p className="text-[11px] text-zinc-500 leading-relaxed">
+            Uses your local <span className="font-mono">grok</span> CLI auth (Grok Build). No API key needed; billed against your grok.com plan. Requires Grok Build installed and signed in (<span className="font-mono">grok login</span>).
+          </p>
+        </button>
+      </div>
+
+      {msg && (
+        <p className={`mt-3 text-[11px] ${msg.kind === 'err' ? 'text-red-400' : 'text-emerald-400'}`}>{msg.text}</p>
+      )}
+
+      {mode === 'subscription' && (
+        <p className="mt-3 text-[10px] text-zinc-600 leading-relaxed">
+          AIOS routes the Grok button through the <span className="font-mono">grok</span> CLI headless mode, which picks up the auth from your Grok Build login. If responses fail, check that <span className="font-mono">grok --version</span> works in your terminal and that <span className="font-mono">grok models</span> shows you signed in. Override the binary path with <span className="font-mono">AIOS_GROK_BIN</span> or the model with <span className="font-mono">AIOS_GROK_MODEL</span>.
         </p>
       )}
     </div>

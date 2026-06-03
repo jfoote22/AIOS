@@ -6,10 +6,12 @@ export type AnthropicAuthMode = AuthMode;
 
 export const ANTHROPIC_AUTH_MODE_KEY = 'anthropic-auth-mode';
 export const OPENAI_AUTH_MODE_KEY = 'openai-auth-mode';
+export const GROK_AUTH_MODE_KEY = 'grok-auth-mode';
 
 type Listener = (mode: AuthMode) => void;
 const anthropicListeners = new Set<Listener>();
 const openaiListeners = new Set<Listener>();
+const grokListeners = new Set<Listener>();
 
 async function readMode(key: string): Promise<AuthMode> {
   try {
@@ -37,4 +39,11 @@ export const setOpenAIAuthMode = (mode: AuthMode) => writeMode(OPENAI_AUTH_MODE_
 export function onOpenAIAuthModeChange(fn: Listener): () => void {
   openaiListeners.add(fn);
   return () => { openaiListeners.delete(fn); };
+}
+
+export const getGrokAuthMode = () => readMode(GROK_AUTH_MODE_KEY);
+export const setGrokAuthMode = (mode: AuthMode) => writeMode(GROK_AUTH_MODE_KEY, mode, grokListeners);
+export function onGrokAuthModeChange(fn: Listener): () => void {
+  grokListeners.add(fn);
+  return () => { grokListeners.delete(fn); };
 }
