@@ -10,11 +10,12 @@ import {
 import { buildGraph, nodeAsContextItem, type BrainNode, type BrainLink, type BrainGraph } from '../lib/graph';
 import { listImports, listAllChunks, onImportsChange, deleteImport, type ImportedConversation, type ImportChunk } from '../lib/imports';
 import { setSeed as setDeepDiveSeed } from '../lib/deepdiveSeed';
+import { onDeepDivesChange } from '../lib/deepdiveStore';
 import { navigateTo } from '../lib/navigate';
 
 interface ChatMessage extends ChatTurn { citedIds?: string[]; }
 
-export default function SecondBrainTab() {
+export default function SecondBrainTab({ active = true }: { active?: boolean }) {
   const [snippets, setSnippets] = useState<any[]>([]);
   const [deepDives, setDeepDives] = useState<any[]>([]);
   const [imports, setImports] = useState<ImportedConversation[]>([]);
@@ -82,6 +83,34 @@ export default function SecondBrainTab() {
 
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => onImportsChange(() => { loadData(); }), [loadData]);
+
+  // Reactively pick up DeepDive saves/deletes without a manual refresh.
+  // If this tab is visible, reload (debounced to coalesce rapid saves); if it's
+  // hidden (TabPanel keeps it mounted but display:none), just mark dirty and
+  // defer the reload until the tab becomes active again — so we never rebuild
+  // the graph in the background for a tab the user isn't looking at.
+  const dirtyRef = useRef(false);
+  const activeRef = useRef(active);
+  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => { activeRef.current = active; }, [active]);
+
+  useEffect(() => onDeepDivesChange(() => {
+    if (activeRef.current) {
+      if (reloadTimer.current) clearTimeout(reloadTimer.current);
+      reloadTimer.current = setTimeout(() => { dirtyRef.current = false; loadData(); }, 300);
+    } else {
+      dirtyRef.current = true;
+    }
+  }), [loadData]);
+
+  useEffect(() => {
+    if (active && dirtyRef.current) {
+      dirtyRef.current = false;
+      loadData();
+    }
+  }, [active, loadData]);
+
+  useEffect(() => () => { if (reloadTimer.current) clearTimeout(reloadTimer.current); }, []);
 
   // Rebuild graph whenever underlying data changes.
   // Compute a conversation-level centroid (mean of chunk embeddings) so

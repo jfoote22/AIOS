@@ -63,7 +63,7 @@ export default function App() {
             unmounted. */}
         <TabPanel active={active === 'deepdives'}><DeepDivesTab /></TabPanel>
         <TabPanel active={active === 'snipping'}><SnippingTab /></TabPanel>
-        <TabPanel active={active === 'secondbrain'}><SecondBrainTab /></TabPanel>
+        <TabPanel active={active === 'secondbrain'}><SecondBrainTab active={active === 'secondbrain'} /></TabPanel>
         <TabPanel active={active === 'hermes'}><HermesTab /></TabPanel>
         <TabPanel active={active === 'terminal'}><TerminalTab active={active === 'terminal'} /></TabPanel>
         <TabPanel active={active === 'kanban'}><KanbanTab /></TabPanel>

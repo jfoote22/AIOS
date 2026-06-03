@@ -5,6 +5,7 @@ import ThreadedChat from '../components/ThreadedChat';
 import * as db from '../lib/db';
 import { onConfiguredChange, getConfigured, type ProviderId } from '../lib/providers';
 import { consumeSeed, onSeedChange, type DeepDiveSeed } from '../lib/deepdiveSeed';
+import { emitDeepDivesChange } from '../lib/deepdiveStore';
 
 export interface DeepDiveRecord {
   id: string;
@@ -115,6 +116,7 @@ export default function DeepDivesTab() {
       await db.putThread(record);
       setCurrentId(id);
       await refresh();
+      emitDeepDivesChange(); // let Second Brain pick up the new/updated dive
       setShowSave(false);
     } catch (e: any) {
       console.error('Save failed:', e);
@@ -148,6 +150,7 @@ export default function DeepDivesTab() {
       await db.removeThread(id);
       if (currentId === id) setCurrentId(null);
       await refresh();
+      emitDeepDivesChange(); // let Second Brain drop the deleted dive
     } catch (e: any) {
       console.error('Delete failed:', e);
       alert(`Delete failed: ${e?.message ?? e}`);
