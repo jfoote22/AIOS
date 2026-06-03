@@ -357,6 +357,15 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
     setOpenRunCardId(card.id);
 
     let run: AgentRun;
+    // Per-stream throttle: the transcript grows with every token, and each
+    // setRun both re-renders the board and writes the full transcript to SQLite
+    // over IPC. Coalesce live updates to ~7/sec; the terminal setRun below
+    // always flushes the complete run. These are locals (not component state)
+    // so concurrent swarm streams don't clobber each other's timer.
+    let liveTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastEmit = 0;
+    const LIVE_THROTTLE_MS = 150;
+    const clearLive = () => { if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; } };
     try {
       const result = await startRun({
         card: { id: card.id, title: card.title, description: card.description },
@@ -365,6 +374,22 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
       run = result.run;
       setRun(card.id, run);
 
+      // Throttled live update: emit immediately if enough time has passed,
+      // otherwise schedule a trailing emit so the last token is never dropped.
+      const emitLive = () => {
+        const sinceLast = Date.now() - lastEmit;
+        if (sinceLast >= LIVE_THROTTLE_MS) {
+          lastEmit = Date.now();
+          setRun(card.id, run);
+        } else if (!liveTimer) {
+          liveTimer = setTimeout(() => {
+            liveTimer = null;
+            lastEmit = Date.now();
+            setRun(card.id, run);
+          }, LIVE_THROTTLE_MS - sinceLast);
+        }
+      };
+
       let acc = '';
       let finalReason: string | undefined;
       let streamError: string | undefined;
@@ -372,7 +397,7 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
         if (evt.type === 'text') {
           acc += evt.value;
           run = { ...run, transcript: acc };
-          setRun(card.id, run);
+          emitLive();
         } else if (evt.type === 'finish') {
           finalReason = evt.reason;
         } else if (evt.type === 'error') {
@@ -380,6 +405,7 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
         }
       }
 
+      clearLive(); // cancel any pending throttled write before the final flush
       const ok = !streamError && finalReason !== 'error';
       const canceled = finalReason === 'canceled';
       const final: AgentRun = {
@@ -394,6 +420,7 @@ function AgentBoard({ agents }: { agents: AgentDef[] }) {
       // so the user can decide to retry, drag, or open the drawer.
       if (final.status === 'succeeded') updateCard(card.id, { column: 'review' });
     } catch (e: any) {
+      clearLive();
       console.error('runAgentOnCard error', e);
       const errMsg = e?.message ?? String(e);
       setRun(card.id, {

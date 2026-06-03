@@ -1,0 +1,123 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>aios itest</title></head>
+  <body>
+    <script>
+      // Mirrors src/lib/idb-legacy.ts (plain JS, since we can't import TS here).
+      const DB_NAME = 'aios';
+      const STORES = ['snippets', 'meta', 'threads', 'messages', 'imports', 'import_chunks', 'agents', 'runs'];
+
+      function seedLegacyIndexedDb() {
+        return new Promise((resolve, reject) => {
+          const req = indexedDB.open(DB_NAME, 5);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            db.createObjectStore('snippets', { keyPath: 'id' }).createIndex('timestamp', 'timestamp');
+            db.createObjectStore('meta', { keyPath: 'key' });
+            db.createObjectStore('threads', { keyPath: 'id' }).createIndex('timestamp', 'timestamp');
+            db.createObjectStore('messages', { keyPath: 'id' }).createIndex('threadId', 'threadId');
+            db.createObjectStore('imports', { keyPath: 'id' }).createIndex('provider', 'provider');
+            db.createObjectStore('import_chunks', { keyPath: 'id' }).createIndex('conversationId', 'conversationId');
+            db.createObjectStore('agents', { keyPath: 'id' }).createIndex('slug', 'slug', { unique: true });
+            db.createObjectStore('runs', { keyPath: 'id' }).createIndex('cardId', 'cardId');
+          };
+          req.onsuccess = () => {
+            const db = req.result;
+            const tx = db.transaction(STORES, 'readwrite');
+            tx.objectStore('snippets').put({ id: 's1', timestamp: 100, category: 'a', text: 'hello' });
+            tx.objectStore('snippets').put({ id: 's2', timestamp: 200, category: 'b', text: 'world' });
+            tx.objectStore('meta').put({ key: 'board', value: { cards: [{ id: 'c1' }], updatedAt: 7 } });
+            tx.objectStore('meta').put({ key: 'vault-layout', value: 'grid' });
+            tx.objectStore('agents').put({ id: 'a1', slug: 'alpha', updatedAt: 5, name: 'Alpha' });
+            tx.objectStore('import_chunks').put({
+              id: 'i1-c0', conversationId: 'i1', provider: 'claude', text: 'chunk', charCount: 5,
+              embedding: [0.25, -0.5, 0.75],
+            });
+            tx.oncomplete = () => { db.close(); resolve(); };
+            tx.onerror = () => reject(tx.error);
+          };
+          req.onerror = () => reject(req.error);
+        });
+      }
+
+      function openExisting() {
+        return new Promise((resolve) => {
+          const req = indexedDB.open(DB_NAME);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => resolve(null);
+        });
+      }
+      function readStore(db, store) {
+        return new Promise((resolve) => {
+          if (!db.objectStoreNames.contains(store)) return resolve([]);
+          const req = db.transaction(store, 'readonly').objectStore(store).getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => resolve([]);
+        });
+      }
+      async function dumpIndexedDb() {
+        const db = await openExisting();
+        if (!db) return null;
+        const [snippets, meta, threads, messages, imports, importChunks, agents, runs] = await Promise.all(
+          STORES.map((s) => readStore(db, s)),
+        );
+        db.close();
+        return { snippets, meta, threads, messages, imports, importChunks, agents, runs };
+      }
+
+      window.runTest = async function () {
+        const log = [];
+        let failures = 0;
+        const ok = (cond, msg) => { if (!cond) { failures++; log.push('  FAIL: ' + msg); } else log.push('  ok: ' + msg); };
+        const db = window.aios && window.aios.db;
+        const call = (op, args) => db.call(op, args || []);
+
+        try {
+          ok(!!db, 'window.aios.db bridge is present');
+          if (!db) return { ok: false, failures, log };
+
+          // 1. bridge round-trip
+          await call('setMeta', ['probe', { n: 42 }]);
+          const probe = await call('getMeta', ['probe']);
+          ok(probe && probe.n === 42, 'bridge setMeta/getMeta round-trip');
+
+          // 2. seed legacy IndexedDB, then run the migration (dump → bulkLoad)
+          await seedLegacyIndexedDb();
+          const FLAG = '__migrated_idb_to_sqlite_v1';
+          const already = await call('getMeta', [FLAG]);
+          ok(!already, 'migration flag initially unset');
+          const dump = await dumpIndexedDb();
+          ok(dump && dump.snippets.length === 2, 'dumped 2 snippets from IndexedDB');
+          await call('bulkLoad', [dump]);
+          await call('setMeta', [FLAG, true]);
+
+          // 3. read migrated data back through the bridge
+          const snaps = await call('getAllSnippets');
+          ok(snaps.length === 2 && snaps[0].id === 's2', 'snippets migrated + sorted DESC');
+          const board = await call('getMeta', ['board']);
+          ok(board && board.cards[0].id === 'c1', 'board meta migrated');
+          ok((await call('getMeta', ['vault-layout'])) === 'grid', 'string meta migrated');
+          const agents = await call('getAllAgents');
+          ok(agents.length === 1 && agents[0].slug === 'alpha', 'agent migrated');
+          const chunks = await call('getChunksForConversation', ['i1']);
+          ok(chunks.length === 1, 'chunk migrated');
+          const emb = chunks[0].embedding;
+          ok(
+            emb.length === 3 && Math.abs(emb[0] - 0.25) < 1e-6 && Math.abs(emb[1] + 0.5) < 1e-6,
+            'embedding survived IndexedDB→IPC→SQLite→IPC round-trip',
+          );
+          ok(chunks[0].text === 'chunk', 'chunk non-embedding fields preserved');
+          const counts = await call('getConversationChunkCounts');
+          ok(counts.length === 1 && counts[0].count === 1, 'chunk counts grouped');
+
+          // 4. flag now set → migration would be skipped
+          ok((await call('getMeta', [FLAG])) === true, 'migration flag set after migrate');
+        } catch (e) {
+          failures++;
+          log.push('  EXCEPTION: ' + (e && e.message ? e.message : String(e)));
+        }
+        return { ok: failures === 0, failures, log };
+      };
+    </script>
+  </body>
+</html>

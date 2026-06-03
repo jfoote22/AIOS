@@ -20,6 +20,10 @@ declare global {
       setModel: (slot: string, modelId: string) => Promise<Record<string, string>>;
       resetModel: (slot: string) => Promise<Record<string, string>>;
       getModelDefaults: () => Promise<Record<string, string>>;
+      db: {
+        /** Invoke a whitelisted SQLite op by name with a positional args array. */
+        call: <T = unknown>(op: string, args?: unknown[]) => Promise<T>;
+      };
       term: {
         available: () => Promise<{ available: boolean; platform: string }>;
         spawn: (opts?: {

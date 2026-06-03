@@ -6,6 +6,7 @@ const modelstore = require('./modelstore.cjs');
 const apiServer = require('./api-server.cjs');
 const terminal = require('./terminal.cjs');
 const reportExport = require('./report-export.cjs');
+const sqliteStore = require('./sqlite-store.cjs');
 
 // --- Legacy single-key compatibility (Gemini) ---
 function migrateLegacyKey() {
@@ -228,6 +229,12 @@ app.whenReady().then(async () => {
   migrateLegacyKey();
 
   try {
+    sqliteStore.init(path.join(app.getPath('userData'), 'aios.db'));
+  } catch (e) {
+    console.error('Failed to open SQLite store:', e);
+  }
+
+  try {
     const { port } = await apiServer.start();
     apiPort = port;
   } catch (e) {
@@ -260,6 +267,12 @@ app.on('will-quit', () => {
 
 ipcMain.handle('app:get-version', () => app.getVersion());
 ipcMain.handle('app:get-api-port', () => apiPort);
+
+// SQLite data store bridge. The renderer's src/lib/db.ts calls these by op
+// name; sqlite-store whitelists the op set and throws on anything unknown.
+// better-sqlite3 is synchronous, so this returns immediately; a thrown error
+// rejects the renderer's invoke() (matching the old IndexedDB reject path).
+ipcMain.handle('aios:db', (_e, op, args) => sqliteStore.call(op, args));
 
 // Native folder picker (used by Orchestra: project root, agent working dir, card overrides)
 ipcMain.handle('dialog:pick-folder', async (_e, opts = {}) => {

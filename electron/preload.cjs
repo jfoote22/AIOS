@@ -31,6 +31,12 @@ contextBridge.exposeInMainWorld('aios', {
   resetModel: (slot) => ipcRenderer.invoke('models:reset', slot),
   getModelDefaults: () => ipcRenderer.invoke('models:defaults'),
 
+  // SQLite data store. The renderer's src/lib/db.ts is the only caller; it
+  // invokes ops by name (e.g. 'getAllSnippets') with a positional args array.
+  db: {
+    call: (op, args) => ipcRenderer.invoke('aios:db', op, args || []),
+  },
+
   // Terminal (Kanban → Terminal pane)
   term: {
     available: () => ipcRenderer.invoke('term:available'),

@@ -1,364 +1,178 @@
-// IndexedDB local storage. Phase 1: stores snippets + chat history.
-// Phase 2 will migrate to SQLite via better-sqlite3 (for FTS5-powered Second Brain).
+// Local storage façade. Backed by SQLite (better-sqlite3) in the Electron main
+// process, reached over the window.aios.db IPC bridge. This file is the ONLY
+// renderer module that talks to the store; all callers import it unchanged.
+//
+// History: storage was IndexedDB through Phase 2. The bodies below now delegate
+// to SQLite; a one-time migration (ensureMigrated) copies any existing
+// IndexedDB data into SQLite on first use. The legacy IndexedDB database is
+// left intact as a fallback for one release.
 
-const DB_NAME = 'aios';
-const DB_VERSION = 5;
-const SNIPS = 'snippets';
-const META = 'meta';
-const THREADS = 'threads';
-const MESSAGES = 'messages';
-const IMPORTS = 'imports';
-const IMPORT_CHUNKS = 'import_chunks';
-const AGENTS = 'agents';
-const RUNS = 'runs';
+import { dumpIndexedDb, dumpHasData } from './idb-legacy';
 
-let dbPromise: Promise<IDBDatabase> | null = null;
+const MIGRATION_FLAG = '__migrated_idb_to_sqlite_v1';
 
-function openDb(): Promise<IDBDatabase> {
-  if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(SNIPS)) {
-        const store = db.createObjectStore(SNIPS, { keyPath: 'id' });
-        store.createIndex('timestamp', 'timestamp');
-        store.createIndex('category', 'category');
-        store.createIndex('originThreadId', 'originThreadId');
-      }
-      if (!db.objectStoreNames.contains(META)) {
-        db.createObjectStore(META, { keyPath: 'key' });
-      }
-      if (!db.objectStoreNames.contains(THREADS)) {
-        const store = db.createObjectStore(THREADS, { keyPath: 'id' });
-        store.createIndex('timestamp', 'timestamp');
-      }
-      if (!db.objectStoreNames.contains(MESSAGES)) {
-        const store = db.createObjectStore(MESSAGES, { keyPath: 'id' });
-        store.createIndex('threadId', 'threadId');
-      }
-      if (!db.objectStoreNames.contains(IMPORTS)) {
-        const store = db.createObjectStore(IMPORTS, { keyPath: 'id' });
-        store.createIndex('provider', 'provider');
-        store.createIndex('createdAt', 'createdAt');
-        store.createIndex('updatedAt', 'updatedAt');
-      }
-      if (!db.objectStoreNames.contains(IMPORT_CHUNKS)) {
-        const store = db.createObjectStore(IMPORT_CHUNKS, { keyPath: 'id' });
-        store.createIndex('conversationId', 'conversationId');
-        store.createIndex('provider', 'provider');
-      }
-      if (!db.objectStoreNames.contains(AGENTS)) {
-        const store = db.createObjectStore(AGENTS, { keyPath: 'id' });
-        store.createIndex('slug', 'slug', { unique: true });
-        store.createIndex('updatedAt', 'updatedAt');
-      }
-      if (!db.objectStoreNames.contains(RUNS)) {
-        const store = db.createObjectStore(RUNS, { keyPath: 'id' });
-        store.createIndex('cardId', 'cardId');
-        store.createIndex('agentId', 'agentId');
-        store.createIndex('startedAt', 'startedAt');
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-  return dbPromise;
+// --- IPC bridge ---------------------------------------------------------------
+
+function rawCall<T = unknown>(op: string, args?: unknown[]): Promise<T> {
+  const bridge = window.aios?.db;
+  if (!bridge) {
+    return Promise.reject(
+      new Error('AIOS SQLite bridge unavailable — the data layer requires running inside Electron.'),
+    );
+  }
+  return bridge.call<T>(op, args);
 }
 
-async function txStore(store: string, mode: IDBTransactionMode) {
-  const db = await openDb();
-  const tx = db.transaction(store, mode);
-  return { tx, store: tx.objectStore(store) };
+// --- One-time IndexedDB → SQLite migration ------------------------------------
+// Runs at most once per session (the resolved promise is cached). On success it
+// sets a flag in SQLite so future launches skip it. On failure it logs and
+// leaves the flag unset so the next launch retries — without a retry storm
+// inside the current session.
+
+let migrationPromise: Promise<void> | null = null;
+
+async function doMigrate(): Promise<void> {
+  try {
+    const already = await rawCall<boolean | null>('getMeta', [MIGRATION_FLAG]);
+    if (already) return;
+
+    const dump = await dumpIndexedDb().catch(() => null);
+    if (dump && dumpHasData(dump)) {
+      await rawCall('bulkLoad', [dump]);
+      console.info(
+        `[db] Migrated IndexedDB → SQLite (snippets:${dump.snippets.length} threads:${dump.threads.length} ` +
+          `messages:${dump.messages.length} imports:${dump.imports.length} chunks:${dump.importChunks.length} ` +
+          `agents:${dump.agents.length} runs:${dump.runs.length} meta:${dump.meta.length})`,
+      );
+    }
+    await rawCall('setMeta', [MIGRATION_FLAG, true]);
+  } catch (e) {
+    console.error('[db] IndexedDB→SQLite migration failed; will retry on next launch:', e);
+    // Flag stays unset → retried next launch. migrationPromise stays resolved →
+    // no repeated attempts this session.
+  }
+}
+
+function ensureMigrated(): Promise<void> {
+  if (!migrationPromise) migrationPromise = doMigrate();
+  return migrationPromise;
+}
+
+async function call<T = unknown>(op: string, args?: unknown[]): Promise<T> {
+  await ensureMigrated();
+  return rawCall<T>(op, args);
 }
 
 // --- Snippets ---
 export async function getAllSnippets<T>(): Promise<T[]> {
-  const { store } = await txStore(SNIPS, 'readonly');
-  return new Promise((resolve, reject) => {
-    const req = store.getAll();
-    req.onsuccess = () => {
-      const items = (req.result as T[]) ?? [];
-      items.sort((a: any, b: any) => b.timestamp - a.timestamp);
-      resolve(items);
-    };
-    req.onerror = () => reject(req.error);
-  });
+  return call<T[]>('getAllSnippets');
 }
 
 export async function putSnippet<T extends { id: string }>(item: T): Promise<void> {
-  const { tx, store } = await txStore(SNIPS, 'readwrite');
-  store.put(item);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('putSnippet', [item]);
 }
 
 export async function removeSnippet(id: string): Promise<void> {
-  const { tx, store } = await txStore(SNIPS, 'readwrite');
-  store.delete(id);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('removeSnippet', [id]);
 }
 
 export async function clearSnippets(): Promise<void> {
-  const { tx, store } = await txStore(SNIPS, 'readwrite');
-  store.clear();
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('clearSnippets');
 }
 
-// --- Meta (chat history, prefs) ---
+// --- Meta (chat history, prefs, board, maestro state) ---
 export async function getMeta<T>(key: string): Promise<T | null> {
-  const { store } = await txStore(META, 'readonly');
-  return new Promise((resolve, reject) => {
-    const req = store.get(key);
-    req.onsuccess = () => resolve((req.result?.value as T) ?? null);
-    req.onerror = () => reject(req.error);
-  });
+  return call<T | null>('getMeta', [key]);
 }
 
 export async function setMeta<T>(key: string, value: T): Promise<void> {
-  const { tx, store } = await txStore(META, 'readwrite');
-  store.put({ key, value });
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('setMeta', [key, value]);
 }
 
-// --- DeepDive threads + messages (Phase 1 stubs ready for Phase 2 port) ---
+// --- DeepDive threads + messages ---
 export async function getAllThreads<T>(): Promise<T[]> {
-  const { store } = await txStore(THREADS, 'readonly');
-  return new Promise((resolve, reject) => {
-    const req = store.getAll();
-    req.onsuccess = () => resolve((req.result as T[]) ?? []);
-    req.onerror = () => reject(req.error);
-  });
+  return call<T[]>('getAllThreads');
 }
 
 export async function putThread<T extends { id: string }>(item: T): Promise<void> {
-  const { tx, store } = await txStore(THREADS, 'readwrite');
-  store.put(item);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('putThread', [item]);
 }
 
 export async function removeThread(id: string): Promise<void> {
-  const { tx, store } = await txStore(THREADS, 'readwrite');
-  store.delete(id);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('removeThread', [id]);
 }
 
 export async function getMessagesForThread<T>(threadId: string): Promise<T[]> {
-  const { store } = await txStore(MESSAGES, 'readonly');
-  const idx = store.index('threadId');
-  return new Promise((resolve, reject) => {
-    const req = idx.getAll(threadId);
-    req.onsuccess = () => resolve((req.result as T[]) ?? []);
-    req.onerror = () => reject(req.error);
-  });
+  return call<T[]>('getMessagesForThread', [threadId]);
 }
 
 export async function putMessage<T extends { id: string }>(item: T): Promise<void> {
-  const { tx, store } = await txStore(MESSAGES, 'readwrite');
-  store.put(item);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('putMessage', [item]);
 }
 
 // --- Imports (Claude / ChatGPT conversation exports) ---
 export async function getAllImports<T>(): Promise<T[]> {
-  const { store } = await txStore(IMPORTS, 'readonly');
-  return new Promise((resolve, reject) => {
-    const req = store.getAll();
-    req.onsuccess = () => {
-      const items = (req.result as T[]) ?? [];
-      items.sort((a: any, b: any) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
-      resolve(items);
-    };
-    req.onerror = () => reject(req.error);
-  });
+  return call<T[]>('getAllImports');
 }
 
 export async function putImports<T extends { id: string }>(items: T[]): Promise<void> {
   if (!items.length) return;
-  const { tx, store } = await txStore(IMPORTS, 'readwrite');
-  for (const item of items) store.put(item);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('putImports', [items]);
 }
 
 export async function removeImport(id: string): Promise<void> {
-  const { tx, store } = await txStore(IMPORTS, 'readwrite');
-  store.delete(id);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('removeImport', [id]);
 }
 
-// --- Agents (Phase 2: agent orchestration in the Kanban tab) ---
+// --- Agents (Kanban orchestration) ---
 export async function getAllAgents<T>(): Promise<T[]> {
-  const { store } = await txStore(AGENTS, 'readonly');
-  return new Promise((resolve, reject) => {
-    const req = store.getAll();
-    req.onsuccess = () => {
-      const items = (req.result as T[]) ?? [];
-      items.sort((a: any, b: any) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
-      resolve(items);
-    };
-    req.onerror = () => reject(req.error);
-  });
+  return call<T[]>('getAllAgents');
 }
 
 export async function putAgent<T extends { id: string }>(item: T): Promise<void> {
-  const { tx, store } = await txStore(AGENTS, 'readwrite');
-  store.put(item);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('putAgent', [item]);
 }
 
 export async function removeAgent(id: string): Promise<void> {
-  const { tx, store } = await txStore(AGENTS, 'readwrite');
-  store.delete(id);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('removeAgent', [id]);
 }
 
 // --- Runs (each Play of an agent on a card creates one run) ---
 export async function getAllRuns<T>(): Promise<T[]> {
-  const { store } = await txStore(RUNS, 'readonly');
-  return new Promise((resolve, reject) => {
-    const req = store.getAll();
-    req.onsuccess = () => {
-      const items = (req.result as T[]) ?? [];
-      items.sort((a: any, b: any) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
-      resolve(items);
-    };
-    req.onerror = () => reject(req.error);
-  });
+  return call<T[]>('getAllRuns');
 }
 
 export async function getRunsForCard<T>(cardId: string): Promise<T[]> {
-  const { store } = await txStore(RUNS, 'readonly');
-  const idx = store.index('cardId');
-  return new Promise((resolve, reject) => {
-    const req = idx.getAll(cardId);
-    req.onsuccess = () => {
-      const items = (req.result as T[]) ?? [];
-      items.sort((a: any, b: any) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
-      resolve(items);
-    };
-    req.onerror = () => reject(req.error);
-  });
+  return call<T[]>('getRunsForCard', [cardId]);
 }
 
 export async function putRun<T extends { id: string }>(item: T): Promise<void> {
-  const { tx, store } = await txStore(RUNS, 'readwrite');
-  store.put(item);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('putRun', [item]);
 }
 
 // --- Import chunks (for Second Brain semantic search) ---
 export async function getAllImportChunks<T>(): Promise<T[]> {
-  const { store } = await txStore(IMPORT_CHUNKS, 'readonly');
-  return new Promise((resolve, reject) => {
-    const req = store.getAll();
-    req.onsuccess = () => resolve((req.result as T[]) ?? []);
-    req.onerror = () => reject(req.error);
-  });
+  return call<T[]>('getAllImportChunks');
 }
 
 export async function getChunksForConversation<T>(conversationId: string): Promise<T[]> {
-  const { store } = await txStore(IMPORT_CHUNKS, 'readonly');
-  const idx = store.index('conversationId');
-  return new Promise((resolve, reject) => {
-    const req = idx.getAll(conversationId);
-    req.onsuccess = () => resolve((req.result as T[]) ?? []);
-    req.onerror = () => reject(req.error);
-  });
+  return call<T[]>('getChunksForConversation', [conversationId]);
 }
 
 export async function getConversationsWithChunkCounts(): Promise<Map<string, number>> {
-  const { store } = await txStore(IMPORT_CHUNKS, 'readonly');
-  const idx = store.index('conversationId');
-  return new Promise((resolve, reject) => {
-    const req = idx.openKeyCursor();
-    const counts = new Map<string, number>();
-    req.onsuccess = () => {
-      const cur = req.result;
-      if (cur) {
-        const k = String(cur.key);
-        counts.set(k, (counts.get(k) ?? 0) + 1);
-        cur.continue();
-      } else {
-        resolve(counts);
-      }
-    };
-    req.onerror = () => reject(req.error);
-  });
+  const rows = await call<Array<{ conversationId: string; count: number }>>('getConversationChunkCounts');
+  return new Map(rows.map((r) => [r.conversationId, r.count]));
 }
 
 export async function putImportChunks<T extends { id: string }>(items: T[]): Promise<void> {
   if (!items.length) return;
-  const { tx, store } = await txStore(IMPORT_CHUNKS, 'readwrite');
-  for (const item of items) store.put(item);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('putImportChunks', [items]);
 }
 
 export async function deleteChunksForConversation(conversationId: string): Promise<void> {
-  const { tx, store } = await txStore(IMPORT_CHUNKS, 'readwrite');
-  const idx = store.index('conversationId');
-  const req = idx.openCursor(IDBKeyRange.only(conversationId));
-  req.onsuccess = () => {
-    const cur = req.result;
-    if (cur) { cur.delete(); cur.continue(); }
-  };
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('deleteChunksForConversation', [conversationId]);
 }
 
 export async function clearImports(provider?: string): Promise<void> {
-  const { tx, store } = await txStore(IMPORTS, 'readwrite');
-  if (!provider) {
-    store.clear();
-  } else {
-    const idx = store.index('provider');
-    const req = idx.openCursor(IDBKeyRange.only(provider));
-    req.onsuccess = () => {
-      const cur = req.result;
-      if (cur) { cur.delete(); cur.continue(); }
-    };
-  }
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  await call('clearImports', [provider]);
 }
