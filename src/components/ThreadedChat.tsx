@@ -353,7 +353,7 @@ export interface Thread {
   title?: string;
   rowId?: number; // Track which row this thread belongs to
   sourceType?: 'main' | 'thread'; // Track if created from main chat or another thread
-  actionType?: 'ask' | 'details' | 'simplify' | 'examples' | 'learning' | 'links' | 'videos' | 'deep'; // Track which context action was used
+  actionType?: 'ask' | 'details' | 'simplify' | 'examples' | 'links' | 'videos' | 'deep'; // Track which context action was used
   research?: ThreadResearch; // Verified links/videos for 'links'/'videos' threads
 }
 
@@ -471,15 +471,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const [compactThreadHeaders, setCompactThreadHeaders] = useState<boolean>(false);
   const [hideInputFields, setHideInputFields] = useState<boolean>(false);
   const [hoveredThreadId, setHoveredThreadId] = useState<string | null>(null);
-  
-  // Learning snippets state
-  const [learningSnippets, setLearningSnippets] = useState<Array<{
-    id: string;
-    text: string;
-    timestamp: number;
-    source: string;
-  }>>([]);
-  const [showLearningModal, setShowLearningModal] = useState<boolean>(false);
 
   // Research attachments (links/files added as model-agnostic context).
   // attachmentsRef mirrors state synchronously so submit logic can read the
@@ -1062,7 +1053,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       selectedModel: selectedModel,
       activeThreadId: activeThreadId,
       uiState: uiState, // New: preserve UI state
-      learningSnippets: learningSnippets, // Include learning snippets for content selection
       attachments: attachmentsRef.current, // Research links/files attached as context
     };
   };
@@ -1073,7 +1063,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       title: state.title || 'Unknown',
       mainMessagesCount: state.mainMessages?.length || 0,
       threadsCount: state.threads?.length || 0,
-      snippetsCount: state.learningSnippets?.length || 0, // Add snippet count to debug log
       selectedModel: state.selectedModel
     });
 
@@ -1113,15 +1102,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         // Set active thread
         setActiveThreadId(state.activeThreadId || null);
         
-        // Load learning snippets from saved state
-        if (state.learningSnippets && Array.isArray(state.learningSnippets)) {
-          console.log('📚 Loading learning snippets:', state.learningSnippets.length);
-          setLearningSnippets(state.learningSnippets);
-        } else {
-          console.log('📚 No learning snippets found in saved state');
-          setLearningSnippets([]);
-        }
-
         // Restore research attachments
         commitAttachments(Array.isArray(state.attachments) ? state.attachments : []);
         
@@ -1196,24 +1176,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     // Force a re-render by updating the key is no longer needed
   };
 
-  // Function to add snippets to learning collection
-  const addToLearningSnippets = (text: string) => {
-    const newSnippet = {
-      id: Date.now().toString(),
-      text: text.trim(),
-      timestamp: Date.now(),
-      source: contextMenuSource.isFromThread
-        ? `Thread ${threads.findIndex(t => t.id === contextMenuSource.threadId) + 1}`
-        : 'Main Chat'
-    };
-
-    setLearningSnippets(prev => [newSnippet, ...prev]);
-    setShowContextMenu(false);
-
-    // Show brief confirmation
-    // You could add a toast notification here if desired
-  };
-
   // Cross-link to the Snipping Vault: persist selected text as a Snippet record
   // with origin metadata so the Snipping tab can show "from thread …" and link back.
   const saveSelectionAsSnippet = async (text: string) => {
@@ -1269,16 +1231,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       console.error('Failed to save snippet:', e);
       alert(`Failed to save snippet: ${(e as any)?.message ?? e}`);
     }
-  };
-
-  // Function to remove snippet from learning collection
-  const removeLearningSnippet = (id: string) => {
-    setLearningSnippets(prev => prev.filter(snippet => snippet.id !== id));
-  };
-
-  // Function to clear all learning snippets
-  const clearLearningSnippets = () => {
-    setLearningSnippets([]);
   };
 
   // Expose functions to parent component
@@ -1440,7 +1392,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     }
   };
 
-  const createNewThread = (context: string, autoExpand: boolean = false, autoSend: boolean = false, actionType: 'ask' | 'details' | 'simplify' | 'examples' | 'learning' | 'links' | 'videos' | 'deep' = 'ask') => {
+  const createNewThread = (context: string, autoExpand: boolean = false, autoSend: boolean = false, actionType: 'ask' | 'details' | 'simplify' | 'examples' | 'links' | 'videos' | 'deep' = 'ask') => {
     // Auto-exit fullscreen mode when creating new thread to ensure proper functionality
     const wasInFullscreen = !!fullscreenThread;
     if (fullscreenThread) {
@@ -1662,7 +1614,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         icon: <Scissors className="w-3.5 h-3.5 text-white" />,
         label: 'Save to Vault',
         onClick: () => saveSelectionAsSnippet(selectedText),
-        colorScheme: getActionColorScheme('learning')
+        colorScheme: getActionColorScheme('snippet')
       }
     ];
 
@@ -1926,8 +1878,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         return 'Simplify this';
       case 'examples':
         return 'Give examples';
-      case 'learning':
-        return 'Add to learning';
       case 'links':
         return 'Get links';
       case 'videos':
@@ -1988,7 +1938,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           badgeBg: 'bg-orange-500',
           badgeBorder: 'border-orange-500'
         };
-      case 'learning':
+      case 'snippet':
         return {
           bg: 'bg-indigo-400',
           border: 'border-indigo-400',
@@ -3068,20 +3018,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                         }`}></div>
                       </div>
                     </button>
-
-                    {/* 5. Learning Snippets Toggle - Far Right */}
-                    <button
-                      onClick={() => setShowLearningModal(!showLearningModal)}
-                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all duration-200 ${
-                        learningSnippets.length > 0
-                          ? 'bg-indigo-500/20 text-indigo-400 border-indigo-500/50 hover:bg-indigo-500/30' 
-                          : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:bg-zinc-800 hover:text-white'
-                      }`}
-                      title={`Learning snippets (${learningSnippets.length})`}
-                    >
-                      <Brain className="w-3.5 h-3.5" />
-                      <span className="text-xs font-medium">{learningSnippets.length}</span>
-                    </button>
                   </div>
                 </div>
               </div>
@@ -3273,18 +3209,11 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                 colorScheme: getActionColorScheme('videos')
               },
               {
-                action: 'learning',
-                icon: <Brain className="w-3.5 h-3.5 text-white" />,
-                label: 'Include in Learning Tools',
-                onClick: () => addToLearningSnippets(selectedText),
-                colorScheme: getActionColorScheme('learning')
-              },
-              {
                 action: 'snippet',
                 icon: <Scissors className="w-3.5 h-3.5 text-white" />,
                 label: 'Save to Vault',
                 onClick: () => saveSelectionAsSnippet(selectedText),
-                colorScheme: getActionColorScheme('learning')
+                colorScheme: getActionColorScheme('snippet')
               }
             ].map((item) => (
               <button
@@ -3314,117 +3243,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         </div>
       )}
       
-      {/* Learning Snippets Modal */}
-      {showLearningModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100001]" onClick={() => setShowLearningModal(false)}>
-          <div 
-            className="bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl max-w-4xl max-h-[80vh] w-full mx-4 flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Modal Header */}
-            <div className="flex items-center justify-between p-6 border-b border-zinc-800">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 bg-indigo-500 rounded-full flex items-center justify-center">
-                  <Brain className="w-4 h-4 text-white" />
-                </div>
-                <div>
-                  <h2 className="text-xl font-semibold text-white">Learning Snippets</h2>
-                  <p className="text-sm text-zinc-400">
-                    {learningSnippets.length} snippet{learningSnippets.length !== 1 ? 's' : ''} collected for enhanced learning tool generation
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                {learningSnippets.length > 0 && (
-                  <button
-                    onClick={clearLearningSnippets}
-                    className="px-3 py-1.5 text-sm bg-red-500/20 text-red-400 hover:bg-red-500/30 rounded-lg transition-colors"
-                  >
-                    Clear All
-                  </button>
-                )}
-                <button
-                  onClick={() => setShowLearningModal(false)}
-                  className="text-zinc-400 hover:text-white transition-colors p-1"
-                  title="Close"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Modal Content */}
-            <div className="flex-1 overflow-y-auto p-6">
-              {learningSnippets.length === 0 ? (
-                <div className="text-center py-12">
-                  <div className="flex items-center justify-center mb-4">
-                    <div className="w-20 h-20 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-                      <Brain className="w-8 h-8 text-indigo-500" />
-                    </div>
-                  </div>
-                  <h3 className="text-xl font-semibold text-white mb-2">No Learning Snippets Yet</h3>
-                  <p className="text-zinc-400 mb-4">
-                    Select text in AI responses and choose &quot;Include in Learning Tools&quot; to build your learning collection.
-                  </p>
-                  <div className="flex items-start gap-2 text-sm text-indigo-400 bg-indigo-500/10 p-4 rounded-lg border border-indigo-500/20 max-w-md mx-auto text-left">
-                    <Lightbulb className="w-4 h-4 mt-0.5 shrink-0 text-amber-400" />
-                    <span><strong>Pro tip:</strong> These snippets will be automatically included when generating learning tools to provide more comprehensive and personalized results.</span>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {learningSnippets.map((snippet, index) => (
-                    <div
-                      key={snippet.id}
-                      className="bg-zinc-800/50 border border-zinc-800 rounded-lg p-4 hover:bg-zinc-800/70 transition-colors"
-                    >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-2">
-                            <span className="text-xs font-medium text-indigo-400 bg-indigo-500/20 px-2 py-1 rounded">
-                              #{index + 1}
-                            </span>
-                            <span className="text-xs text-zinc-400">{snippet.source}</span>
-                            <span className="text-xs text-zinc-500">
-                              {new Date(snippet.timestamp).toLocaleString()}
-                            </span>
-                          </div>
-                          <div className="text-sm text-white leading-relaxed">
-                            &quot;{snippet.text}&quot;
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => removeLearningSnippet(snippet.id)}
-                          className="text-zinc-400 hover:text-red-400 transition-colors p-1 flex-shrink-0"
-                          title="Remove snippet"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Modal Footer */}
-            {learningSnippets.length > 0 && (
-              <div className="border-t border-zinc-800 p-6">
-                <div className="text-center">
-                  <div className="text-sm text-zinc-400 mb-2">
-                    These snippets will be automatically included in your next learning tool generation
-                  </div>
-                  <div className="text-xs text-indigo-400">
-                    Navigate to <strong>/learn</strong> and generate learning tools to see these snippets in action
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 });
