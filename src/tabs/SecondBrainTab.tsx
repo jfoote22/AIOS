@@ -4,10 +4,14 @@ import ForceGraph2D, { type ForceGraphMethods, type NodeObject, type LinkObject 
 import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Tag, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle } from 'lucide-react';
 import * as db from '../lib/db';
 import {
-  embedText, cosineSimilarity, chatWithVault, isGeminiReady, onGeminiReadyChange,
+  embedText, cosineSimilarity, chatWithVault, isGeminiReady, onGeminiReadyChange, buildEmbedSource,
   type ChatTurn, type VaultContextItem,
 } from '../lib/ai';
-import { buildGraph, nodeAsContextItem, type BrainNode, type BrainLink, type BrainGraph } from '../lib/graph';
+import {
+  buildGraph, nodeAsContextItem, deepDiveEmbedSource,
+  DEFAULT_SIMILARITY_THRESHOLD, DEFAULT_SIMILAR_TOP_K,
+  type BrainNode, type BrainLink, type BrainGraph,
+} from '../lib/graph';
 import { listImports, listAllChunks, onImportsChange, deleteImport, type ImportedConversation, type ImportChunk } from '../lib/imports';
 import { setSeed as setDeepDiveSeed } from '../lib/deepdiveSeed';
 import { onDeepDivesChange } from '../lib/deepdiveStore';
@@ -31,6 +35,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const [nodeMenu, setNodeMenu] = useState<{ node: BrainNode; x: number; y: number } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<BrainNode | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [backfill, setBackfill] = useState<{ done: number; total: number } | null>(null);
 
   // ── Physics controls (persist to db.meta so they survive reloads) ──────────
   const [physics, setPhysics] = useState<PhysicsSettings>(DEFAULT_PHYSICS);
@@ -41,6 +46,14 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       .catch(() => {});
   }, []);
   useEffect(() => { db.setMeta('second-brain-physics', physics).catch(() => {}); }, [physics]);
+
+  // Debounce connection-slider changes so dragging the threshold / max-links
+  // sliders doesn't rebuild the graph (and reset node positions) on every tick.
+  const [connOpts, setConnOpts] = useState({ threshold: physics.simThreshold, topK: physics.maxLinks });
+  useEffect(() => {
+    const t = setTimeout(() => setConnOpts({ threshold: physics.simThreshold, topK: physics.maxLinks }), 250);
+    return () => clearTimeout(t);
+  }, [physics.simThreshold, physics.maxLinks]);
 
   // Push the slider values into d3-force whenever they change (or after the
   // graph is built — d3 forces are reset when react-force-graph rebuilds).
@@ -135,8 +148,56 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       }
     }
     const importsForGraph = imports.map(im => ({ ...im, embedding: centroids.get(im.id) }));
-    setGraph(buildGraph(snippets, deepDives, importsForGraph));
-  }, [snippets, deepDives, imports, chunks]);
+    setGraph(buildGraph(snippets, deepDives, importsForGraph, {
+      threshold: connOpts.threshold,
+      topK: connOpts.topK,
+    }));
+  }, [snippets, deepDives, imports, chunks, connOpts]);
+
+  // Nodes that can't form semantic links yet because they have no embedding
+  // (older snippets saved before Gemini was configured, or DeepDives saved
+  // before save-time embedding). The backfill button embeds them on demand.
+  const unembedded = useMemo(() => {
+    const s = snippets.filter((x: any) => x.status === 'ready' && !(x.embedding?.length) && (x.extractedText || x.summary || x.title)).length;
+    const d = deepDives.filter((x: any) => !(x.embedding?.length)).length;
+    return s + d;
+  }, [snippets, deepDives]);
+
+  const runBackfill = useCallback(async () => {
+    if (!aiReady || backfill) return;
+    const sTodo = snippets.filter((x: any) => x.status === 'ready' && !(x.embedding?.length) && (x.extractedText || x.summary || x.title));
+    const dTodo = deepDives.filter((x: any) => !(x.embedding?.length));
+    const total = sTodo.length + dTodo.length;
+    if (!total) return;
+    setBackfill({ done: 0, total });
+    let done = 0;
+    try {
+      for (const s of sTodo) {
+        try {
+          const src = buildEmbedSource({
+            title: s.title || '', summary: s.summary || '', tags: s.tags || [],
+            extractedText: s.extractedText || '', category: s.category || '', source: s.source || '',
+          });
+          const emb = await embedText(src);
+          if (emb.length) await db.putSnippet({ ...s, embedding: emb });
+        } catch (e) { console.error('backfill: snippet failed', s.id, e); }
+        setBackfill({ done: ++done, total });
+      }
+      for (const dd of dTodo) {
+        try {
+          const src = deepDiveEmbedSource(dd);
+          if (src) {
+            const emb = await embedText(src);
+            if (emb.length) await db.putThread({ ...dd, embedding: emb });
+          }
+        } catch (e) { console.error('backfill: deepdive failed', dd.id, e); }
+        setBackfill({ done: ++done, total });
+      }
+    } finally {
+      setBackfill(null);
+      loadData();
+    }
+  }, [aiReady, backfill, snippets, deepDives, loadData]);
 
   // Track container size for the graph canvas
   useEffect(() => {
@@ -278,8 +339,19 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     const link = l as unknown as BrainLink;
     if (link.kind === 'origin') return 'rgba(124,156,255,0.55)';
     if (link.kind === 'similar') return 'rgba(94,230,176,0.25)';
+    if (link.kind === 'similar-soft') return 'rgba(94,230,176,0.10)';
     return 'rgba(255,255,255,0.12)';
   }, []);
+
+  // Links touching the focused node form the "selected network" — they pulse
+  // faster than the rest. source/target are id strings until react-force-graph
+  // hydrates them into node objects, so handle both.
+  const linkIsFocused = useCallback((l: any) => {
+    if (!focusedNode) return false;
+    const s = typeof l.source === 'object' ? l.source?.id : l.source;
+    const t = typeof l.target === 'object' ? l.target?.id : l.target;
+    return s === focusedNode.id || t === focusedNode.id;
+  }, [focusedNode]);
 
   const onNodeClick = useCallback((n: NodeObject) => {
     const node = n as BrainNode;
@@ -476,9 +548,18 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               nodeColor={nodeColor}
               linkColor={linkColor as any}
               linkWidth={(l) => Math.min(2.5, ((l as any).value ?? 1) * 0.4)}
-              linkDirectionalParticles={(l) => ((l as any).kind === 'origin' ? 2 : 0)}
-              linkDirectionalParticleSpeed={() => 0.006}
-              linkDirectionalParticleColor={() => '#7c9cff'}
+              linkDirectionalParticles={(l) => (linkIsFocused(l) ? 3 : (l as any).kind === 'origin' ? 2 : 1)}
+              linkDirectionalParticleSpeed={(l) =>
+                linkIsFocused(l) ? 0.034 : (l as any).kind === 'origin' ? 0.017 : 0.0085
+              }
+              linkDirectionalParticleWidth={(l) => (linkIsFocused(l) ? 3 : 2)}
+              linkDirectionalParticleColor={(l) => {
+                const k = (l as any).kind;
+                if (k === 'origin') return '#7c9cff';
+                if (k === 'similar') return '#5ee6b0';
+                if (k === 'similar-soft') return 'rgba(94,230,176,0.55)';
+                return 'rgba(255,255,255,0.5)';
+              }}
               cooldownTicks={120}
               warmupTicks={20}
               onNodeClick={onNodeClick}
@@ -555,6 +636,10 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               physics={physics}
               setPhysics={setPhysics}
               onReset={() => setPhysics(DEFAULT_PHYSICS)}
+              unembedded={unembedded}
+              backfill={backfill}
+              onBackfill={runBackfill}
+              aiReady={aiReady}
             />
           )}
 
@@ -739,22 +824,31 @@ interface PhysicsSettings {
   linkDistance: number;   // d3 link force distance
   linkStrength: number;   // d3 link force strength (higher = tighter clusters)
   chargeStrength: number; // d3 charge force; negative = repulsion
+  simThreshold: number;   // min cosine similarity for a semantic link (lower = more links)
+  maxLinks: number;       // max semantic neighbors kept per node (top-K)
 }
 
 const DEFAULT_PHYSICS: PhysicsSettings = {
   linkDistance: 100,
   linkStrength: 1,
   chargeStrength: -100,
+  simThreshold: DEFAULT_SIMILARITY_THRESHOLD,
+  maxLinks: DEFAULT_SIMILAR_TOP_K,
 };
 
 function PhysicsPanel({
   open, onToggle, physics, setPhysics, onReset,
+  unembedded, backfill, onBackfill, aiReady,
 }: {
   open: boolean;
   onToggle: () => void;
   physics: PhysicsSettings;
   setPhysics: React.Dispatch<React.SetStateAction<PhysicsSettings>>;
   onReset: () => void;
+  unembedded: number;
+  backfill: { done: number; total: number } | null;
+  onBackfill: () => void;
+  aiReady: boolean;
 }) {
   if (!open) {
     return (
@@ -811,6 +905,36 @@ function PhysicsPanel({
         decimals={2}
         onChange={v => setPhysics(p => ({ ...p, linkStrength: v }))}
       />
+
+      <div className="border-t border-zinc-800 pt-2.5 mt-1 space-y-3">
+        <div className="text-[9px] uppercase tracking-widest text-zinc-600 font-bold">Connections</div>
+        <SliderRow
+          label="Link threshold"
+          hint="lower = more connections between topics"
+          value={physics.simThreshold}
+          min={0.4} max={0.8} step={0.01}
+          decimals={2}
+          onChange={v => setPhysics(p => ({ ...p, simThreshold: v }))}
+        />
+        <SliderRow
+          label="Max links / node"
+          hint="how many connections each node can form"
+          value={physics.maxLinks}
+          min={1} max={12} step={1}
+          onChange={v => setPhysics(p => ({ ...p, maxLinks: Math.round(v) }))}
+        />
+        {unembedded > 0 && (
+          <button
+            onClick={onBackfill}
+            disabled={!aiReady || !!backfill}
+            title={aiReady ? 'Embed nodes that have no vector yet so they can connect' : 'Add a Gemini key in Models to enable'}
+            className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md border border-indigo-500/40 bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-[10px] font-semibold uppercase tracking-widest"
+          >
+            <Sparkles className="w-3 h-3" />
+            {backfill ? `Connecting ${backfill.done}/${backfill.total}…` : `Connect ${unembedded} node${unembedded !== 1 ? 's' : ''}`}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

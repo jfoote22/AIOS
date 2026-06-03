@@ -21,7 +21,7 @@ export interface BrainNode {
 export interface BrainLink {
   source: string;
   target: string;
-  kind: 'origin' | 'tag' | 'similar';
+  kind: 'origin' | 'tag' | 'similar' | 'similar-soft';
   /** Force-graph uses `value` as a link strength hint. */
   value: number;
 }
@@ -50,9 +50,12 @@ interface DeepDiveLike {
   description?: string;
   mainMessages?: any[];
   threads?: any[];
-  learningSnippets?: any[];
   timestamp?: number;
   updatedAt?: number;
+  /** Centroid of the session's assistant text. Required for an a DeepDive to
+   *  participate in semantic similarity links (otherwise it only gets origin
+   *  links from snippets saved out of it). */
+  embedding?: number[];
 }
 
 interface ImportLike {
@@ -67,14 +70,30 @@ interface ImportLike {
   embedding?: number[];
 }
 
-const SIMILARITY_THRESHOLD = 0.62;
-const SIMILAR_TOP_K = 3;
+// Connection tuning. Defaults are looser than the original (0.62 / top-3) so
+// adjacent topics surface; both are user-tunable via the graph settings
+// sliders. Pairs in [threshold - SOFT_BAND, threshold) are kept as faint
+// 'similar-soft' links so "a little bit related" shows without clutter.
+export const DEFAULT_SIMILARITY_THRESHOLD = 0.55;
+export const DEFAULT_SIMILAR_TOP_K = 5;
+const SOFT_BAND = 0.08;
+
+export interface GraphOptions {
+  /** Minimum cosine similarity for a solid 'similar' link. */
+  threshold?: number;
+  /** Max semantic neighbors kept per node. */
+  topK?: number;
+}
 
 export function buildGraph(
   snippets: SnippetLike[],
   deepDives: DeepDiveLike[],
   imports: ImportLike[] = [],
+  opts: GraphOptions = {},
 ): BrainGraph {
+  const threshold = opts.threshold ?? DEFAULT_SIMILARITY_THRESHOLD;
+  const topK = opts.topK ?? DEFAULT_SIMILAR_TOP_K;
+  const softThreshold = Math.max(0.3, threshold - SOFT_BAND);
   const nodes: BrainNode[] = [];
   const links: BrainLink[] = [];
 
@@ -177,6 +196,9 @@ export function buildGraph(
   for (const s of snippets) {
     if (s.embedding?.length) pool.push({ graphId: `snip:${s.id}`, embedding: s.embedding });
   }
+  for (const dd of deepDives) {
+    if (dd.embedding?.length) pool.push({ graphId: `dd:${dd.id}`, embedding: dd.embedding });
+  }
   for (const im of imports) {
     if (im.embedding?.length) pool.push({ graphId: `import:${im.id}`, embedding: im.embedding });
   }
@@ -191,20 +213,46 @@ export function buildGraph(
         const b = pool[j];
         if (a.embedding.length !== b.embedding.length) continue; // skip dim mismatches
         const sim = cosineSimilarity(a.embedding, b.embedding);
-        if (sim >= SIMILARITY_THRESHOLD) sims.push({ graphId: b.graphId, sim });
+        if (sim >= softThreshold) sims.push({ graphId: b.graphId, sim });
       }
       sims.sort((x, y) => y.sim - x.sim);
-      for (const { graphId, sim } of sims.slice(0, SIMILAR_TOP_K)) {
+      for (const { graphId, sim } of sims.slice(0, topK)) {
         const [x, y] = a.graphId < graphId ? [a.graphId, graphId] : [graphId, a.graphId];
         const key = `${x}|${y}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        links.push({ source: x, target: y, kind: 'similar', value: sim * 4 });
+        const kind: BrainLink['kind'] = sim >= threshold ? 'similar' : 'similar-soft';
+        links.push({ source: x, target: y, kind, value: sim * 4 });
       }
     }
   }
 
+  // Orient each link so a directional pulse flows from the more-connected
+  // ("parent") node outward. adjacency/hierarchy treat links as undirected,
+  // so swapping source/target here is purely cosmetic (drives particle flow).
+  const degree = new Map<string, number>();
+  for (const l of links) {
+    degree.set(l.source, (degree.get(l.source) ?? 0) + 1);
+    degree.set(l.target, (degree.get(l.target) ?? 0) + 1);
+  }
+  for (const l of links) {
+    if ((degree.get(l.target) ?? 0) > (degree.get(l.source) ?? 0)) {
+      const tmp = l.source; l.source = l.target; l.target = tmp;
+    }
+  }
+
   return { nodes, links };
+}
+
+/** Build the text used to embed a DeepDive session (title + description +
+ *  all assistant replies). Capped to keep the embedding request bounded. */
+export function deepDiveEmbedSource(dd: DeepDiveLike): string {
+  const assistant = [
+    ...((dd.mainMessages ?? []).filter((m: any) => m?.role === 'assistant').map((m: any) => m.content || '')),
+    ...((dd.threads ?? []).flatMap((t: any) =>
+      (t.messages ?? []).filter((m: any) => m?.role === 'assistant').map((m: any) => m.content || ''))),
+  ].join('\n\n');
+  return [dd.title, dd.description, assistant].filter(Boolean).join('\n').slice(0, 8000);
 }
 
 /** Convert a graph node back into a Vault-style context item for chat retrieval. */

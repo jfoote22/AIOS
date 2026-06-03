@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Save, FolderOpen, Plus, Copy, X, AlertCircle, MessageSquare, Trash2, Clock, Bot, Layers, BookOpen, Network, Search, Link2, Video, ArrowRight, ArrowDown } from 'lucide-react';
+import { Save, FolderOpen, Plus, Copy, X, AlertCircle, MessageSquare, Trash2, Clock, Bot, Layers, Network, Search, Link2, Video, ArrowRight, ArrowDown } from 'lucide-react';
 import ThreadedChat from '../components/ThreadedChat';
 import * as db from '../lib/db';
 import { onConfiguredChange, getConfigured, type ProviderId } from '../lib/providers';
@@ -14,8 +14,9 @@ export interface DeepDiveRecord {
   mainMessages: any[];
   threads: any[];
   selectedModel: string;
-  learningSnippets?: any[];
   attachments?: any[];
+  embedding?: number[];   // centroid of assistant text; lets the Second Brain graph link this dive
+
   activeThreadId?: string | null;
   timestamp: number;
   updatedAt: number;
@@ -107,12 +108,24 @@ export default function DeepDivesTab() {
         mainMessages: state.mainMessages ?? [],
         threads: state.threads ?? [],
         selectedModel: state.selectedModel ?? 'anthropic',
-        learningSnippets: state.learningSnippets ?? [],
         attachments: state.attachments ?? [],
         activeThreadId: state.activeThreadId ?? null,
         timestamp: currentId ? (saved.find(s => s.id === currentId)?.timestamp ?? Date.now()) : Date.now(),
         updatedAt: Date.now(),
       };
+      // Best-effort: embed the session's assistant text so it joins the Second
+      // Brain semantic graph as a connectable node (non-fatal if Gemini is off).
+      try {
+        const { isGeminiReady, embedText } = await import('../lib/ai');
+        const { deepDiveEmbedSource } = await import('../lib/graph');
+        if (isGeminiReady()) {
+          const src = deepDiveEmbedSource(record as any);
+          if (src) {
+            const emb = await embedText(src);
+            if (emb.length) record.embedding = emb;
+          }
+        }
+      } catch (e) { console.error('DeepDive embedding failed (non-fatal):', e); }
       await db.putThread(record);
       setCurrentId(id);
       await refresh();
@@ -131,7 +144,6 @@ export default function DeepDivesTab() {
         threads: record.threads ?? [],
         selectedModel: record.selectedModel ?? 'anthropic',
         activeThreadId: record.activeThreadId ?? null,
-        learningSnippets: record.learningSnippets ?? [],
         attachments: record.attachments ?? [],
       });
       setCurrentId(record.id);
@@ -497,7 +509,6 @@ export default function DeepDivesTab() {
                               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2.5 text-[10px] text-zinc-500">
                                 <span className="flex items-center gap-1"><MessageSquare className="w-3 h-3" />{dd.mainMessages?.length ?? 0} msgs</span>
                                 <span className="flex items-center gap-1"><Layers className="w-3 h-3" />{dd.threads?.length ?? 0} threads</span>
-                                <span className="flex items-center gap-1"><BookOpen className="w-3 h-3" />{dd.learningSnippets?.length ?? 0} snippets</span>
                                 <span className="flex items-center gap-1"><Bot className="w-3 h-3" />{dd.selectedModel}</span>
                                 <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDate(dd.updatedAt ?? dd.timestamp)}</span>
                               </div>
@@ -901,7 +912,6 @@ function actionLabel(action?: string) {
     case 'details': return 'Details';
     case 'simplify': return 'Simplify';
     case 'examples': return 'Examples';
-    case 'learning': return 'Learning';
     case 'links': return 'Links';
     case 'videos': return 'Videos';
     case 'deep': return 'Deep Dive';
