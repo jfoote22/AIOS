@@ -8,8 +8,8 @@ import {
   type ChatTurn, type VaultContextItem,
 } from '../lib/ai';
 import {
-  buildGraph, nodeAsContextItem, deepDiveEmbedSource,
-  DEFAULT_SIMILARITY_THRESHOLD, DEFAULT_SIMILAR_TOP_K,
+  buildGraph, nodeAsContextItem, deepDiveEmbedSource, computePulseLayers,
+  DEFAULT_SIMILARITY_THRESHOLD, DEFAULT_SIMILAR_TOP_K, DEFAULT_HUB_THRESHOLD,
   type BrainNode, type BrainLink, type BrainGraph,
 } from '../lib/graph';
 import { listImports, listAllChunks, onImportsChange, deleteImport, type ImportedConversation, type ImportChunk } from '../lib/imports';
@@ -18,6 +18,22 @@ import { onDeepDivesChange } from '../lib/deepdiveStore';
 import { navigateTo } from '../lib/navigate';
 
 interface ChatMessage extends ChatTurn { citedIds?: string[]; }
+
+// Network-pulse animation timing. The wave is the ONLY animation — there is
+// no always-on continuous particle flow (that read as constant churn, with a
+// dot permanently on every wire). A single uniform photon speed keeps every
+// hop the same length, so the cascade reads as one clean ripple spreading
+// outward from the hubs. The next wave only starts once the current one has
+// fully cleared the wire (+ a short rest) so pulses never overlap — but no
+// sooner than the 5s cadence.
+const PULSE_WAVE_INTERVAL_MS = 5000; // minimum spacing between waves
+const PULSE_GAP_MS = 500;            // quiet rest after a wave fully arrives
+const PULSE_SPEED = 0.02;            // wave photon speed (fraction/frame ≈ 0.83s per hop)
+/** Milliseconds for a single-hop photon to traverse one link at `speed` (~60fps). */
+const photonTravelMs = (speed: number) => (1 / speed / 60) * 1000;
+// Each ring fires when the previous ring's dot is ~85% of the way to its
+// neuron — a layer-by-layer handoff with just enough overlap to flow smoothly.
+const PULSE_STEP_MS = photonTravelMs(PULSE_SPEED) * 0.85;
 
 export default function SecondBrainTab({ active = true }: { active?: boolean }) {
   const [snippets, setSnippets] = useState<any[]>([]);
@@ -49,11 +65,11 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
 
   // Debounce connection-slider changes so dragging the threshold / max-links
   // sliders doesn't rebuild the graph (and reset node positions) on every tick.
-  const [connOpts, setConnOpts] = useState({ threshold: physics.simThreshold, topK: physics.maxLinks });
+  const [connOpts, setConnOpts] = useState({ threshold: physics.simThreshold, topK: physics.maxLinks, hubThreshold: physics.pulseHubThreshold });
   useEffect(() => {
-    const t = setTimeout(() => setConnOpts({ threshold: physics.simThreshold, topK: physics.maxLinks }), 250);
+    const t = setTimeout(() => setConnOpts({ threshold: physics.simThreshold, topK: physics.maxLinks, hubThreshold: physics.pulseHubThreshold }), 250);
     return () => clearTimeout(t);
-  }, [physics.simThreshold, physics.maxLinks]);
+  }, [physics.simThreshold, physics.maxLinks, physics.pulseHubThreshold]);
 
   // Push the slider values into d3-force whenever they change (or after the
   // graph is built — d3 forces are reset when react-force-graph rebuilds).
@@ -151,8 +167,70 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     setGraph(buildGraph(snippets, deepDives, importsForGraph, {
       threshold: connOpts.threshold,
       topK: connOpts.topK,
+      hubThreshold: connOpts.hubThreshold,
     }));
   }, [snippets, deepDives, imports, chunks, connOpts]);
+
+  // Plan the breadth-first pulse wave: Layer 1 = hubs (≥ hubThreshold links),
+  // then one ring outward per hop, capped at "Max links / node" total layers.
+  // Recomputed whenever the graph or the connection sliders change. The link
+  // objects in here are the same references react-force-graph renders, so they
+  // can be passed straight to emitParticle().
+  const pulseLayers = useMemo(
+    () => computePulseLayers(graph, { hubThreshold: connOpts.hubThreshold, maxLayers: connOpts.topK }),
+    [graph, connOpts.hubThreshold, connOpts.topK],
+  );
+
+  // Network pulse: every PULSE_WAVE_INTERVAL_MS, fire a wave of particles that
+  // starts at the hub neurons and cascades outward ring-by-ring. Rides on top
+  // of the always-on continuous flows via react-force-graph's emitParticle().
+  // We read the latest plan through a ref so retuning the sliders doesn't reset
+  // the wave clock — only mounting / the graph appearing does.
+  const pulseRef = useRef(pulseLayers);
+  useEffect(() => { pulseRef.current = pulseLayers; }, [pulseLayers]);
+  const waveTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const hasGraph = graph.nodes.length > 0;
+  useEffect(() => {
+    if (!active || !hasGraph) return;
+    let cancelled = false;
+    let nextWave: ReturnType<typeof setTimeout> | undefined;
+
+    const fireWave = () => {
+      if (cancelled) return;
+      // Clear any stragglers from the previous wave so the timer list is bounded.
+      waveTimers.current.forEach(clearTimeout);
+      waveTimers.current = [];
+
+      const fg = fgRef.current as any;
+      const rings = pulseRef.current.rings;
+      let waveDurationMs = 0;
+      if (fg?.emitParticle && rings.length) {
+        rings.forEach((ring, i) => {
+          waveTimers.current.push(setTimeout(() => {
+            for (const link of ring) {
+              try { fg.emitParticle(link); } catch { /* link not hydrated yet — next wave catches it */ }
+            }
+          }, i * PULSE_STEP_MS));
+        });
+        // Wave is fully done once the last ring's photon finishes its hop.
+        waveDurationMs = (rings.length - 1) * PULSE_STEP_MS + photonTravelMs(PULSE_SPEED);
+      }
+
+      // Start the next wave only after this one has fully cleared the wire (+ a
+      // rest), but never tighter than the 5s cadence — so pulses never overlap.
+      const delay = Math.max(PULSE_WAVE_INTERVAL_MS, waveDurationMs + PULSE_GAP_MS);
+      nextWave = setTimeout(fireWave, delay);
+    };
+
+    const kickoff = setTimeout(fireWave, 800); // first wave shortly after the graph settles
+    return () => {
+      cancelled = true;
+      clearTimeout(kickoff);
+      if (nextWave) clearTimeout(nextWave);
+      waveTimers.current.forEach(clearTimeout);
+      waveTimers.current = [];
+    };
+  }, [active, hasGraph]);
 
   // Nodes that can't form semantic links yet because they have no embedding
   // (older snippets saved before Gemini was configured, or DeepDives saved
@@ -548,11 +626,11 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               nodeColor={nodeColor}
               linkColor={linkColor as any}
               linkWidth={(l) => Math.min(2.5, ((l as any).value ?? 1) * 0.4)}
-              linkDirectionalParticles={(l) => (linkIsFocused(l) ? 3 : (l as any).kind === 'origin' ? 2 : 1)}
-              linkDirectionalParticleSpeed={(l) =>
-                linkIsFocused(l) ? 0.034 : (l as any).kind === 'origin' ? 0.017 : 0.0085
-              }
-              linkDirectionalParticleWidth={(l) => (linkIsFocused(l) ? 3 : 2)}
+              // No continuous emission — dots exist only as the BFS pulse wave
+              // we emit() by hand, so the wires are still between pulses.
+              linkDirectionalParticles={0}
+              linkDirectionalParticleSpeed={PULSE_SPEED}
+              linkDirectionalParticleWidth={(l) => (linkIsFocused(l) ? 3.5 : 2.5)}
               linkDirectionalParticleColor={(l) => {
                 const k = (l as any).kind;
                 if (k === 'origin') return '#7c9cff';
@@ -821,11 +899,12 @@ function escapeHtml(s: string): string {
 // ── Physics controls ─────────────────────────────────────────────────────────
 
 interface PhysicsSettings {
-  linkDistance: number;   // d3 link force distance
-  linkStrength: number;   // d3 link force strength (higher = tighter clusters)
-  chargeStrength: number; // d3 charge force; negative = repulsion
-  simThreshold: number;   // min cosine similarity for a semantic link (lower = more links)
-  maxLinks: number;       // max semantic neighbors kept per node (top-K)
+  linkDistance: number;      // d3 link force distance
+  linkStrength: number;      // d3 link force strength (higher = tighter clusters)
+  chargeStrength: number;    // d3 charge force; negative = repulsion
+  simThreshold: number;      // min cosine similarity for a semantic link (lower = more links)
+  maxLinks: number;          // max semantic neighbors kept per node (top-K); also caps pulse layers
+  pulseHubThreshold: number; // min connections for a node to seed the pulse (Layer 1)
 }
 
 const DEFAULT_PHYSICS: PhysicsSettings = {
@@ -834,6 +913,7 @@ const DEFAULT_PHYSICS: PhysicsSettings = {
   chargeStrength: -100,
   simThreshold: DEFAULT_SIMILARITY_THRESHOLD,
   maxLinks: DEFAULT_SIMILAR_TOP_K,
+  pulseHubThreshold: DEFAULT_HUB_THRESHOLD,
 };
 
 function PhysicsPanel({
@@ -934,6 +1014,20 @@ function PhysicsPanel({
             {backfill ? `Connecting ${backfill.done}/${backfill.total}…` : `Connect ${unembedded} node${unembedded !== 1 ? 's' : ''}`}
           </button>
         )}
+      </div>
+
+      <div className="border-t border-zinc-800 pt-2.5 mt-1 space-y-2.5">
+        <div className="text-[9px] uppercase tracking-widest text-zinc-600 font-bold">Network pulse</div>
+        <SliderRow
+          label="Hub threshold"
+          hint="min connections for a node to start a pulse (Layer 1)"
+          value={physics.pulseHubThreshold}
+          min={1} max={12} step={1}
+          onChange={v => setPhysics(p => ({ ...p, pulseHubThreshold: Math.round(v) }))}
+        />
+        <div className="text-[9px] text-zinc-600 leading-snug">
+          A wave ripples outward from the busiest neurons every 5s, flowing through up to {physics.maxLinks} layer{physics.maxLinks !== 1 ? 's' : ''} (set by “Max links / node”).
+        </div>
       </div>
     </div>
   );

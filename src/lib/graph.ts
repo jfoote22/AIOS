@@ -78,11 +78,88 @@ export const DEFAULT_SIMILARITY_THRESHOLD = 0.55;
 export const DEFAULT_SIMILAR_TOP_K = 5;
 const SOFT_BAND = 0.08;
 
+// A node needs at least this many connections to count as a "hub" (Layer 1)
+// and seed the network-pulse wave. User-tunable via the graph settings slider.
+export const DEFAULT_HUB_THRESHOLD = 4;
+
 export interface GraphOptions {
   /** Minimum cosine similarity for a solid 'similar' link. */
   threshold?: number;
   /** Max semantic neighbors kept per node. */
   topK?: number;
+  /** Min connections for a node to be a hub (drives outward link orientation
+   *  and the pulse animation's Layer 1). */
+  hubThreshold?: number;
+}
+
+// ── Link/graph topology helpers (shared by orientation + pulse planning) ──────
+
+/** Normalize a link endpoint to its id string. react-force-graph hydrates
+ *  source/target from id strings into node objects after the first render, so
+ *  callers may hand us either form. */
+function endpointId(x: any): string {
+  return x && typeof x === 'object' ? x.id : x;
+}
+
+function degreeMap(links: { source: any; target: any }[]): Map<string, number> {
+  const d = new Map<string, number>();
+  for (const l of links) {
+    const s = endpointId(l.source), t = endpointId(l.target);
+    if (!s || !t) continue;
+    d.set(s, (d.get(s) ?? 0) + 1);
+    d.set(t, (d.get(t) ?? 0) + 1);
+  }
+  return d;
+}
+
+function adjacencyMap(links: { source: any; target: any }[]): Map<string, Set<string>> {
+  const m = new Map<string, Set<string>>();
+  const add = (a: string, b: string) => {
+    let set = m.get(a);
+    if (!set) { set = new Set(); m.set(a, set); }
+    set.add(b);
+  };
+  for (const l of links) {
+    const s = endpointId(l.source), t = endpointId(l.target);
+    if (!s || !t) continue;
+    add(s, t);
+    add(t, s);
+  }
+  return m;
+}
+
+/** Hubs = nodes whose connection count meets the threshold. If the threshold
+ *  is too high for this graph (no node qualifies), fall back to the single
+ *  most-connected node(s) so a pulse always has somewhere to start. */
+function pickHubs(degree: Map<string, number>, hubThreshold: number): Set<string> {
+  const hubs = new Set<string>();
+  for (const [id, deg] of degree) if (deg >= hubThreshold) hubs.add(id);
+  if (hubs.size === 0 && degree.size) {
+    let max = 0;
+    for (const deg of degree.values()) if (deg > max) max = deg;
+    if (max > 0) for (const [id, deg] of degree) if (deg === max) hubs.add(id);
+  }
+  return hubs;
+}
+
+/** Multi-source BFS: distance of every reachable node from the nearest hub
+ *  (hubs are distance 0). Unreachable nodes are absent from the map. */
+function bfsDistances(adj: Map<string, Set<string>>, hubs: Set<string>): Map<string, number> {
+  const dist = new Map<string, number>();
+  let frontier: string[] = [];
+  for (const h of hubs) { dist.set(h, 0); frontier.push(h); }
+  let d = 0;
+  while (frontier.length) {
+    const next: string[] = [];
+    for (const u of frontier) {
+      for (const v of adj.get(u) ?? []) {
+        if (!dist.has(v)) { dist.set(v, d + 1); next.push(v); }
+      }
+    }
+    frontier = next;
+    d++;
+  }
+  return dist;
 }
 
 export function buildGraph(
@@ -227,21 +304,89 @@ export function buildGraph(
     }
   }
 
-  // Orient each link so a directional pulse flows from the more-connected
-  // ("parent") node outward. adjacency/hierarchy treat links as undirected,
-  // so swapping source/target here is purely cosmetic (drives particle flow).
-  const degree = new Map<string, number>();
+  // Orient each link so a directional pulse flows outward from the hub
+  // neurons. We BFS-rank every node by its distance from the nearest hub
+  // (hubs = the most-connected nodes) and make the hub-closer endpoint the
+  // `source`; particles then visibly flow hub → outer rings. This is purely
+  // cosmetic (adjacency/hierarchy treat links as undirected) and is exactly
+  // the orientation the network-pulse animation rides on, so both the
+  // always-on flows and the BFS wave travel the same direction.
+  const degree = degreeMap(links);
+  const hubThreshold = opts.hubThreshold ?? DEFAULT_HUB_THRESHOLD;
+  const hubs = pickHubs(degree, hubThreshold);
+  const dist = bfsDistances(adjacencyMap(links), hubs);
+  const distOf = (id: string) => dist.get(id) ?? Infinity;
   for (const l of links) {
-    degree.set(l.source, (degree.get(l.source) ?? 0) + 1);
-    degree.set(l.target, (degree.get(l.target) ?? 0) + 1);
-  }
-  for (const l of links) {
-    if ((degree.get(l.target) ?? 0) > (degree.get(l.source) ?? 0)) {
-      const tmp = l.source; l.source = l.target; l.target = tmp;
-    }
+    const s = l.source as string, t = l.target as string;
+    const sd = distOf(s), td = distOf(t);
+    // Hub-closer endpoint first; break ties by higher degree.
+    const swap = td < sd || (td === sd && (degree.get(t) ?? 0) > (degree.get(s) ?? 0));
+    if (swap) { l.source = t; l.target = s; }
   }
 
   return { nodes, links };
+}
+
+export interface PulseLayers {
+  /** Hub node ids the wave starts from (Layer 1). */
+  hubs: string[];
+  /** rings[d] = the link objects to emit particles on for hop d+1
+   *  (rings[0] = hub→ring 2, rings[1] = ring 2→ring 3, …). These are the SAME
+   *  link references held in the graph, so they pass straight to
+   *  react-force-graph's emitParticle(). */
+  rings: BrainLink[][];
+}
+
+/** Plan a breadth-first "pulse" wave outward from the hub neurons. Layer 1 =
+ *  hubs (nodes with ≥ hubThreshold connections); the wave steps outward one
+ *  ring per hop and stops after `maxLayers` total layers. Each ring lists the
+ *  links connecting the previous ring to the newly-reached nodes, oriented (by
+ *  buildGraph) so emitting a particle flows outward. */
+export function computePulseLayers(
+  graph: BrainGraph,
+  opts: { hubThreshold?: number; maxLayers?: number } = {},
+): PulseLayers {
+  const hubThreshold = opts.hubThreshold ?? DEFAULT_HUB_THRESHOLD;
+  const maxLayers = Math.max(2, opts.maxLayers ?? DEFAULT_SIMILAR_TOP_K);
+  const links = graph.links;
+  if (!links.length) return { hubs: [], rings: [] };
+
+  const degree = degreeMap(links);
+  const hubs = pickHubs(degree, hubThreshold);
+  if (hubs.size === 0) return { hubs: [], rings: [] };
+
+  // Recover the actual link object (with its baked-in orientation) for any
+  // unordered endpoint pair discovered during the BFS.
+  const linkByPair = new Map<string, BrainLink>();
+  for (const l of links) {
+    const s = endpointId((l as any).source), t = endpointId((l as any).target);
+    if (!s || !t) continue;
+    const key = s < t ? `${s}|${t}` : `${t}|${s}`;
+    if (!linkByPair.has(key)) linkByPair.set(key, l);
+  }
+  const adj = adjacencyMap(links);
+
+  const visited = new Set<string>(hubs);
+  let frontier = Array.from(hubs);
+  const rings: BrainLink[][] = [];
+  const maxHops = maxLayers - 1; // Layer 1 is the hubs; the rest are hops out.
+  for (let hop = 0; hop < maxHops && frontier.length; hop++) {
+    const next: string[] = [];
+    const ring: BrainLink[] = [];
+    for (const u of frontier) {
+      for (const v of adj.get(u) ?? []) {
+        if (visited.has(v)) continue;
+        visited.add(v);
+        next.push(v);
+        const key = u < v ? `${u}|${v}` : `${v}|${u}`;
+        const link = linkByPair.get(key);
+        if (link) ring.push(link);
+      }
+    }
+    if (ring.length) rings.push(ring);
+    frontier = next;
+  }
+  return { hubs: Array.from(hubs), rings };
 }
 
 /** Build the text used to embed a DeepDive session (title + description +
