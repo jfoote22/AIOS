@@ -6,7 +6,7 @@ import {
 } from '@dnd-kit/core';
 import { SortableContext, useSortable, rectSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { analyzeText, embedText, buildEmbedSource } from '../lib/ai';
+import { analyzeText, analyzeSnipScaled, embedText, buildEmbedSource } from '../lib/ai';
 
 // ── Shared snippet data model ────────────────────────────────────────────────
 // Lives here (not in a tab) so both SnippingTab and SecondBrainTab consume the
@@ -222,9 +222,61 @@ export default function SnippetEditor({
   const removeAddedShot = (shotId: string) =>
     patch({ addedShots: (itemRef.current.addedShots ?? []).filter(s => s.id !== shotId) }, { reembed: true });
 
-  const requestAddShot = () => {
-    if (!isElectron) { alert('Adding extra screenshots is only available in the desktop app.'); return; }
-    window.aios?.requestCaptureForItem(item.id);
+  // OCR a shot's image and fold the result into THIS snippet — all locally, in
+  // the same component the user is looking at. Sets the shot to analyzing →
+  // ready (with its own extracted text) or error, and merges new tags/entities.
+  // Used by both "Add Shot" (fresh capture) and "Retry" (existing image).
+  const runShotOcr = async (shotId: string, image: string) => {
+    if (!aiReady) return;
+    patch({ addedShots: (itemRef.current.addedShots ?? []).map(s => (s.id === shotId ? { ...s, status: 'analyzing', error: undefined } : s)) });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const analysis = await Promise.race([
+        analyzeSnipScaled(image),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('OCR timed out after 60s')), 60000); }),
+      ]);
+      const cur = itemRef.current;
+      const shots = cur.addedShots ?? [];
+      // Never drop the shot: if a concurrent change removed it from the array, re-add it.
+      const nextShots = shots.some(s => s.id === shotId)
+        ? shots.map(s => (s.id === shotId ? { ...s, extractedText: analysis.extractedText, status: 'ready' as const, error: undefined } : s))
+        : [...shots, { id: shotId, image, extractedText: analysis.extractedText, status: 'ready' as const }];
+      const mergedTags = Array.from(new Set([...(cur.tags ?? []), ...analysis.tags.map(t => t.toLowerCase())]));
+      const mergedEntities = [...(cur.entities ?? []), ...analysis.entities];
+      patch({ addedShots: nextShots, tags: mergedTags, entities: mergedEntities }, { reembed: true });
+    } catch (err) {
+      patch({ addedShots: (itemRef.current.addedShots ?? []).map(s => (s.id === shotId ? { ...s, status: 'error' as const, error: String((err as any)?.message ?? err) } : s)) });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  // Re-run OCR on a shot stuck on "analyzing" or one that errored.
+  const retryShot = (shotId: string) => {
+    const shot = (itemRef.current.addedShots ?? []).find(s => s.id === shotId);
+    if (shot) runShotOcr(shotId, shot.image);
+  };
+
+  // Add Shot: capture a region INLINE (promise-based — the image comes straight
+  // back to us, no hidden-tab relay), attach it to this snippet, then OCR it
+  // locally. Everything happens in this component, so the new image + its text
+  // section appear immediately with no cross-tab round trip.
+  const requestAddShot = async () => {
+    if (!isElectron || !window.aios?.captureRegion) {
+      alert('Adding extra screenshots is only available in the desktop app.');
+      return;
+    }
+    let res: { dataUrl: string } | null = null;
+    try { res = await window.aios.captureRegion(); }
+    catch (e) { console.error('[AddShot] capture failed:', e); }
+    if (!res?.dataUrl) return; // cancelled
+    const shotId = Math.random().toString(36).slice(2, 11);
+    const placeholder: AddedShot = {
+      id: shotId, image: res.dataUrl, extractedText: '',
+      status: aiReady ? 'analyzing' : 'ready',
+    };
+    patch({ addedShots: [...(itemRef.current.addedShots ?? []), placeholder] });
+    if (aiReady) await runShotOcr(shotId, res.dataUrl);
   };
 
   const removeChunk = (chunkId: string) =>
@@ -362,9 +414,14 @@ export default function SnippetEditor({
                     {shot.status === 'analyzing' && <span className="ml-2 text-amber-400 animate-pulse normal-case">analyzing…</span>}
                     {shot.status === 'error' && <span className="ml-2 text-red-400 normal-case">OCR failed</span>}
                   </p>
-                  {shot.extractedText && (
-                    <button onClick={() => copyToClipboard(shot.extractedText)} className="text-[10px] text-indigo-400 hover:text-indigo-300 uppercase tracking-widest">Copy</button>
-                  )}
+                  <div className="flex items-center gap-2 shrink-0">
+                    {aiReady && (shot.status === 'error' || shot.status === 'analyzing') && (
+                      <button onClick={() => retryShot(shot.id)} className="text-[10px] text-amber-400 hover:text-amber-300 uppercase tracking-widest" title="Re-run OCR on this shot">Retry</button>
+                    )}
+                    {shot.extractedText && (
+                      <button onClick={() => copyToClipboard(shot.extractedText)} className="text-[10px] text-indigo-400 hover:text-indigo-300 uppercase tracking-widest">Copy</button>
+                    )}
+                  </div>
                 </div>
                 <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl max-h-64 overflow-y-auto">
                   <pre className="text-xs text-zinc-300 whitespace-pre-wrap font-mono select-text">{shot.extractedText || (shot.status === 'analyzing' ? 'Reading text from this shot…' : 'No text found in this shot.')}</pre>

@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('aios', {
     ipcRenderer.on('snip-image', listener);
     return () => ipcRenderer.removeListener('snip-image', listener);
   },
+  captureRegion: () => ipcRenderer.invoke('capture:region'),
   // App info
   getVersion: () => ipcRenderer.invoke('app:get-version'),
   getApiPort: () => ipcRenderer.invoke('app:get-api-port'),

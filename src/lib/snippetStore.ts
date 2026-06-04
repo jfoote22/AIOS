@@ -6,7 +6,13 @@
 // The optional `newId` detail carries the id of a freshly captured snippet so a
 // listener (Second Brain) can auto-focus it once the graph rebuilds.
 
-export interface SnippetsChangeDetail { newId?: string }
+export interface SnippetsChangeDetail {
+  /** Id of a freshly captured snippet, so a listener can auto-focus it. */
+  newId?: string;
+  /** Which tab emitted this, so a tab can ignore its own writes (avoids a
+   *  self-triggered vault reload racing an in-flight operation). */
+  source?: 'snipping' | 'secondbrain';
+}
 type Listener = (detail?: SnippetsChangeDetail) => void;
 const snippetListeners = new Set<Listener>();
 

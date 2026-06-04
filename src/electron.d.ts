@@ -7,6 +7,10 @@ declare global {
       requestCapture: () => void;
       requestCaptureForItem: (itemId: string) => void;
       onSnipImage: (cb: (payload: { dataUrl: string; targetId: string | null }) => void) => () => void;
+      /** Promise-based region capture: triggers the overlay and resolves with the
+       *  cropped image (or null if cancelled). Lets the caller handle the result
+       *  inline instead of via the global onSnipImage broadcast. */
+      captureRegion: () => Promise<{ dataUrl: string } | null>;
       getVersion: () => Promise<string>;
       getApiPort: () => Promise<number>;
       pickFolder: (opts?: { title?: string; defaultPath?: string }) => Promise<string | null>;

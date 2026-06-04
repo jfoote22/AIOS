@@ -8,6 +8,17 @@ const terminal = require('./terminal.cjs');
 const reportExport = require('./report-export.cjs');
 const sqliteStore = require('./sqlite-store.cjs');
 
+// Keep the renderer fully alive when the main window is minimized during a
+// capture. "Add Shot" minimizes the window (so AIOS stays out of the shot),
+// which otherwise lets Chromium freeze/deprioritize the occluded renderer and
+// suspend the in-flight OCR until the window is shown again — the exact cause
+// of shots stuck on "Analyzing…" that only complete when the next capture
+// restores the window. These switches (set before app ready) prevent that;
+// backgroundThrottling:false alone only covers timer throttling, not freezing.
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+
 // --- Legacy single-key compatibility (Gemini) ---
 function migrateLegacyKey() {
   try {
@@ -30,6 +41,7 @@ let mainWindow = null;
 let overlayWindow = null;
 let tray = null;
 let pendingCaptureTargetId = null;
+let pendingRegionResolve = null; // resolver for a promise-based capture:region
 let apiPort = 0;
 
 // Application menu. Even with the bar hidden, this is what supplies the
@@ -99,6 +111,10 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // Add Shot minimizes/restores this window during capture; without this,
+      // Chromium throttles background timers + promise microtasks, so an
+      // in-flight OCR (and its timeout) can stall and never settle.
+      backgroundThrottling: false,
       additionalArguments: [`--api-port=${apiPort}`],
     },
   });
@@ -179,7 +195,12 @@ function triggerCapture() {
   overlayWindow.overlayDisplayId = display.id;
   overlayWindow.overlayDisplaySize = { width: display.size.width, height: display.size.height, scaleFactor: display.scaleFactor };
 
-  overlayWindow.on('closed', () => { overlayWindow = null; });
+  overlayWindow.on('closed', () => {
+    overlayWindow = null;
+    // Safety: if the overlay vanished without submit/cancel, don't leave a
+    // capture:region promise hanging forever.
+    if (pendingRegionResolve) { const resolve = pendingRegionResolve; pendingRegionResolve = null; resolve(null); }
+  });
   overlayWindow.loadFile(path.join(__dirname, 'overlay.html'));
   overlayWindow.once('ready-to-show', () => { overlayWindow.show(); overlayWindow.focus(); });
 }
@@ -205,13 +226,36 @@ ipcMain.on('overlay:submit', (event, dataUrl) => {
   destroyOverlay();
   const targetId = pendingCaptureTargetId;
   pendingCaptureTargetId = null;
+  if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+  // Promise-based capture (editor "Add Shot") takes precedence: hand the image
+  // straight back to the caller instead of broadcasting it to onSnipImage.
+  if (pendingRegionResolve) {
+    const resolve = pendingRegionResolve;
+    pendingRegionResolve = null;
+    resolve({ dataUrl });
+    return;
+  }
   if (!mainWindow) return;
-  mainWindow.show();
-  mainWindow.focus();
   mainWindow.webContents.send('snip-image', { dataUrl, targetId });
 });
 
-ipcMain.on('overlay:cancel', () => { pendingCaptureTargetId = null; destroyOverlay(); });
+ipcMain.on('overlay:cancel', () => {
+  pendingCaptureTargetId = null;
+  if (pendingRegionResolve) { const resolve = pendingRegionResolve; pendingRegionResolve = null; resolve(null); }
+  destroyOverlay();
+});
+
+// Promise-based region capture. Resolves with the cropped image (or null on
+// cancel) so the caller can handle it inline — no global broadcast / no
+// dependency on a hidden tab to relay the result.
+ipcMain.handle('capture:region', () => new Promise((resolve) => {
+  // If a prior region capture is somehow still pending, cancel it cleanly.
+  if (pendingRegionResolve) { const prev = pendingRegionResolve; pendingRegionResolve = null; prev(null); }
+  pendingRegionResolve = resolve;
+  pendingCaptureTargetId = null;
+  if (mainWindow) mainWindow.minimize();
+  setTimeout(triggerCapture, 150);
+}));
 
 ipcMain.on('capture:request', () => {
   pendingCaptureTargetId = null;

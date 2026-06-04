@@ -7,18 +7,19 @@ import {
 } from 'lucide-react';
 import * as db from '../lib/db';
 import {
-  analyzeSnip, analyzeText, isGeminiReady, onGeminiReadyChange,
+  analyzeText, analyzeSnipScaled, isGeminiReady, onGeminiReadyChange,
   embedText, cosineSimilarity, buildEmbedSource, chatWithVault,
   type ChatTurn, type VaultContextItem,
 } from '../lib/ai';
 import SnippetEditor, {
   SortableTags, SortableEntities,
-  type CapturedItem, type Entity, type ExtractedChunk, type AddedShot,
+  type CapturedItem, type Entity, type ExtractedChunk,
 } from '../components/SnippetEditor';
 import { emitSnippetsChange, onSnippetsChange } from '../lib/snippetStore';
 
 interface Region { startX: number; startY: number; width: number; height: number; }
 export type { CapturedItem };
+
 
 export default function SnippingTab() {
   const [view, setView] = useState<'vault' | 'chat'>('vault');
@@ -36,9 +37,6 @@ export default function SnippingTab() {
   const [selection, setSelection] = useState<Region | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
   const [vault, setVault] = useState<CapturedItem[]>([]);
-  // Always-fresh view of the vault for async callbacks (e.g. add-shot OCR).
-  const vaultRef = useRef<CapturedItem[]>([]);
-  vaultRef.current = vault;
   const [showFlash, setShowFlash] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -48,6 +46,10 @@ export default function SnippingTab() {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const isElectron = !!window.aios?.isElectron;
+  // Tag our own emits so this tab can ignore them in its reload listener below
+  // (a self-triggered getAllSnippets reload would race in-flight Add-Shot work).
+  const emitOwnChange = (newId?: string) =>
+    emitSnippetsChange(newId ? { source: 'snipping', newId } : { source: 'snipping' });
   const handleSnipImageRef = useRef<(p: { dataUrl: string; targetId: string | null }) => void>(() => {});
 
   useEffect(() => {
@@ -58,10 +60,9 @@ export default function SnippingTab() {
   useEffect(() => { setAiReady(isGeminiReady()); const unsub = onGeminiReadyChange(setAiReady); return unsub; }, []);
 
   useEffect(() => {
-    handleSnipImageRef.current = ({ dataUrl, targetId }) => {
-      if (targetId) appendImageToItem(targetId, dataUrl);
-      else processSnip(dataUrl);
-    };
+    // Global hotkey / Quick Snip always creates a NEW snippet. "Add Shot" no
+    // longer routes through here — the editor captures inline via captureRegion.
+    handleSnipImageRef.current = ({ dataUrl }) => { processSnip(dataUrl); };
   });
 
   useEffect(() => {
@@ -90,8 +91,11 @@ export default function SnippingTab() {
   }, []);
 
   // Reload the vault when snippets change elsewhere (e.g. edited or deleted from
-  // the Second Brain tab). Idempotent — just refreshes from SQLite.
-  useEffect(() => onSnippetsChange(() => {
+  // the Second Brain tab). Ignore our OWN emits — this tab already keeps `vault`
+  // current via its own setVault calls, and a self-triggered full reload here
+  // races/clobbers in-flight work like an Add-Shot OCR.
+  useEffect(() => onSnippetsChange((detail) => {
+    if (detail?.source === 'snipping') return;
     db.getAllSnippets<CapturedItem>()
       .then(items => setVault(items.map(i => ({
         ...i,
@@ -134,7 +138,7 @@ export default function SnippingTab() {
     e.stopPropagation();
     setVault(prev => prev.filter(i => i.id !== id));
     if (selectedItem?.id === id) setSelectedItem(null);
-    db.removeSnippet(id).then(() => emitSnippetsChange()).catch(err => console.error('Failed to delete:', err));
+    db.removeSnippet(id).then(() => emitOwnChange()).catch(err => console.error('Failed to delete:', err));
   };
 
   const captureRegion = () => {
@@ -173,13 +177,13 @@ export default function SnippingTab() {
       error: aiReady ? undefined : 'Gemini key not set',
     };
     setVault(prev => [placeholder, ...prev]);
-    db.putSnippet(placeholder).then(() => emitSnippetsChange()).catch(err => console.error('Failed to persist snip:', err));
+    db.putSnippet(placeholder).then(() => emitOwnChange()).catch(err => console.error('Failed to persist snip:', err));
     setShowFlash(true);
     setTimeout(() => setShowFlash(false), 800);
 
     if (!aiReady) return;
 
-    analyzeSnip(dataUrl)
+    analyzeSnipScaled(dataUrl)
       .then(analysis => {
         const updated: CapturedItem = {
           ...placeholder,
@@ -190,13 +194,13 @@ export default function SnippingTab() {
         setVault(prev => prev.map(i => (i.id === id ? updated : i)));
         // Emit with the new id so Second Brain can auto-focus this freshly
         // analyzed neuron and open its editor.
-        db.putSnippet(updated).then(() => emitSnippetsChange({ newId: id })).catch(err => console.error('Failed to persist analyzed snip:', err));
+        db.putSnippet(updated).then(() => emitOwnChange(id)).catch(err => console.error('Failed to persist analyzed snip:', err));
 
         embedText(buildEmbedSource(updated))
           .then(embedding => {
             const withEmbed = { ...updated, embedding };
             setVault(prev => prev.map(i => (i.id === id ? withEmbed : i)));
-            db.putSnippet(withEmbed).then(() => emitSnippetsChange()).catch(e => console.error('Failed to persist embedding:', e));
+            db.putSnippet(withEmbed).then(() => emitOwnChange()).catch(e => console.error('Failed to persist embedding:', e));
           })
           .catch(e => console.error('Embedding failed:', e));
       })
@@ -208,7 +212,7 @@ export default function SnippingTab() {
           category: 'Unprocessed', status: 'error', error: err?.message ?? String(err),
         };
         setVault(prev => prev.map(i => (i.id === id ? failed : i)));
-        db.putSnippet(failed).then(() => emitSnippetsChange()).catch(e => console.error('Failed to persist error state:', e));
+        db.putSnippet(failed).then(() => emitOwnChange()).catch(e => console.error('Failed to persist error state:', e));
       });
   };
 
@@ -221,7 +225,7 @@ export default function SnippingTab() {
     }));
     setSelectedItem(prev => (prev && prev.id === id ? { ...prev, ...patch } : prev));
     if (!updatedItem) return;
-    db.putSnippet(updatedItem).then(() => emitSnippetsChange()).catch(err => console.error('Failed to persist edit:', err));
+    db.putSnippet(updatedItem).then(() => emitOwnChange()).catch(err => console.error('Failed to persist edit:', err));
     if (options.reembed && aiReady) {
       const target = updatedItem as CapturedItem;
       embedText(buildEmbedSource(target))
@@ -229,7 +233,7 @@ export default function SnippingTab() {
           const withEmbed = { ...target, embedding };
           setVault(prev => prev.map(i => (i.id === id ? withEmbed : i)));
           setSelectedItem(prev => (prev && prev.id === id ? withEmbed : prev));
-          db.putSnippet(withEmbed).then(() => emitSnippetsChange()).catch(e => console.error('Failed to persist re-embed:', e));
+          db.putSnippet(withEmbed).then(() => emitOwnChange()).catch(e => console.error('Failed to persist re-embed:', e));
         })
         .catch(e => console.error('Re-embed failed:', e));
     }
@@ -269,43 +273,9 @@ export default function SnippingTab() {
     updateItem(id, { entities: [...item.entities, blank] });
   };
 
-  // Add Shot: attach the captured image to the existing snippet as its own
-  // "added shot" (shown stacked under the main image), then OCR/analyze it.
-  // The shot keeps its own extracted text (rendered as a separate section),
-  // while its tags + entities are merged up into the neuron. Title/summary/
-  // category/source are left alone so the neuron keeps its identity.
-  // Re-embeds so the new text is searchable. Does NOT create a new neuron.
-  const appendImageToItem = async (id: string, dataUrl: string) => {
-    const base = vaultRef.current.find(i => i.id === id);
-    if (!base) return;
-    const shotId = Math.random().toString(36).slice(2, 11);
-    const placeholder: AddedShot = {
-      id: shotId, image: dataUrl, extractedText: '',
-      status: aiReady ? 'analyzing' : 'ready',
-    };
-    updateItem(id, { addedShots: [...(base.addedShots ?? []), placeholder] });
-    if (!aiReady) return;
-
-    try {
-      const analysis = await analyzeSnip(dataUrl);
-      const cur = vaultRef.current.find(i => i.id === id);
-      if (!cur) return;
-      const ready: AddedShot = { ...placeholder, extractedText: analysis.extractedText, status: 'ready' };
-      const nextShots = (cur.addedShots ?? []).map(s => (s.id === shotId ? ready : s));
-      const mergedTags = Array.from(new Set([...(cur.tags ?? []), ...analysis.tags.map(t => t.toLowerCase())]));
-      const mergedEntities = [...(cur.entities ?? []), ...analysis.entities];
-      updateItem(id, {
-        addedShots: nextShots,
-        tags: mergedTags,
-        entities: mergedEntities,
-      }, { reembed: true });
-    } catch (err) {
-      console.error('Add-shot OCR failed:', err);
-      const cur = vaultRef.current.find(i => i.id === id);
-      const nextShots = (cur?.addedShots ?? []).map(s => (s.id === shotId ? { ...s, status: 'error' as const, error: String((err as any)?.message ?? err) } : s));
-      updateItem(id, { addedShots: nextShots });
-    }
-  };
+  // NOTE: "Add Shot" is handled entirely inside <SnippetEditor> now (it captures
+  // inline via window.aios.captureRegion and OCRs locally), so there's no longer
+  // a cross-tab appendImageToItem here.
 
   const removeSubImage = (id: string, index: number) => {
     const item = vault.find(i => i.id === id);
@@ -526,13 +496,13 @@ export default function SnippingTab() {
                   onChange={(next) => {
                     setVault(prev => prev.map(i => (i.id === next.id ? next : i)));
                     setSelectedItem(next);
-                    db.putSnippet(next).then(() => emitSnippetsChange()).catch(err => console.error('Failed to persist edit:', err));
+                    db.putSnippet(next).then(() => emitOwnChange()).catch(err => console.error('Failed to persist edit:', err));
                   }}
                   onDelete={() => {
                     const id = selectedItem.id;
                     setVault(prev => prev.filter(i => i.id !== id));
                     setSelectedItem(null);
-                    db.removeSnippet(id).then(() => emitSnippetsChange()).catch(err => console.error('Failed to delete:', err));
+                    db.removeSnippet(id).then(() => emitOwnChange()).catch(err => console.error('Failed to delete:', err));
                   }}
                 />
               </div>

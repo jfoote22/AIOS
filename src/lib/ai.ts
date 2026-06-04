@@ -109,6 +109,38 @@ export async function analyzeSnip(imageDataUrl: string): Promise<SnipAnalysis> {
   return parsed;
 }
 
+/** Downscale a capture before OCR so a large (multi-monitor) screenshot doesn't
+ *  bloat the request and stall the model. The full-res image is still kept for
+ *  display — only the OCR input shrinks. Resolves to the ORIGINAL on any failure
+ *  so OCR is never blocked. */
+export function downscaleDataUrl(dataUrl: string, maxDim = 1600): Promise<string> {
+  return new Promise((resolve) => {
+    try {
+      if (typeof document === 'undefined' || typeof Image === 'undefined') { resolve(dataUrl); return; }
+      const img = new Image();
+      img.onload = () => {
+        const longest = Math.max(img.width, img.height);
+        if (!longest || longest <= maxDim) { resolve(dataUrl); return; }
+        const scale = maxDim / longest;
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { resolve(dataUrl); return; }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        try { resolve(canvas.toDataURL('image/png')); } catch { resolve(dataUrl); }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    } catch { resolve(dataUrl); }
+  });
+}
+
+/** OCR a capture after downscaling. Preferred entry point for raw captures. */
+export async function analyzeSnipScaled(dataUrl: string): Promise<SnipAnalysis> {
+  return analyzeSnip(await downscaleDataUrl(dataUrl));
+}
+
 // Dispatches snippet analysis to the chosen vision provider.
 // - 'gemini' uses the direct GoogleGenAI SDK from the renderer.
 // - 'openai' goes through the local Electron API server (which holds the encrypted key
