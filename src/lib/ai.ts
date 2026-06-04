@@ -254,10 +254,13 @@ export async function* chatWithVault(history: ChatTurn[], question: string, cont
   }
 }
 
-export function buildEmbedSource(s: { title: string; summary: string; tags: string[]; extractedText: string; category: string; source: string; chunks?: { text: string; label: string; summary: string }[] }): string {
+export function buildEmbedSource(s: { title: string; summary: string; tags: string[]; extractedText: string; category: string; source: string; chunks?: { text: string; label: string; summary: string }[]; addedShots?: { extractedText: string }[] }): string {
   const parts = [s.title, s.summary, s.category, s.source, s.tags.join(' '), s.extractedText];
   if (s.chunks?.length) {
     for (const c of s.chunks) parts.push(c.label, c.summary, c.text);
+  }
+  if (s.addedShots?.length) {
+    for (const a of s.addedShots) parts.push(a.extractedText);
   }
   return parts.filter(Boolean).join('\n');
 }

@@ -13,7 +13,7 @@ import {
 } from '../lib/ai';
 import SnippetEditor, {
   SortableTags, SortableEntities,
-  type CapturedItem, type Entity, type ExtractedChunk,
+  type CapturedItem, type Entity, type ExtractedChunk, type AddedShot,
 } from '../components/SnippetEditor';
 import { emitSnippetsChange, onSnippetsChange } from '../lib/snippetStore';
 
@@ -269,38 +269,41 @@ export default function SnippingTab() {
     updateItem(id, { entities: [...item.entities, blank] });
   };
 
-  // Add Shot: attach the captured image to the existing snippet immediately,
-  // then OCR/analyze it and merge the new shot's extracted text, tags, and
-  // entities into the same neuron (title/summary/category/source are left
-  // alone so the neuron keeps its identity). Re-embeds so the added text is
-  // searchable. Does NOT create a new neuron.
+  // Add Shot: attach the captured image to the existing snippet as its own
+  // "added shot" (shown stacked under the main image), then OCR/analyze it.
+  // The shot keeps its own extracted text (rendered as a separate section),
+  // while its tags + entities are merged up into the neuron. Title/summary/
+  // category/source are left alone so the neuron keeps its identity.
+  // Re-embeds so the new text is searchable. Does NOT create a new neuron.
   const appendImageToItem = async (id: string, dataUrl: string) => {
     const base = vaultRef.current.find(i => i.id === id);
     if (!base) return;
-    updateItem(id, {
-      subImages: [...base.subImages, dataUrl],
-      status: aiReady ? 'analyzing' : base.status,
-    });
+    const shotId = Math.random().toString(36).slice(2, 11);
+    const placeholder: AddedShot = {
+      id: shotId, image: dataUrl, extractedText: '',
+      status: aiReady ? 'analyzing' : 'ready',
+    };
+    updateItem(id, { addedShots: [...(base.addedShots ?? []), placeholder] });
     if (!aiReady) return;
 
     try {
       const analysis = await analyzeSnip(dataUrl);
       const cur = vaultRef.current.find(i => i.id === id);
       if (!cur) return;
+      const ready: AddedShot = { ...placeholder, extractedText: analysis.extractedText, status: 'ready' };
+      const nextShots = (cur.addedShots ?? []).map(s => (s.id === shotId ? ready : s));
       const mergedTags = Array.from(new Set([...(cur.tags ?? []), ...analysis.tags.map(t => t.toLowerCase())]));
       const mergedEntities = [...(cur.entities ?? []), ...analysis.entities];
-      const mergedText = [cur.extractedText, analysis.extractedText]
-        .filter(t => t && t.trim())
-        .join('\n\n──── added shot ────\n\n');
       updateItem(id, {
-        extractedText: mergedText,
+        addedShots: nextShots,
         tags: mergedTags,
         entities: mergedEntities,
-        status: 'ready',
       }, { reembed: true });
     } catch (err) {
       console.error('Add-shot OCR failed:', err);
-      updateItem(id, { status: 'ready' });
+      const cur = vaultRef.current.find(i => i.id === id);
+      const nextShots = (cur?.addedShots ?? []).map(s => (s.id === shotId ? { ...s, status: 'error' as const, error: String((err as any)?.message ?? err) } : s));
+      updateItem(id, { addedShots: nextShots });
     }
   };
 
