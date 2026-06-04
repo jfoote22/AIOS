@@ -16,6 +16,7 @@ import { listImports, listAllChunks, onImportsChange, deleteImport, type Importe
 import { setSeed as setDeepDiveSeed } from '../lib/deepdiveSeed';
 import { onDeepDivesChange } from '../lib/deepdiveStore';
 import { onSnippetsChange, emitSnippetsChange } from '../lib/snippetStore';
+import { enrichPendingMemory } from '../lib/memory';
 import { navigateTo } from '../lib/navigate';
 import SnippetEditor, { type CapturedItem } from '../components/SnippetEditor';
 
@@ -157,6 +158,18 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     if (detail?.newId) pendingFocusRef.current = `snip:${detail.newId}`;
     scheduleReload();
   }), [scheduleReload]);
+
+  // Finish enriching externally-ingested notes (Hermes markdown delivered over
+  // the LAN webhook). The main process stores them raw + pending; here we
+  // categorize, chunk, and embed. Runs once on mount (catches anything that
+  // arrived while the app was closed), again on each live delivery, and again
+  // whenever a Gemini key becomes available (pending notes can't embed without it).
+  useEffect(() => { enrichPendingMemory(); }, []);
+  useEffect(() => {
+    const off = window.aios?.memory?.onIngested?.(() => { enrichPendingMemory(); });
+    return off;
+  }, []);
+  useEffect(() => onGeminiReadyChange((ready) => { if (ready) enrichPendingMemory(); }), []);
 
   useEffect(() => {
     if (active && dirtyRef.current) {

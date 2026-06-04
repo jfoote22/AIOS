@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent template: runs the transcript uploader every 5 minutes on the Mac.
+
+  Install on the MacBook Pro:
+    1. Edit the three EnvironmentVariables below (URL + token from AIOS, and the
+       absolute path to upload_transcripts.py).
+    2. cp this file to  ~/Library/LaunchAgents/com.aios.transcript-uploader.plist
+    3. launchctl load ~/Library/LaunchAgents/com.aios.transcript-uploader.plist
+
+  Manage:
+    launchctl unload ~/Library/LaunchAgents/com.aios.transcript-uploader.plist
+    launchctl start  com.aios.transcript-uploader      # run once now
+    tail -f /tmp/aios-transcript-uploader.log
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aios.transcript-uploader</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/justinfoote/tools/transcript-uploader/upload_transcripts.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AIOS_INGEST_URL</key>
+        <string>http://REPLACE_WITH_WINDOWS_LAN_IP:8765/api/memory/ingest</string>
+        <key>AIOS_INGEST_TOKEN</key>
+        <string>REPLACE_WITH_TOKEN_FROM_AIOS</string>
+        <key>AIOS_TRANSCRIPTS_DIR</key>
+        <string>/Users/justinfoote/Documents/Obsidian Vault/Video Transcripts/</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/aios-transcript-uploader.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/aios-transcript-uploader.log</string>
+</dict>
+</plist>

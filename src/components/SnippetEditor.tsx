@@ -35,6 +35,17 @@ export interface CapturedItem {
   embedding?: number[]; chunks?: ExtractedChunk[]; addedShots?: AddedShot[];
   /** Optional cross-link back to a DeepDive thread when the snippet was saved from there. */
   originThreadId?: string;
+  /** Set by the LAN memory-ingest webhook; cleared once the renderer enriches it. */
+  memoryPending?: boolean;
+  /** Origin of an externally ingested note (e.g. 'hermes'). */
+  memorySource?: string;
+  /** Name of the Hermes job that produced this note, if provided. */
+  memoryJobName?: string;
+  /** When a long ingested doc is split, links sibling chunks back to one source. */
+  memoryDocId?: string;
+  /** 1-based part index / total parts for a chunked ingested doc. */
+  memoryPart?: number;
+  memoryParts?: number;
 }
 
 // Shared pointer sensor: a small drag threshold so clicks on the remove/copy

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, KeyRound, Loader2, Save, Server, XCircle } from 'lucide-react';
+import { CheckCircle2, Copy, Inbox, KeyRound, Loader2, RefreshCw, Save, Server, XCircle } from 'lucide-react';
 import { apiUrl, initApiBase } from '../lib/apiBase';
+import type { MemoryIngestStatus } from '../electron';
 
 interface HermesConfig {
   baseUrl: string;
@@ -18,6 +19,12 @@ export default function HermesSettingsTab() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
+  // Memory ingest (LAN webhook) state.
+  const [mem, setMem] = useState<MemoryIngestStatus | null>(null);
+  const [memPort, setMemPort] = useState(8765);
+  const [memSaving, setMemSaving] = useState(false);
+  const [copied, setCopied] = useState<'url' | 'token' | 'curl' | null>(null);
+
   useEffect(() => {
     (async () => {
       try {
@@ -31,8 +38,50 @@ export default function HermesSettingsTab() {
       } catch (e) {
         console.error('Failed to load Hermes config:', e);
       }
+      try {
+        const cfg = await window.aios?.memory?.getConfig();
+        if (cfg) { setMem(cfg); setMemPort(cfg.port); }
+      } catch (e) {
+        console.error('Failed to load memory ingest config:', e);
+      }
     })();
   }, []);
+
+  const applyMem = async (next: { enabled?: boolean; port?: number }) => {
+    setMemSaving(true);
+    try {
+      const cfg = await window.aios?.memory?.setConfig(next);
+      if (cfg) { setMem(cfg); setMemPort(cfg.port); }
+    } catch (e) {
+      console.error('Failed to update memory ingest config:', e);
+    } finally {
+      setMemSaving(false);
+    }
+  };
+
+  const regenerateMemToken = async () => {
+    try {
+      const cfg = await window.aios?.memory?.regenerateToken();
+      if (cfg) setMem(cfg);
+    } catch (e) {
+      console.error('Failed to regenerate memory ingest token:', e);
+    }
+  };
+
+  const copyMem = async (text: string, which: 'url' | 'token' | 'curl') => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(which);
+      setTimeout(() => setCopied(null), 1500);
+    } catch (e) {
+      console.error('Copy failed:', e);
+    }
+  };
+
+  const ingestUrl = mem ? `http://${mem.address}:${mem.port}/api/memory/ingest` : '';
+  const curlSnippet = mem
+    ? `curl -X POST ${ingestUrl} \\\n  -H "Authorization: Bearer ${mem.token}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"title":"My note","content":"# Markdown body here","jobName":"my-hermes-job"}'`
+    : '';
 
   const saveConfig = async () => {
     setSaving(true);
@@ -134,6 +183,97 @@ export default function HermesSettingsTab() {
             <div className={`mt-4 flex items-center gap-2 text-xs ${message.kind === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}>
               {message.kind === 'ok' ? <CheckCircle2 className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
               {message.text}
+            </div>
+          )}
+        </div>
+
+        {/* Memory ingest: LAN webhook that feeds Hermes markdown into Second Brain. */}
+        <div className="mt-6 p-5 bg-zinc-900/50 border border-zinc-800 rounded-2xl">
+          <div className="flex items-start gap-3 mb-5">
+            <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${mem?.running ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-zinc-800 text-zinc-500 border border-zinc-700'}`}>
+              <Inbox className="w-4 h-4" />
+            </div>
+            <div className="flex-1">
+              <p className="font-bold text-sm">Second Brain memory ingest</p>
+              <p className="text-[11px] text-zinc-500 leading-relaxed">
+                Expose a token-gated webhook on your LAN so a Hermes job can POST its markdown
+                output straight into Second Brain. Notes are auto-categorized, chunked, and
+                embedded like every other neuron. Off by default; only this one route is exposed.
+              </p>
+            </div>
+            <button
+              onClick={() => applyMem({ enabled: !mem?.enabled })}
+              disabled={memSaving || !window.aios?.memory}
+              className={`shrink-0 px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-colors ${mem?.enabled ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'} disabled:opacity-50`}
+            >
+              {memSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : mem?.enabled ? 'Enabled' : 'Disabled'}
+            </button>
+          </div>
+
+          {!window.aios?.memory ? (
+            <p className="text-[11px] text-amber-400">Memory ingest requires running inside the AIOS desktop app.</p>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-3 gap-3">
+                <label className="block">
+                  <span className="text-[11px] uppercase tracking-widest text-zinc-500">Port</span>
+                  <input
+                    type="number"
+                    value={memPort}
+                    onChange={(e) => setMemPort(Number(e.target.value))}
+                    onBlur={() => { if (memPort !== mem?.port) applyMem({ port: memPort }); }}
+                    className="mt-1 w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </label>
+                <div className="col-span-2 block">
+                  <span className="text-[11px] uppercase tracking-widest text-zinc-500">Ingest URL</span>
+                  <div className="mt-1 flex items-center gap-2">
+                    <code className="flex-1 truncate bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono text-zinc-300">{ingestUrl || '—'}</code>
+                    <button onClick={() => copyMem(ingestUrl, 'url')} disabled={!ingestUrl} title="Copy URL"
+                      className="p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-zinc-300 disabled:opacity-40">
+                      {copied === 'url' ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="block">
+                <span className="text-[11px] uppercase tracking-widest text-zinc-500">Bearer token</span>
+                <div className="mt-1 flex items-center gap-2">
+                  <code className="flex-1 truncate bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono text-zinc-300">{mem?.token || '—'}</code>
+                  <button onClick={() => mem?.token && copyMem(mem.token, 'token')} disabled={!mem?.token} title="Copy token"
+                    className="p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-zinc-300 disabled:opacity-40">
+                    {copied === 'token' ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  </button>
+                  <button onClick={regenerateMemToken} title="Regenerate token"
+                    className="p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-zinc-300">
+                    <RefreshCw className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className="mt-1 text-[10px] text-zinc-600">Regenerating invalidates the old token — update your Hermes job afterward.</p>
+              </div>
+
+              <div className="block">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] uppercase tracking-widest text-zinc-500">Hermes delivery command</span>
+                  <button onClick={() => copyMem(curlSnippet, 'curl')} disabled={!curlSnippet}
+                    className="flex items-center gap-1.5 text-[11px] text-zinc-400 hover:text-zinc-200 disabled:opacity-40">
+                    {copied === 'curl' ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    Copy
+                  </button>
+                </div>
+                <pre className="mt-1 bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-[11px] font-mono text-zinc-400 overflow-x-auto whitespace-pre">{curlSnippet || '—'}</pre>
+                <p className="mt-1 text-[10px] text-zinc-600 leading-relaxed">
+                  Add this as a final step in your Hermes job (the Mac must reach this machine on the LAN).
+                  Send <code className="text-zinc-400">content</code> (markdown) plus an optional <code className="text-zinc-400">title</code>/<code className="text-zinc-400">jobName</code>.
+                </p>
+              </div>
+
+              {mem?.error && (
+                <div className="flex items-center gap-2 text-xs text-red-400">
+                  <XCircle className="w-4 h-4" />{mem.error}
+                </div>
+              )}
             </div>
           )}
         </div>

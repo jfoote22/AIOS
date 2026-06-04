@@ -38,6 +38,18 @@ contextBridge.exposeInMainWorld('aios', {
     call: (op, args) => ipcRenderer.invoke('aios:db', op, args || []),
   },
 
+  // Memory ingest (LAN webhook that feeds external markdown into Second Brain).
+  memory: {
+    getConfig: () => ipcRenderer.invoke('memory:get-config'),
+    setConfig: (cfg) => ipcRenderer.invoke('memory:set-config', cfg || {}),
+    regenerateToken: () => ipcRenderer.invoke('memory:regenerate-token'),
+    onIngested: (cb) => {
+      const listener = (_e, payload) => cb(payload);
+      ipcRenderer.on('memory:ingested', listener);
+      return () => ipcRenderer.removeListener('memory:ingested', listener);
+    },
+  },
+
   // Terminal (Kanban → Terminal pane)
   term: {
     available: () => ipcRenderer.invoke('term:available'),

@@ -7,6 +7,7 @@ const apiServer = require('./api-server.cjs');
 const terminal = require('./terminal.cjs');
 const reportExport = require('./report-export.cjs');
 const sqliteStore = require('./sqlite-store.cjs');
+const memoryIngest = require('./memory-ingest.cjs');
 
 // Keep the renderer fully alive when the main window is minimized during a
 // capture. "Add Shot" minimizes the window (so AIOS stays out of the shot),
@@ -285,6 +286,16 @@ app.whenReady().then(async () => {
     console.error('Failed to start API server:', e);
   }
 
+  // LAN-facing memory ingest webhook (off by default). Started here so external
+  // agents (e.g. Hermes on the Mac) can POST markdown the moment the app is up.
+  if (memoryIngest.isEnabled()) {
+    try {
+      await memoryIngest.start({ getWebContents: () => mainWindow?.webContents });
+    } catch (e) {
+      console.error('Failed to start memory ingest server:', e);
+    }
+  }
+
   terminal.registerTerminalIpc();
 
   Menu.setApplicationMenu(buildAppMenu());
@@ -311,6 +322,32 @@ app.on('will-quit', () => {
 
 ipcMain.handle('app:get-version', () => app.getVersion());
 ipcMain.handle('app:get-api-port', () => apiPort);
+
+// --- Memory ingest (LAN webhook) config ---
+ipcMain.handle('memory:get-config', () => memoryIngest.status());
+ipcMain.handle('memory:set-config', async (_e, cfg = {}) => {
+  const { enabled, port } = cfg;
+  if (typeof port === 'number' && Number.isFinite(port) && port > 0 && port < 65536) {
+    setProviderKey('memory_ingest_port', String(Math.floor(port)));
+  }
+  if (typeof enabled === 'boolean') {
+    setProviderKey('memory_ingest_enabled', enabled ? '1' : '');
+  }
+  // Apply: restart so a port change takes effect; start/stop to match `enabled`.
+  memoryIngest.stop();
+  if (memoryIngest.isEnabled()) {
+    try {
+      await memoryIngest.start({ getWebContents: () => mainWindow?.webContents });
+    } catch (e) {
+      return { ...memoryIngest.status(), error: e?.message || 'Failed to start ingest server.' };
+    }
+  }
+  return memoryIngest.status();
+});
+ipcMain.handle('memory:regenerate-token', () => {
+  memoryIngest.regenerateToken();
+  return memoryIngest.status();
+});
 
 // SQLite data store bridge. The renderer's src/lib/db.ts calls these by op
 // name; sqlite-store whitelists the op set and throws on anything unknown.

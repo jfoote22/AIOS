@@ -22,6 +22,14 @@ export interface SnipAnalysis {
   extractedText: string;
 }
 
+export interface MarkdownAnalysis {
+  title: string;
+  summary: string;
+  category: string;
+  tags: string[];
+  entities: AnalyzedEntity[];
+}
+
 let runtimeKey: string = '';
 let client: GoogleGenAI | null = null;
 const listeners = new Set<(ready: boolean) => void>();
@@ -213,6 +221,52 @@ export async function analyzeText(text: string): Promise<TextAnalysis> {
   const out = result.text;
   if (!out) throw new Error('Gemini returned no content');
   const parsed = JSON.parse(out) as TextAnalysis;
+  const allowed = new Set(['link', 'number', 'address', 'info']);
+  parsed.entities = (parsed.entities ?? []).map(e => ({ ...e, type: allowed.has(e.type) ? e.type : 'info' }));
+  parsed.tags = (parsed.tags ?? []).map(t => t.toLowerCase().trim()).filter(Boolean);
+  return parsed;
+}
+
+const markdownResponseSchema = {
+  type: Type.OBJECT,
+  properties: {
+    title: { type: Type.STRING, description: '5-10 word descriptive title for this document' },
+    summary: { type: Type.STRING, description: 'A concise paragraph (2-4 sentences) summarizing what this document contains and its purpose' },
+    category: { type: Type.STRING, description: 'One short category name classifying the document topic, e.g. Research, Development, Design, Finance, Travel, Reference, Personal, General' },
+    tags: { type: Type.ARRAY, items: { type: Type.STRING }, description: '3-8 lowercase keyword tags' },
+    entities: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          type: { type: Type.STRING },
+          label: { type: Type.STRING },
+          value: { type: Type.STRING },
+        },
+        required: ['type', 'label', 'value'],
+      },
+    },
+  },
+  required: ['title', 'summary', 'category', 'tags', 'entities'],
+};
+
+// Analyze a markdown document (e.g. Hermes task output) and auto-categorize it.
+// Like analyzeText, but returns a real title + topical category so the note
+// blends into the brain graph by subject instead of a fixed bucket.
+export async function analyzeMarkdown(text: string): Promise<MarkdownAnalysis> {
+  const ai = getClient();
+  const result = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [{
+      role: 'user',
+      parts: [{ text: `You are filing a markdown document into a personal knowledge vault. Analyze it and return structured metadata. Be specific; do not invent details.\n\nDocument:\n"""\n${text}\n"""` }],
+    }],
+    config: { responseMimeType: 'application/json', responseSchema: markdownResponseSchema },
+  });
+
+  const out = result.text;
+  if (!out) throw new Error('Gemini returned no content');
+  const parsed = JSON.parse(out) as MarkdownAnalysis;
   const allowed = new Set(['link', 'number', 'address', 'info']);
   parsed.entities = (parsed.entities ?? []).map(e => ({ ...e, type: allowed.has(e.type) ? e.type : 'info' }));
   parsed.tags = (parsed.tags ?? []).map(t => t.toLowerCase().trim()).filter(Boolean);

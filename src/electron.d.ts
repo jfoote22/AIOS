@@ -1,5 +1,15 @@
 export {};
 
+export interface MemoryIngestStatus {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  address: string;
+  hasToken: boolean;
+  token: string;
+  error?: string;
+}
+
 declare global {
   interface Window {
     aios?: {
@@ -27,6 +37,13 @@ declare global {
       db: {
         /** Invoke a whitelisted SQLite op by name with a positional args array. */
         call: <T = unknown>(op: string, args?: unknown[]) => Promise<T>;
+      };
+      /** LAN memory-ingest webhook config (feeds external markdown into Second Brain). */
+      memory: {
+        getConfig: () => Promise<MemoryIngestStatus>;
+        setConfig: (cfg: { enabled?: boolean; port?: number }) => Promise<MemoryIngestStatus>;
+        regenerateToken: () => Promise<MemoryIngestStatus>;
+        onIngested: (cb: (payload: { id: string }) => void) => () => void;
       };
       term: {
         available: () => Promise<{ available: boolean; platform: string }>;
