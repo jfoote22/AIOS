@@ -9,6 +9,7 @@ import {
 } from '../lib/ai';
 import {
   buildGraph, nodeAsContextItem, deepDiveEmbedSource, computePulseLayers,
+  findDocClusters, applyCollapsedClusters,
   DEFAULT_SIMILARITY_THRESHOLD, DEFAULT_SIMILAR_TOP_K, DEFAULT_HUB_THRESHOLD,
   type BrainNode, type BrainLink, type BrainGraph,
 } from '../lib/graph';
@@ -37,6 +38,11 @@ const photonTravelMs = (speed: number) => (1 / speed / 60) * 1000;
 // Each ring fires when the previous ring's dot is ~85% of the way to its
 // neuron — a layer-by-layer handoff with just enough overlap to flow smoothly.
 const PULSE_STEP_MS = photonTravelMs(PULSE_SPEED) * 0.85;
+
+// Distinct ring colors used to mark which neurons belong to the same doc
+// cluster — on the collapsed cluster node and (when expanded) around each of
+// its chunk members. Assigned per-cluster by discovery order.
+const CLUSTER_RING_PALETTE = ['#f0abfc', '#fca5a5', '#fcd34d', '#86efac', '#7dd3fc', '#c4b5fd', '#fdba74', '#5eead4', '#fb7185', '#a3e635'];
 
 export default function SecondBrainTab({ active = true }: { active?: boolean }) {
   const [snippets, setSnippets] = useState<any[]>([]);
@@ -79,6 +85,23 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   }, []);
   useEffect(() => { db.setMeta('second-brain-physics', physics).catch(() => {}); }, [physics]);
 
+  // ── Collapsible doc clusters ───────────────────────────────────────────────
+  // Multi-part ingested docs (shared memoryDocId) collapse to one node to cut
+  // visual clutter. They default to COLLAPSED, so we persist the *expanded*
+  // set (the user's deviations) — any newly-arrived cluster auto-collapses.
+  const [expandedDocs, setExpandedDocs] = useState<Set<string>>(new Set());
+  const expandedLoadedRef = useRef(false);
+  useEffect(() => {
+    db.getMeta<string[]>('second-brain-expanded-docs')
+      .then(ids => { if (ids?.length) setExpandedDocs(new Set(ids)); })
+      .catch(() => {})
+      .finally(() => { expandedLoadedRef.current = true; });
+  }, []);
+  useEffect(() => {
+    if (!expandedLoadedRef.current) return; // don't clobber stored state before the initial load
+    db.setMeta('second-brain-expanded-docs', Array.from(expandedDocs)).catch(() => {});
+  }, [expandedDocs]);
+
   // Debounce connection-slider changes so dragging the threshold / max-links
   // sliders doesn't rebuild the graph (and reset node positions) on every tick.
   const [connOpts, setConnOpts] = useState({ threshold: physics.simThreshold, topK: physics.maxLinks, hubThreshold: physics.pulseHubThreshold });
@@ -89,6 +112,10 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
 
   // Push the slider values into d3-force whenever they change (or after the
   // graph is built — d3 forces are reset when react-force-graph rebuilds).
+  // We deliberately DON'T reheat here: reheating on every graph rebuild (which
+  // happens on any snippet edit, collapse/expand, etc.) flings the whole layout
+  // into motion. Forces are simply re-applied; positions are preserved when the
+  // graph rebuilds (see the build effect), so the layout stays put.
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg) return;
@@ -101,12 +128,20 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     if (charge) {
       charge.strength(physics.chargeStrength);
     }
-    fg.d3ReheatSimulation();
   }, [physics, graph]);
+
+  // Reheat ONLY when the user actively tunes physics — never on a plain data
+  // rebuild — so editing/collapsing a neuron doesn't disturb everything else.
+  useEffect(() => { fgRef.current?.d3ReheatSimulation(); }, [physics]);
 
   const fgRef = useRef<ForceGraphMethods | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  // Latest rendered graph — react-force-graph mutates these node objects in
+  // place with x/y/vx/vy, so this ref always holds live positions we can carry
+  // onto the next rebuild to avoid a disruptive relayout.
+  const graphRef = useRef<BrainGraph>(graph);
+  useEffect(() => { graphRef.current = graph; }, [graph]);
 
   useEffect(() => onGeminiReadyChange(setAiReady), []);
 
@@ -180,6 +215,14 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
 
   useEffect(() => () => { if (reloadTimer.current) clearTimeout(reloadTimer.current); }, []);
 
+  // Multi-part doc clusters discovered in the current snippets, and the set of
+  // docIds that are currently collapsed (everything not explicitly expanded).
+  const clusterDefs = useMemo(() => findDocClusters(snippets), [snippets]);
+  const collapsedSet = useMemo(
+    () => new Set(clusterDefs.map(c => c.docId).filter(id => !expandedDocs.has(id))),
+    [clusterDefs, expandedDocs],
+  );
+
   // Rebuild graph whenever underlying data changes.
   // Compute a conversation-level centroid (mean of chunk embeddings) so
   // imports participate in semantic similarity links the same way snippets do.
@@ -203,12 +246,46 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       }
     }
     const importsForGraph = imports.map(im => ({ ...im, embedding: centroids.get(im.id) }));
-    setGraph(buildGraph(snippets, deepDives, importsForGraph, {
+    const full = buildGraph(snippets, deepDives, importsForGraph, {
       threshold: connOpts.threshold,
       topK: connOpts.topK,
       hubThreshold: connOpts.hubThreshold,
-    }));
-  }, [snippets, deepDives, imports, chunks, connOpts]);
+    });
+    // Collapse multi-part doc clusters into single nodes (pure view transform).
+    const next = applyCollapsedClusters(full, clusterDefs, collapsedSet);
+
+    // Preserve layout across rebuilds: carry x/y/vx/vy from the previous graph
+    // onto matching nodes so an edit or collapse/expand doesn't reset positions
+    // and fling the whole graph around. d3-force only initializes coords when
+    // they're absent, so pre-seeded nodes stay where they were.
+    const prev = new Map<string, any>();
+    for (const n of graphRef.current.nodes as any[]) {
+      if (typeof n.x === 'number') prev.set(n.id, n);
+    }
+    for (const n of next.nodes as any[]) {
+      const p = prev.get(n.id);
+      if (!p) continue;
+      n.x = p.x; n.y = p.y; n.vx = p.vx; n.vy = p.vy;
+      if (p.fx != null) n.fx = p.fx;
+      if (p.fy != null) n.fy = p.fy;
+    }
+    // Brand-new nodes from a collapse/expand: seed them where their counterpart
+    // was so they grow out of / fold into that spot instead of flying from 0,0.
+    for (const n of next.nodes as any[]) {
+      if (typeof n.x === 'number') continue;
+      if (n.kind === 'cluster') {
+        const pts = ((n.data?.memberIds ?? []) as string[]).map(id => prev.get(id)).filter(Boolean);
+        if (pts.length) {
+          n.x = pts.reduce((a, p) => a + p.x, 0) / pts.length;
+          n.y = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+        }
+      } else if (n.data?.memoryDocId) {
+        const cl = prev.get(`cluster:${n.data.memoryDocId}`);
+        if (cl) { n.x = cl.x + (Math.random() - 0.5) * 20; n.y = cl.y + (Math.random() - 0.5) * 20; }
+      }
+    }
+    setGraph(next);
+  }, [snippets, deepDives, imports, chunks, connOpts, clusterDefs, collapsedSet]);
 
   // Plan the breadth-first pulse wave: Layer 1 = hubs (≥ hubThreshold links),
   // then one ring outward per hop, capped at "Max links / node" total layers.
@@ -477,6 +554,75 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     return groupColors[node.group] || '#9ca3af';
   }, [citedIds, focusedNode, groupColors, searchResults]);
 
+  // A stable ring color per doc cluster, and a lookup of which chunk neurons
+  // (when their cluster is expanded) should wear that ring so you can tell at a
+  // glance which loose nodes belong to the same source.
+  const clusterColorByDoc = useMemo(() => {
+    const m = new Map<string, string>();
+    clusterDefs.forEach((c, i) => m.set(c.docId, CLUSTER_RING_PALETTE[i % CLUSTER_RING_PALETTE.length]));
+    return m;
+  }, [clusterDefs]);
+  const memberRing = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of clusterDefs) {
+      if (!expandedDocs.has(c.docId)) continue; // only mark members of expanded clusters
+      const color = clusterColorByDoc.get(c.docId)!;
+      for (const id of c.memberIds) m.set(id, color);
+    }
+    return m;
+  }, [clusterDefs, expandedDocs, clusterColorByDoc]);
+
+  // Custom paint for collapsed cluster nodes: a disc that gently "breathes"
+  // (scales 100% → ~130% → 100% every 3s) ringed in the cluster's color, so it
+  // reads as a distinct stack of notes. ForceGraph2D's default nodeRelSize is 4.
+  const drawClusterNode = useCallback((n: NodeObject, ctx: CanvasRenderingContext2D, scale: number) => {
+    const node = n as unknown as BrainNode;
+    const x = (n as any).x, y = (n as any).y;
+    if (typeof x !== 'number' || typeof y !== 'number') return;
+    const baseR = Math.sqrt(Math.max(0, node.val || 1)) * 4;
+    const phase = (performance.now() % 3000) / 3000;
+    const breathe = 1 + 0.15 * (1 - Math.cos(phase * Math.PI * 2)); // 1.0 → 1.30 → 1.0
+    const r = baseR * breathe;
+    const ring = clusterColorByDoc.get((node.data as any)?.docId) || 'rgba(255,255,255,0.6)';
+
+    // Faint "stack" hint: a second offset ring behind the disc.
+    ctx.beginPath();
+    ctx.arc(x, y, r + 3, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = 1 / scale;
+    ctx.stroke();
+
+    // Main disc in the group color.
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = nodeColor(n);
+    ctx.fill();
+
+    // Cluster-color ring (matches the rings worn by its members when expanded).
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.strokeStyle = ring;
+    ctx.lineWidth = 1.5 / scale;
+    ctx.stroke();
+  }, [nodeColor, clusterColorByDoc]);
+
+  // Unified node painter: cluster nodes are fully custom; an expanded cluster's
+  // members get a colored ring drawn over the default node (mode 'after').
+  const drawNode = useCallback((n: NodeObject, ctx: CanvasRenderingContext2D, scale: number) => {
+    const node = n as unknown as BrainNode;
+    if (node.kind === 'cluster') { drawClusterNode(n, ctx, scale); return; }
+    const ring = memberRing.get(node.id);
+    if (!ring) return;
+    const x = (n as any).x, y = (n as any).y;
+    if (typeof x !== 'number' || typeof y !== 'number') return;
+    const baseR = Math.sqrt(Math.max(0, node.val || 1)) * 4;
+    ctx.beginPath();
+    ctx.arc(x, y, baseR + 3, 0, Math.PI * 2);
+    ctx.strokeStyle = ring;
+    ctx.lineWidth = 2 / scale;
+    ctx.stroke();
+  }, [drawClusterNode, memberRing]);
+
   const linkColor = useCallback((l: LinkObject) => {
     const link = l as unknown as BrainLink;
     if (link.kind === 'origin') return 'rgba(124,156,255,0.55)';
@@ -495,15 +641,51 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     return s === focusedNode.id || t === focusedNode.id;
   }, [focusedNode]);
 
+  // Expand a collapsed cluster (show its chunks) / collapse a doc back to one node.
+  const expandCluster = useCallback((docId: string) => {
+    setExpandedDocs(prev => { const n = new Set(prev); n.add(docId); return n; });
+  }, []);
+  const collapseDoc = useCallback((docId: string) => {
+    setExpandedDocs(prev => { const n = new Set(prev); n.delete(docId); return n; });
+    setFocusedNode(null);
+  }, []);
+
+  // Collapse-all / expand-all: if every cluster is collapsed, expand them all;
+  // otherwise collapse them all.
+  const allClustersCollapsed = clusterDefs.length > 0 && collapsedSet.size === clusterDefs.length;
+  const toggleAllClusters = useCallback(() => {
+    setExpandedDocs(collapsedSet.size === clusterDefs.length
+      ? new Set(clusterDefs.map(c => c.docId)) // all collapsed → expand all
+      : new Set());                            // → collapse all
+  }, [clusterDefs, collapsedSet]);
+
+  // react-force-graph-2d has no double-click handler, so synthesize one: two
+  // clicks on the same node within DOUBLE_CLICK_MS toggle its cluster state.
+  const DOUBLE_CLICK_MS = 300;
+  const lastClickRef = useRef<{ id: string; t: number } | null>(null);
   const onNodeClick = useCallback((n: NodeObject) => {
     const node = n as BrainNode;
-    setFocusedNode(node);
-    // Center & zoom on it
+    const now = performance.now();
+    const last = lastClickRef.current;
+    const isDouble = !!last && last.id === node.id && (now - last.t) < DOUBLE_CLICK_MS;
+    lastClickRef.current = isDouble ? null : { id: node.id, t: now };
+
+    if (isDouble) {
+      if (node.kind === 'cluster') { expandCluster((node.data as any).docId); return; }
+      const docId = (node.data as any)?.memoryDocId;
+      const parts = (node.data as any)?.memoryParts;
+      if (node.kind === 'snippet' && docId && parts > 1) { collapseDoc(docId); return; }
+      return;
+    }
+
+    // Single click: focus + center/zoom. A cluster is a synthetic placeholder,
+    // so center/zoom on it but don't open the snippet-oriented detail panels.
+    if (node.kind !== 'cluster') setFocusedNode(node);
     if (fgRef.current && typeof (n as any).x === 'number' && typeof (n as any).y === 'number') {
       fgRef.current.centerAt((n as any).x, (n as any).y, 600);
       fgRef.current.zoom(2.4, 600);
     }
-  }, []);
+  }, [expandCluster, collapseDoc]);
 
   const askAboutFocused = () => {
     if (!focusedNode) return;
@@ -626,9 +808,10 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const stats = useMemo(() => {
     const snipCount = graph.nodes.filter(n => n.kind === 'snippet').length;
     const ddCount = graph.nodes.filter(n => n.kind === 'deepdive').length;
+    const clusterCount = graph.nodes.filter(n => n.kind === 'cluster').length;
     const linkCount = graph.links.length;
     const categories = new Set(graph.nodes.filter(n => n.kind === 'snippet').map(n => n.group)).size;
-    return { snipCount, ddCount, linkCount, categories };
+    return { snipCount, ddCount, clusterCount, linkCount, categories };
   }, [graph]);
 
   return (
@@ -638,7 +821,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
           <div className="p-1.5 bg-zinc-800 rounded-md"><Brain className="w-4 h-4 text-indigo-400" /></div>
           <h2 className="text-sm font-bold text-white">Second Brain</h2>
           <span className="text-[10px] text-zinc-500 uppercase tracking-widest">
-            {stats.snipCount} snips · {stats.ddCount} deepdives · {stats.categories} categories · {stats.linkCount} links
+            {stats.snipCount} snips · {stats.ddCount} deepdives{stats.clusterCount > 0 ? ` · ${stats.clusterCount} clusters` : ''} · {stats.categories} categories · {stats.linkCount} links
           </span>
         </div>
         <button onClick={loadData} className="text-[10px] text-zinc-500 hover:text-indigo-400 uppercase tracking-widest">Refresh</button>
@@ -805,10 +988,28 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               nodeVal="val"
               nodeLabel={(n) => {
                 const node = n as unknown as BrainNode;
-                const kind = node.kind === 'snippet' ? 'Snippet' : 'DeepDive';
-                return `<div style="background:#11141a;border:1px solid #2D3441;color:#e6e8ec;padding:6px 10px;border-radius:8px;font-family:ui-sans-serif,system-ui;font-size:11px;max-width:260px"><div style="font-weight:700;margin-bottom:2px">${kind} · ${node.group}</div><div>${escapeHtml(node.label)}</div></div>`;
+                const kindName = node.kind === 'snippet' ? 'Snippet'
+                  : node.kind === 'deepdive' ? 'DeepDive'
+                  : node.kind === 'import' ? 'Import' : 'Cluster';
+                const head = node.kind === 'cluster'
+                  ? `Cluster · ${(node.data as any)?.count ?? 0} parts`
+                  : `${kindName} · ${node.group}`;
+                const hint = node.kind === 'cluster'
+                  ? `<div style="margin-top:3px;color:#8b90a0">Double-click to expand</div>` : '';
+                return `<div style="background:#11141a;border:1px solid #2D3441;color:#e6e8ec;padding:6px 10px;border-radius:8px;font-family:ui-sans-serif,system-ui;font-size:11px;max-width:260px"><div style="font-weight:700;margin-bottom:2px">${head}</div><div>${escapeHtml(node.label)}</div>${hint}</div>`;
               }}
               nodeColor={nodeColor}
+              nodeCanvasObjectMode={(n) => {
+                const node = n as unknown as BrainNode;
+                if (node.kind === 'cluster') return 'replace' as any;
+                if (memberRing.has(node.id)) return 'after' as any;
+                return undefined as any;
+              }}
+              nodeCanvasObject={drawNode as any}
+              // Force continuous repaint only while a collapsed cluster is on
+              // screen, so its breathing animation runs; otherwise keep the
+              // default power-saving pause when the simulation is idle.
+              autoPauseRedraw={collapsedSet.size === 0}
               linkColor={linkColor as any}
               linkWidth={(l) => Math.min(2.5, ((l as any).value ?? 1) * 0.4)}
               // No continuous emission — dots exist only as the BFS pulse wave
@@ -828,7 +1029,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               onNodeClick={onNodeClick}
               onNodeRightClick={(n, e) => {
                 const node = n as unknown as BrainNode;
-                setFocusedNode(node);
+                if (node.kind !== 'cluster') setFocusedNode(node);
                 setNodeMenu({ node, x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY });
               }}
               onBackgroundClick={() => { setFocusedNode(null); setNodeMenu(null); }}
@@ -887,13 +1088,38 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               <div className="px-3 py-1.5 text-[10px] uppercase tracking-widest text-zinc-500 border-b border-zinc-800 truncate">
                 {nodeMenu.node.label}
               </div>
-              <button
-                onClick={() => { setPendingDelete(nodeMenu.node); setNodeMenu(null); }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-red-400 hover:bg-red-500/10 transition-colors"
-              >
-                <Trash2 className="w-3.5 h-3.5" /> Delete neuron
-              </button>
+              {nodeMenu.node.kind === 'cluster' ? (
+                <button
+                  onClick={() => { expandCluster((nodeMenu.node.data as any).docId); setNodeMenu(null); }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-indigo-300 hover:bg-indigo-500/10 transition-colors"
+                >
+                  <Network className="w-3.5 h-3.5" /> Expand group
+                </button>
+              ) : (
+                <button
+                  onClick={() => { setPendingDelete(nodeMenu.node); setNodeMenu(null); }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-red-400 hover:bg-red-500/10 transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> Delete neuron
+                </button>
+              )}
             </div>
+          )}
+
+          {/* Collapse-all / expand-all clusters toggle (top-center) */}
+          {clusterDefs.length > 0 && (
+            <button
+              onClick={toggleAllClusters}
+              title={allClustersCollapsed ? 'Expand all clusters' : 'Collapse all clusters'}
+              className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-2.5 px-3 py-2 bg-zinc-900/80 backdrop-blur-md border border-zinc-800 rounded-lg text-[10px] uppercase tracking-widest text-zinc-300 hover:border-zinc-700 transition-colors z-20"
+            >
+              <Network className="w-3.5 h-3.5 text-indigo-400" />
+              <span>{allClustersCollapsed ? 'Clusters collapsed' : 'Clusters expanded'}</span>
+              {/* Switch — "on" = collapsed */}
+              <span className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${allClustersCollapsed ? 'bg-indigo-600' : 'bg-zinc-700'}`}>
+                <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${allClustersCollapsed ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+              </span>
+            </button>
           )}
 
           {/* Physics controls */}
@@ -921,6 +1147,9 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               <div className="flex items-center gap-2"><span className="inline-block w-2.5 h-px bg-[#7c9cff]" /><span className="text-zinc-400">Origin link</span></div>
               <div className="flex items-center gap-2"><span className="inline-block w-2.5 h-px bg-[#5ee6b0]/60" /><span className="text-zinc-400">Semantic similarity</span></div>
               <div className="flex items-center gap-2"><span className="inline-block w-2.5 h-px bg-white/20" /><span className="text-zinc-400">Shared tags</span></div>
+              {clusterDefs.length > 0 && (
+                <div className="flex items-center gap-2"><span className="inline-block w-2 h-2 rounded-full border border-[#f0abfc]" /><span className="text-zinc-400">Doc cluster (double-click to toggle)</span></div>
+              )}
             </div>
           )}
         </div>

@@ -8,7 +8,7 @@ import { cosineSimilarity } from './ai';
 
 export interface BrainNode {
   id: string;
-  kind: 'snippet' | 'deepdive' | 'import';
+  kind: 'snippet' | 'deepdive' | 'import' | 'cluster';
   label: string;
   /** Used by react-force-graph's nodeAutoColorBy="group" for clustering color. */
   group: string;
@@ -42,6 +42,12 @@ interface SnippetLike {
   originThreadId?: string;
   timestamp?: number;
   extractedText?: string;
+  /** Set when a long ingested doc was split — ties sibling chunks to one source. */
+  memoryDocId?: string;
+  /** Total parts the source doc was split into (>1 means it's a collapsible cluster). */
+  memoryParts?: number;
+  /** 1-based part index within the source doc. */
+  memoryPart?: number;
 }
 
 interface DeepDiveLike {
@@ -325,6 +331,92 @@ export function buildGraph(
   }
 
   return { nodes, links };
+}
+
+// ── Doc clusters (collapse a multi-part ingested doc into one node) ───────────
+// Long Hermes/Obsidian docs are split by memory.ts into many chunk-snippets that
+// all share a `memoryDocId` (+ memoryPart/memoryParts). Those siblings form a
+// visually noisy cluster; we let the UI collapse them to a single placeholder
+// node and expand on demand. This is a pure view transform — no data changes.
+
+export interface ClusterDef {
+  /** Source doc id shared by every chunk (snippet.memoryDocId). */
+  docId: string;
+  /** Display title with the "(part N/M)" suffix stripped. */
+  label: string;
+  /** Graph node ids ("snip:<id>") of the chunk neurons in this cluster. */
+  memberIds: string[];
+}
+
+/** Find every multi-part (>1) ingested doc and the chunk neurons it owns. */
+export function findDocClusters(snippets: SnippetLike[]): ClusterDef[] {
+  const groups = new Map<string, SnippetLike[]>();
+  for (const s of snippets) {
+    if (!s.memoryDocId || !(s.memoryParts && s.memoryParts > 1)) continue;
+    const arr = groups.get(s.memoryDocId) ?? [];
+    arr.push(s);
+    groups.set(s.memoryDocId, arr);
+  }
+  const out: ClusterDef[] = [];
+  for (const [docId, members] of groups) {
+    if (members.length < 2) continue; // need at least two visible chunks to cluster
+    const ordered = [...members].sort((a, b) => (a.memoryPart ?? 0) - (b.memoryPart ?? 0));
+    const rawTitle = ordered[0]?.title || docId;
+    const label = rawTitle.replace(/\s*\(part \d+\/\d+\)\s*$/i, '').trim() || docId;
+    out.push({ docId, label, memberIds: ordered.map(s => `snip:${s.id}`) });
+  }
+  return out;
+}
+
+/** Replace each collapsed cluster's member nodes with a single 'cluster' node,
+ *  rewiring links to it (intra-cluster links dropped, parallel links deduped to
+ *  the strongest). Returns the original graph unchanged when nothing collapses. */
+export function applyCollapsedClusters(
+  graph: BrainGraph,
+  clusters: ClusterDef[],
+  collapsed: Set<string>,
+): BrainGraph {
+  const active = clusters.filter(c => collapsed.has(c.docId));
+  if (!active.length) return graph;
+
+  // member node id -> cluster node id
+  const memberToCluster = new Map<string, string>();
+  const clusterNodes: BrainNode[] = [];
+  const nodeById = new Map(graph.nodes.map(n => [n.id, n]));
+  for (const c of active) {
+    const present = c.memberIds.filter(id => nodeById.has(id));
+    if (present.length < 2) continue; // not enough still in the graph to be worth collapsing
+    const clusterId = `cluster:${c.docId}`;
+    for (const id of present) memberToCluster.set(id, clusterId);
+    const group = nodeById.get(present[0])?.group ?? 'Uncategorized';
+    clusterNodes.push({
+      id: clusterId,
+      kind: 'cluster',
+      label: c.label,
+      group,
+      val: 10 + Math.min(16, present.length * 1.5),
+      data: { docId: c.docId, count: present.length, memberIds: present, label: c.label },
+    });
+  }
+  if (!clusterNodes.length) return graph;
+
+  const nodes = graph.nodes.filter(n => !memberToCluster.has(n.id));
+  nodes.push(...clusterNodes);
+
+  // Rewrite + dedupe links through the member→cluster map.
+  const remap = (id: string) => memberToCluster.get(id) ?? id;
+  const byPair = new Map<string, BrainLink>();
+  for (const l of graph.links) {
+    const s = remap(endpointId(l.source));
+    const t = remap(endpointId(l.target));
+    if (!s || !t || s === t) continue; // drop self / intra-cluster links
+    const key = s < t ? `${s}|${t}` : `${t}|${s}`;
+    const existing = byPair.get(key);
+    if (!existing || (l.value ?? 0) > (existing.value ?? 0)) {
+      byPair.set(key, { source: s, target: t, kind: l.kind, value: l.value });
+    }
+  }
+  return { nodes, links: Array.from(byPair.values()) };
 }
 
 export interface PulseLayers {
