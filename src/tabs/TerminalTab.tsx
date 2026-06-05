@@ -73,12 +73,6 @@ export default function TerminalTab({ active }: { active: boolean }) {
       .catch(() => setAvailable(false));
   }, []);
 
-  // Auto-spawn the first session once the terminal tab is visible.
-  useEffect(() => {
-    if (active && available === true && !slotsRef.current[0]) spawnInSlot(0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, available]);
-
   // Refit all visible terminals on window resize
   useEffect(() => {
     const onResize = () => refitVisible();
@@ -425,6 +419,7 @@ function Slot({
               <SmallButton icon={<Bot className="w-3 h-3" />}      onClick={() => onSpawn('claude', 'claude')}>claude</SmallButton>
               <SmallButton icon={<ShieldOff className="w-3 h-3" />} onClick={() => onSpawn('claude --dangerously-skip-permissions', 'claude (skip perms)')} danger title="New Claude session with --dangerously-skip-permissions">claude!</SmallButton>
               <SmallButton icon={<Sparkles className="w-3 h-3" />} onClick={() => onSpawn('codex', 'codex')}>codex</SmallButton>
+              <SmallButton icon={<Zap className="w-3 h-3" />}      onClick={() => onSpawn('grok', 'grok')}>grok</SmallButton>
               <SmallButton icon={<Plus className="w-3 h-3" />}     onClick={() => onSpawn()}>shell</SmallButton>
             </div>
           </div>
