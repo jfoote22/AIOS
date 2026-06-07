@@ -7,6 +7,7 @@ import {
   getAnthropicAuthMode, setAnthropicAuthMode, onAnthropicAuthModeChange,
   getOpenAIAuthMode, setOpenAIAuthMode, onOpenAIAuthModeChange,
   getGrokAuthMode, setGrokAuthMode, onGrokAuthModeChange,
+  getGeminiAuthMode, setGeminiAuthMode, onGeminiAuthModeChange,
   type AnthropicAuthMode, type AuthMode,
 } from '../lib/authMode';
 
@@ -185,6 +186,8 @@ export default function ModelsTab() {
 
         <GrokAuthEditor />
 
+        <GeminiAuthEditor />
+
         <ModelIdEditor />
       </div>
     </div>
@@ -359,6 +362,90 @@ function GrokAuthEditor() {
   );
 }
 
+function GeminiAuthEditor() {
+  const [mode, setMode] = useState<AuthMode>('subscription');
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    getGeminiAuthMode().then(setMode).catch(() => {});
+    return onGeminiAuthModeChange(setMode);
+  }, []);
+
+  const choose = async (next: AuthMode) => {
+    if (next === mode) return;
+    setSaving(true); setMsg(null);
+    try {
+      await setGeminiAuthMode(next);
+      setMsg({ kind: 'ok', text: next === 'subscription' ? 'Switched to Gemini CLI (Google login) auth.' : 'Switched to Gemini API key auth.' });
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: e?.message || 'Failed to save.' });
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="mt-10">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="p-2 bg-zinc-900 border border-zinc-800 rounded-lg"><ShieldCheck className="w-4 h-4 text-indigo-400" /></div>
+        <div>
+          <h3 className="text-lg font-bold">Gemini auth mode</h3>
+          <p className="text-[11px] text-zinc-500">How AIOS authenticates the Gemini button in DeepDives.</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <button
+          onClick={() => choose('api')}
+          disabled={saving}
+          className={`text-left p-4 rounded-2xl border transition-colors ${
+            mode === 'api'
+              ? 'bg-indigo-600/10 border-indigo-500/40'
+              : 'bg-zinc-900/50 border-zinc-800 hover:border-zinc-700'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <KeyRound className={`w-4 h-4 ${mode === 'api' ? 'text-indigo-400' : 'text-zinc-500'}`} />
+            <p className={`text-sm font-bold ${mode === 'api' ? 'text-indigo-300' : 'text-zinc-200'}`}>API key</p>
+            {mode === 'api' && <span className="ml-auto text-[10px] uppercase tracking-widest text-indigo-400 font-bold">Active</span>}
+          </div>
+          <p className="text-[11px] text-zinc-500 leading-relaxed">
+            Uses the Google Gemini API key above. Pay-per-token billing via <span className="font-mono">aistudio.google.com</span>. Works without the Gemini CLI installed.
+          </p>
+        </button>
+
+        <button
+          onClick={() => choose('subscription')}
+          disabled={saving}
+          className={`text-left p-4 rounded-2xl border transition-colors ${
+            mode === 'subscription'
+              ? 'bg-indigo-600/10 border-indigo-500/40'
+              : 'bg-zinc-900/50 border-zinc-800 hover:border-zinc-700'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <Terminal className={`w-4 h-4 ${mode === 'subscription' ? 'text-indigo-400' : 'text-zinc-500'}`} />
+            <p className={`text-sm font-bold ${mode === 'subscription' ? 'text-indigo-300' : 'text-zinc-200'}`}>Google login (CLI)</p>
+            {mode === 'subscription' && <span className="ml-auto text-[10px] uppercase tracking-widest text-indigo-400 font-bold">Active</span>}
+          </div>
+          <p className="text-[11px] text-zinc-500 leading-relaxed">
+            Uses your local <span className="font-mono">gemini</span> CLI auth (free with a personal Google account, or a paid Gemini plan for higher limits). No API key needed. Requires the Gemini CLI installed (<span className="font-mono">npm i -g @google/gemini-cli</span>) and signed in (run <span className="font-mono">gemini</span> once).
+          </p>
+        </button>
+      </div>
+
+      {msg && (
+        <p className={`mt-3 text-[11px] ${msg.kind === 'err' ? 'text-red-400' : 'text-emerald-400'}`}>{msg.text}</p>
+      )}
+
+      {mode === 'subscription' && (
+        <p className="mt-3 text-[10px] text-zinc-600 leading-relaxed">
+          AIOS routes the Gemini button through the <span className="font-mono">gemini</span> CLI in non-interactive mode, which picks up the auth from your Google login. The model is chosen by your Google plan (the free tier currently routes to Gemini 3.x Flash); the Model ID field below only applies to <strong>API key</strong> mode. To force a specific CLI model use <span className="font-mono">AIOS_GEMINI_MODEL</span> (e.g. <span className="font-mono">gemini-3-flash-preview</span>, <span className="font-mono">gemini-2.5-flash</span>) — note the CLI's OAuth tier rejects API-only names like <span className="font-mono">gemini-flash-latest</span>. If responses fail, check that <span className="font-mono">gemini --version</span> works; override the binary path with <span className="font-mono">AIOS_GEMINI_BIN</span>.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function AnthropicAuthEditor() {
   const [mode, setMode] = useState<AnthropicAuthMode>('api');
   const [saving, setSaving] = useState(false);
@@ -456,7 +543,7 @@ function ModelIdEditor() {
     return unsub;
   }, []);
 
-  const slots: ModelSlot[] = ['openai', 'claude', 'anthropic', 'grok'];
+  const slots: ModelSlot[] = ['openai', 'claude', 'anthropic', 'grok', 'gemini'];
 
   const handleSave = async (slot: ModelSlot) => {
     const draft = (drafts[slot] ?? '').trim();

@@ -7,18 +7,22 @@ export type AnthropicAuthMode = AuthMode;
 export const ANTHROPIC_AUTH_MODE_KEY = 'anthropic-auth-mode';
 export const OPENAI_AUTH_MODE_KEY = 'openai-auth-mode';
 export const GROK_AUTH_MODE_KEY = 'grok-auth-mode';
+export const GEMINI_AUTH_MODE_KEY = 'gemini-auth-mode';
 
 type Listener = (mode: AuthMode) => void;
 const anthropicListeners = new Set<Listener>();
 const openaiListeners = new Set<Listener>();
 const grokListeners = new Set<Listener>();
+const geminiListeners = new Set<Listener>();
 
-async function readMode(key: string): Promise<AuthMode> {
+async function readMode(key: string, fallback: AuthMode = 'api'): Promise<AuthMode> {
   try {
     const v = await db.getMeta<AuthMode>(key);
-    return v === 'subscription' ? 'subscription' : 'api';
+    if (v === 'subscription') return 'subscription';
+    if (v === 'api') return 'api';
+    return fallback;
   } catch {
-    return 'api';
+    return fallback;
   }
 }
 
@@ -46,4 +50,13 @@ export const setGrokAuthMode = (mode: AuthMode) => writeMode(GROK_AUTH_MODE_KEY,
 export function onGrokAuthModeChange(fn: Listener): () => void {
   grokListeners.add(fn);
   return () => { grokListeners.delete(fn); };
+}
+
+// Gemini defaults to subscription (the free `gemini` CLI Google-account login)
+// since that's the lowest-friction path — no API key required to get started.
+export const getGeminiAuthMode = () => readMode(GEMINI_AUTH_MODE_KEY, 'subscription');
+export const setGeminiAuthMode = (mode: AuthMode) => writeMode(GEMINI_AUTH_MODE_KEY, mode, geminiListeners);
+export function onGeminiAuthModeChange(fn: Listener): () => void {
+  geminiListeners.add(fn);
+  return () => { geminiListeners.delete(fn); };
 }

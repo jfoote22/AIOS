@@ -222,6 +222,45 @@ function resolveGrokBin() {
   return _grokBinCache;
 }
 
+// Resolve the `gemini` CLI binary (Google's open-source Gemini CLI, installed
+// via `npm i -g @google/gemini-cli`). Same stale-PATH problem as grok: the npm
+// global bin dir may not be on the Electron process PATH. Check an explicit
+// override, then the canonical npm global location, then fall back to the bare
+// command for the OS to resolve. On Windows the npm shim is a `.cmd`, so the
+// agent route spawns it with shell:true.
+let _geminiBinCache;
+function resolveGeminiBin() {
+  if (_geminiBinCache !== undefined) return _geminiBinCache;
+  const override = (process.env.AIOS_GEMINI_BIN || '').trim();
+  const isWin = process.platform === 'win32';
+  const exe = isWin ? 'gemini.cmd' : 'gemini';
+  const candidates = [];
+  if (override) candidates.push(override);
+  const home = os.homedir();
+  if (home && isWin) {
+    candidates.push(path.join(home, 'AppData', 'Roaming', 'npm', exe));
+  }
+  for (const c of candidates) {
+    try { if (fsSync.existsSync(c)) { _geminiBinCache = c; return c; } } catch {}
+  }
+  // Last resort: let the OS PATH-resolve it (works if gemini is on PATH).
+  _geminiBinCache = exe;
+  return _geminiBinCache;
+}
+
+// Kill a spawned CLI child ONLY on a genuine client disconnect. `req.on('close')`
+// fires as soon as the request body is fully read (Node behavior), even though
+// the connection is still open and we're mid-response — killing on that alone
+// SIGTERMs the CLI almost instantly. So gate on the response socket actually
+// being gone and us not having finished writing the response.
+function killChildIfDisconnected(res, child) {
+  const sock = res.socket;
+  const reallyGone = !!sock && (sock.destroyed || sock.writable === false);
+  if (!res.writableEnded && reallyGone && child && !child.killed) {
+    try { child.kill(); } catch { /* already gone */ }
+  }
+}
+
 function normalizeHermesBaseUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -1719,8 +1758,10 @@ function start() {
         env: process.env,
       });
 
-      // Abort the CLI if the client disconnects (e.g. user hits Stop).
-      req.on('close', () => { if (child && !child.killed) try { child.kill(); } catch {} });
+      // Abort the CLI only on a genuine client disconnect (see helper — guards
+      // against Node firing req 'close' as soon as the request body is read).
+      req.on('close', () => killChildIfDisconnected(res, child));
+      res.on('close', () => killChildIfDisconnected(res, child));
 
       let buf = '';
       let sawAnswer = false;
@@ -1793,6 +1834,207 @@ function start() {
       console.error('Grok CLI error:', err);
       if (child && !child.killed) try { child.kill(); } catch {}
       const message = err?.message || 'Grok CLI request failed.';
+      if (!res.headersSent) res.status(500).json({ error: message });
+      else { try { res.write(streamPart('error', message)); } catch {} res.end(); }
+    }
+  });
+
+  // --- Gemini chat (Google AI Studio API key; model ID configurable via Models tab) ---
+  // The renderer routes here when the user picks "API key" auth for Gemini.
+  // Streams via @google/genai's generateContentStream, translated into the
+  // Vercel AI data-stream protocol (same streamPart codes as the CLI routes).
+  app.post('/api/gemini/chat', async (req, res) => {
+    try {
+      const { messages = [], context } = req.body || {};
+      const last = messages[messages.length - 1];
+      if (!last || last.role !== 'user') {
+        return res.status(400).json({ error: 'Last message must be from user.' });
+      }
+
+      const key = getProviderKey('gemini');
+      if (!key) return res.status(400).json({ error: 'Gemini key not configured. Add it in Models tab, or switch to subscription auth.' });
+
+      const { GoogleGenAI } = await import('@google/genai');
+      const client = new GoogleGenAI({ apiKey: key });
+      const modelId = getModelId('gemini') || 'gemini-flash-latest';
+
+      // Gemini uses 'model' for assistant turns; everything else is 'user'.
+      const contents = messages.map(m => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: String(m.content ?? '') }],
+      }));
+      const systemInstruction = withContext(
+        'You are a helpful AI assistant. Respond conversationally and concisely.',
+        context,
+      );
+
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('x-vercel-ai-data-stream', 'v1');
+      res.setHeader('Cache-Control', 'no-cache');
+
+      const stream = await client.models.generateContentStream({
+        model: modelId,
+        contents,
+        config: { systemInstruction },
+      });
+      for await (const chunk of stream) {
+        const t = chunk.text;
+        if (t) res.write(streamPart('text', t));
+      }
+      res.write(streamPart('finish_message', {
+        finishReason: 'stop',
+        usage: { promptTokens: 0, completionTokens: 0 },
+      }));
+      res.end();
+    } catch (err) {
+      console.error('Gemini chat error:', err);
+      const message = err?.message || 'Gemini request failed.';
+      if (!res.headersSent) res.status(500).json({ error: message });
+      else { try { res.write(streamPart('error', message)); } catch {} res.end(); }
+    }
+  });
+
+  // --- Gemini CLI agent chat (uses local `gemini` CLI Google-account auth, not API key) ---
+  // Requires the Gemini CLI installed and signed in: `npm i -g @google/gemini-cli`
+  // then run `gemini` once to complete the Google OAuth login (free tier, or a
+  // paid Gemini Code Assist / AI plan for higher limits).
+  // The renderer routes here when the user picks "subscription" auth for Gemini.
+  //
+  // Interface (per docs/cli/headless.md + cli-reference.md, verified against the
+  // installed CLI):
+  //   - `-p/--prompt` FORCES non-interactive mode (without it, piped stdin can
+  //     fall back to interactive and hang). The -p text is appended to stdin.
+  //   - `-o/--output-format stream-json` emits newline-delimited events:
+  //       {type:"init",...} {type:"message",role:"user"|"assistant",content,delta}
+  //       {type:"result",status,stats} {type:"error",...}
+  //     We relay assistant message content as text deltas (like the grok path).
+  //   - `--approval-mode yolo` + `--skip-trust` so a stray tool call / untrusted
+  //     cwd never downgrades approval and blocks headless.
+  //   - `-m/--model` only when AIOS_GEMINI_MODEL is set; otherwise the plan picks
+  //     (the OAuth tier auto-routes to current Gemini 3.x flash). NOTE the OAuth
+  //     tier rejects AI-Studio-only names like `gemini-flash-latest` (404), so we
+  //     never pass the Models-tab id here — that id drives the API-key path only.
+  // The conversation (arbitrary user content) rides on STDIN, never argv, so the
+  // only argv tokens are fixed flags + a constant directive — safe to quote for
+  // the Windows `gemini.cmd` shell shim.
+  app.post('/api/gemini-agent/chat', async (req, res) => {
+    let child = null;
+    try {
+      const { messages = [], context } = req.body || {};
+      const last = messages[messages.length - 1];
+      if (!last || last.role !== 'user') {
+        return res.status(400).json({ error: 'Last message must be from user.' });
+      }
+
+      const history = messages.slice(0, -1).map(m =>
+        `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`
+      ).join('\n\n');
+      const preamble = withContext(
+        'You are a helpful AI assistant. Respond conversationally and concisely.',
+        context,
+      );
+      const convo = history
+        ? `${preamble}\n\n${history}\n\nUser: ${last.content}`
+        : `${preamble}\n\nUser: ${last.content}`;
+      // Fixed directive carried in -p (forces non-interactive). The actual
+      // conversation is appended via stdin, so no user content enters argv.
+      const DIRECTIVE = 'Respond as the assistant to the conversation provided.';
+
+      const geminiModelOverride = (process.env.AIOS_GEMINI_MODEL || '').trim();
+      const flags = ['-o', 'stream-json', '--approval-mode', 'yolo', '--skip-trust', '-p', DIRECTIVE];
+      if (geminiModelOverride) flags.push('-m', geminiModelOverride);
+
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('x-vercel-ai-data-stream', 'v1');
+      res.setHeader('Cache-Control', 'no-cache');
+
+      const bin = resolveGeminiBin();
+      const baseOpts = { cwd: os.tmpdir(), windowsHide: true, env: process.env };
+      if (process.platform === 'win32') {
+        // shell:true is needed to run the gemini.cmd npm shim, but Node does NOT
+        // quote args under shell:true — it just space-joins them. So build one
+        // pre-quoted command line ourselves (only fixed tokens are present).
+        const q = (s) => (/[\s"]/.test(String(s)) ? `"${String(s).replace(/"/g, '""')}"` : String(s));
+        const cmdline = [q(bin), ...flags.map(q)].join(' ');
+        child = spawn(cmdline, { ...baseOpts, shell: true });
+      } else {
+        child = spawn(bin, flags, { ...baseOpts, shell: false });
+      }
+
+      // Abort the CLI ONLY on a genuine client disconnect. `req.on('close')`
+      // fires as soon as the request body is fully read (Node behavior), even
+      // though the connection is still open and we're mid-response — killing on
+      // that alone SIGTERMs the CLI ~instantly. So gate on the response socket
+      // actually being gone (and us not having finished writing).
+      req.on('close', () => killChildIfDisconnected(res, child));
+      res.on('close', () => killChildIfDisconnected(res, child));
+
+      let buf = '';
+      let sawAnswer = false;
+      let stderr = '';
+      let resultError = '';
+
+      const handleEvent = (evt) => {
+        if (!evt || typeof evt !== 'object') return;
+        if (evt.type === 'message' && evt.role === 'assistant' && typeof evt.content === 'string') {
+          sawAnswer = true;
+          res.write(streamPart('text', evt.content));
+        } else if (evt.type === 'result' && evt.status && evt.status !== 'success') {
+          resultError = (evt.error && (evt.error.message || evt.error)) || String(evt.status);
+        } else if (evt.type === 'error') {
+          resultError = evt.message || (evt.error && (evt.error.message || evt.error)) || 'Gemini stream error.';
+        }
+      };
+
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        buf += chunk;
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch { continue; }
+          try { handleEvent(evt); } catch {}
+        }
+      });
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+
+      child.on('error', (err) => {
+        const message = /ENOENT/.test(err?.code || err?.message || '')
+          ? 'Gemini CLI not found. Install it with `npm i -g @google/gemini-cli`, run `gemini` once to sign in (or set AIOS_GEMINI_BIN).'
+          : (err?.message || 'Failed to launch Gemini CLI.');
+        if (!res.headersSent) res.status(500).json({ error: message });
+        else { try { res.write(streamPart('error', message)); } catch {} res.end(); }
+      });
+
+      child.on('close', (code, signal) => {
+        // Flush any trailing buffered line (no newline at EOF).
+        const tail = buf.trim();
+        if (tail) { try { handleEvent(JSON.parse(tail)); } catch {} }
+        if (!sawAnswer) {
+          const errJson = extractJsonObject(stderr);
+          const msg = resultError
+            || (errJson && errJson.error && (errJson.error.message || errJson.error))
+            || stderr.trim()
+            || `Gemini CLI exited with code ${code}${signal ? ` (signal ${signal})` : ''}.`;
+          try { res.write(streamPart('error', msg)); } catch {}
+        }
+        res.write(streamPart('finish_message', {
+          finishReason: 'stop',
+          usage: { promptTokens: 0, completionTokens: 0 },
+        }));
+        res.end();
+      });
+
+      // Feed the conversation via stdin, then close it so the CLI starts generating.
+      try { child.stdin.setDefaultEncoding('utf8'); child.stdin.write(convo); child.stdin.end(); } catch {}
+    } catch (err) {
+      console.error('Gemini CLI error:', err);
+      if (child && !child.killed) try { child.kill(); } catch {}
+      const message = err?.message || 'Gemini CLI request failed.';
       if (!res.headersSent) res.status(500).json({ error: message });
       else { try { res.write(streamPart('error', message)); } catch {} res.end(); }
     }

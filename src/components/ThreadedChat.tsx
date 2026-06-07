@@ -335,6 +335,7 @@ import {
   getAnthropicAuthMode, onAnthropicAuthModeChange,
   getOpenAIAuthMode, onOpenAIAuthModeChange,
   getGrokAuthMode, onGrokAuthModeChange,
+  getGeminiAuthMode, onGeminiAuthModeChange,
   type AnthropicAuthMode, type AuthMode,
 } from '../lib/authMode';
 
@@ -369,7 +370,7 @@ interface MobileSelection {
   threadId?: string;
 }
 
-type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'grok';
+type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'grok' | 'gemini';
 
 // Build the background context a deep-dive thread should carry into its chat.
 // The Deep Research report lives in `thread.research`, separate from the chat
@@ -405,6 +406,7 @@ function useThreadChat(
   anthropicAuthMode: AnthropicAuthMode = 'api',
   openaiAuthMode: AuthMode = 'api',
   grokAuthMode: AuthMode = 'api',
+  geminiAuthMode: AuthMode = 'subscription',
   contextText: string = '',
 ) {
   const [showReasoning, setShowReasoning] = useState(false);
@@ -418,6 +420,8 @@ function useThreadChat(
         return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
       case 'grok':
         return apiUrl(grokAuthMode === 'subscription' ? '/api/grok-agent/chat' : '/api/grok/chat');
+      case 'gemini':
+        return apiUrl(geminiAuthMode === 'subscription' ? '/api/gemini-agent/chat' : '/api/gemini/chat');
       default:
         return apiUrl('/api/openai/chat');
     }
@@ -640,6 +644,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const [anthropicAuthMode, setAnthropicAuthMode] = useState<AnthropicAuthMode>('api');
   const [openaiAuthMode, setOpenaiAuthMode] = useState<AuthMode>('api');
   const [grokAuthMode, setGrokAuthMode] = useState<AuthMode>('api');
+  const [geminiAuthMode, setGeminiAuthMode] = useState<AuthMode>('subscription');
   useEffect(() => {
     getAnthropicAuthMode().then(setAnthropicAuthMode).catch(() => {});
     return onAnthropicAuthModeChange(setAnthropicAuthMode);
@@ -652,6 +657,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     getGrokAuthMode().then(setGrokAuthMode).catch(() => {});
     return onGrokAuthModeChange(setGrokAuthMode);
   }, []);
+  useEffect(() => {
+    getGeminiAuthMode().then(setGeminiAuthMode).catch(() => {});
+    return onGeminiAuthModeChange(setGeminiAuthMode);
+  }, []);
 
   const getApiEndpoint = (model: ModelProvider) => {
     switch (model) {
@@ -662,6 +671,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
       case 'grok':
         return apiUrl(grokAuthMode === 'subscription' ? '/api/grok-agent/chat' : '/api/grok/chat');
+      case 'gemini':
+        return apiUrl(geminiAuthMode === 'subscription' ? '/api/gemini-agent/chat' : '/api/gemini/chat');
       default:
         return apiUrl('/api/anthropic/chat');
     }
@@ -1705,15 +1716,17 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const providerForModel = (m: ModelProvider): ProviderId => {
     if (m === 'openai') return 'openai';
     if (m === 'grok') return 'grok';
+    if (m === 'gemini') return 'gemini';
     return 'anthropic'; // 'claude' (Opus) and 'anthropic' (Sonnet) both use the Anthropic key
   };
 
   const isModelReady = (m: ModelProvider) => {
     // Subscription modes bypass the per-provider API key requirement —
-    // the local CLI (claude / codex) supplies auth from the user's plan.
+    // the local CLI (claude / codex / grok / gemini) supplies auth from the user's plan.
     if ((m === 'claude' || m === 'anthropic') && anthropicAuthMode === 'subscription') return true;
     if (m === 'openai' && openaiAuthMode === 'subscription') return true;
     if (m === 'grok' && grokAuthMode === 'subscription') return true;
+    if (m === 'gemini' && geminiAuthMode === 'subscription') return true;
     return configuredProviders.has(providerForModel(m));
   };
 
@@ -1722,6 +1735,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.8'),      dot: 'bg-indigo-500'  },
     { value: 'anthropic' as ModelProvider, label: labelFor('anthropic', 'Claude Sonnet 4.6'), dot: 'bg-indigo-400'  },
     { value: 'grok' as ModelProvider,      label: labelFor('grok', 'Grok 4'),                 dot: 'bg-orange-500'  },
+    { value: 'gemini' as ModelProvider,    label: labelFor('gemini', 'Gemini Flash'),         dot: 'bg-blue-500'    },
   ];
 
   // Compact model picker that lives in the lower input bar. Opens upward so the
@@ -2086,7 +2100,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     const threadContext = buildThreadContext(thread);
 
     // Create a dedicated, isolated chat instance for this specific thread with initial messages
-    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode, openaiAuthMode, grokAuthMode, threadContext);
+    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode, openaiAuthMode, grokAuthMode, geminiAuthMode, threadContext);
     
     // Store the thread chat instance reference for accessing messages during save
     React.useEffect(() => {

@@ -15,6 +15,7 @@ const DEFAULTS = {
   claude: 'claude-opus-4-8',
   anthropic: 'claude-sonnet-4-6',
   grok: 'grok-4',
+  gemini: 'gemini-flash-latest',
   hermes: 'hermes-mac',
 };
 

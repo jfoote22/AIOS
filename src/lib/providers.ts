@@ -16,7 +16,7 @@ export interface ProviderDef {
 }
 
 export const PROVIDERS: ProviderDef[] = [
-  { id: 'gemini',    label: 'Google Gemini',   keyHint: 'AIza…',  url: 'https://aistudio.google.com/apikey',      defaultModel: 'gemini-2.5-flash' },
+  { id: 'gemini',    label: 'Google Gemini',   keyHint: 'AIza…',  url: 'https://aistudio.google.com/apikey',      defaultModel: 'gemini-flash-latest' },
   { id: 'openai',    label: 'OpenAI',          keyHint: 'sk-…',   url: 'https://platform.openai.com/api-keys',    defaultModel: 'gpt-4o-mini' },
   { id: 'anthropic', label: 'Anthropic',       keyHint: 'sk-ant-', url: 'https://console.anthropic.com/settings/keys', defaultModel: 'claude-sonnet-4-6' },
   { id: 'grok',      label: 'xAI Grok',        keyHint: 'xai-…',  url: 'https://console.x.ai/',                   defaultModel: 'grok-2' },
