@@ -97,7 +97,7 @@ function wireContextMenu(webContents) {
 }
 
 function createWindow() {
-  const winIcon = nativeImage.createFromPath(path.join(__dirname, 'tray-icon@2x.png'));
+  const winIcon = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -271,6 +271,11 @@ ipcMain.on('capture:request-for-item', (_e, itemId) => {
 });
 
 app.whenReady().then(async () => {
+  // Windows: give the app an explicit identity so the taskbar shows our icon
+  // (and groups windows) instead of the generic Electron one, and so toast
+  // notifications are attributed to AIOS. Must match the build appId.
+  if (process.platform === 'win32') app.setAppUserModelId('com.aios.app');
+
   migrateLegacyKey();
 
   try {
