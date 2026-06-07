@@ -1,8 +1,9 @@
 {
   "name": "aios",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "AIOS — unified DeepDive + Snipping Vault desktop app",
+  "author": "Justin Foote <justinfoote@gmail.com>",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -12,9 +13,10 @@
     "electron": "electron .",
     "electron:dev": "concurrently -k -n VITE,ELECTRON -c blue,magenta \"npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
     "electron:build": "vite build && electron-builder",
+    "dist": "vite build && electron-builder --publish never",
     "lint": "tsc --noEmit",
-    "rebuild:native": "electron-rebuild -f --only better-sqlite3",
-    "postinstall": "electron-rebuild -f --only better-sqlite3"
+    "rebuild:native": "electron-rebuild -f --only better-sqlite3,node-pty",
+    "postinstall": "electron-rebuild -f --only better-sqlite3,node-pty"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^0.0.48",
@@ -93,12 +95,39 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "perMachine": false
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "identity": null,
+      "target": [
+        {
+          "target": "dmg"
+        },
+        {
+          "target": "zip"
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "category": "Utility",
+      "maintainer": "Justin Foote <justinfoote@gmail.com>",
+      "target": [
+        {
+          "target": "AppImage"
+        },
+        {
+          "target": "deb"
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   }
 }

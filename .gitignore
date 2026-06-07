@@ -1,8 +1,13 @@
 node_modules/
 dist/
 release/
-build/
 .vite/
+# electron-builder resources dir: ignore build output but keep committed icons.
+build/*
+!build/icon.png
+!build/icon.ico
+!build/icon.icns
+!build/entitlements.mac.plist
 *.log
 .DS_Store
 Thumbs.db

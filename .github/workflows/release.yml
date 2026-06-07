@@ -1,0 +1,88 @@
+name: Release
+
+# Builds the AIOS desktop installers for Windows, macOS (Apple Silicon + Intel),
+# and Linux, then attaches them to a GitHub Release.
+#
+# How to cut a release:
+#   1. Bump "version" in package.json (e.g. 1.0.0).
+#   2. git tag v1.0.0 && git push origin v1.0.0
+#   3. This workflow builds all platforms and creates a DRAFT release with the
+#      installers attached. Review it under Releases, then click "Publish".
+#
+# You can also run it manually from the Actions tab (workflow_dispatch); without
+# a tag it just builds + uploads artifacts and skips the release step.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each runner builds its OWN native architecture so the native modules
+        # (better-sqlite3, node-pty) compile cleanly — no cross-compilation.
+        include:
+          - os: macos-14        # Apple Silicon  -> arm64 .dmg / .zip
+          - os: macos-13        # Intel          -> x64 .dmg / .zip
+          - os: windows-latest  # -> NSIS .exe (x64)
+          - os: ubuntu-latest   # -> .AppImage + .deb (x64)
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Installs deps and rebuilds native modules for Electron via the
+      # postinstall hook (electron-rebuild better-sqlite3 + node-pty).
+      - name: Install dependencies
+        run: npm ci
+
+      # vite build + electron-builder for the host OS. --publish never so the
+      # release is assembled in one place by the `release` job below.
+      - name: Build installers
+        run: npm run dist
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.deb
+          if-no-files-found: ignore
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only create a release for tag pushes (skip for manual test runs).
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          draft: true
+          generate_release_notes: true
