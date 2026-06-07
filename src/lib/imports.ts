@@ -4,7 +4,7 @@
 // first. We auto-detect the provider by inspecting the structure.
 
 import * as db from './db';
-import { embedText } from './ai';
+import { embedTexts } from './ai';
 
 export type ImportProvider = 'claude' | 'chatgpt';
 export type ImportRole = 'user' | 'assistant' | 'system' | 'tool';
@@ -29,6 +29,17 @@ export interface ImportResult {
   added: number;
   skipped: number;
   total: number;
+}
+
+/** Lightweight conversation metadata — no message bodies. Used for graph nodes
+ *  and list rows so a huge import never loads all its messages into memory. */
+export interface ImportMeta {
+  id: string;
+  provider: ImportProvider;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messageCount: number;
 }
 
 // ── Provider detection ─────────────────────────────────────────────────────────
@@ -229,6 +240,10 @@ export async function importFromFile(file: File): Promise<ImportResult> {
 }
 
 export const listImports = () => db.getAllImports<ImportedConversation>();
+/** Metadata for every import (no message bodies) — safe to load in bulk. */
+export const listImportsMeta = () => db.getImportsMeta<ImportMeta>();
+/** Load one full conversation (with messages) on demand. */
+export const getImport = (id: string) => db.getImport<ImportedConversation>(id);
 export const deleteImport = async (id: string) => {
   await db.deleteChunksForConversation(id);
   await db.removeImport(id);
@@ -329,9 +344,9 @@ export interface IndexProgress {
 }
 
 /**
- * Index every conversation that has no chunks yet. Embeddings are produced
- * one chunk at a time via the Gemini embeddings API; chunks for a conversation
- * are written as a single transaction.
+ * Index every conversation that has no chunks yet. Embeddings are produced via
+ * the Gemini embeddings API (batched, with retry/backoff); chunks for a
+ * conversation are written as a single transaction.
  */
 export async function indexUnindexed(
   onProgress?: (p: IndexProgress) => void,
@@ -359,25 +374,38 @@ export async function indexUnindexed(
       currentTitle: conv.title,
     });
 
-    const embedded: ImportChunk[] = [];
-    for (const c of chunks) {
-      if (signal?.aborted) break;
-      try {
-        const vec = await embedText(c.text);
-        embedded.push({ ...c, embedding: vec });
-      } catch (e) {
-        // If embedding fails (rate limit, etc.) propagate so the caller can decide
-        throw new Error(`Embedding failed on "${conv.title}": ${(e as Error)?.message ?? e}`);
-      }
-      chunksDone++;
-      onProgress?.({
-        conversationsTotal: plans.length,
-        conversationsDone: pi,
-        chunksTotal,
-        chunksDone,
-        currentTitle: conv.title,
+    if (signal?.aborted) break;
+    const chunksDoneBefore = chunksDone;
+    let vecs: number[][];
+    try {
+      // Batched embedding with retry/backoff handled inside embedTexts. This
+      // rides through transient 429s instead of aborting the whole index.
+      vecs = await embedTexts(chunks.map(c => c.text), {
+        signal,
+        onProgress: (done) => {
+          chunksDone = chunksDoneBefore + done;
+          onProgress?.({
+            conversationsTotal: plans.length,
+            conversationsDone: pi,
+            chunksTotal,
+            chunksDone,
+            currentTitle: conv.title,
+          });
+        },
       });
+    } catch (e) {
+      if (signal?.aborted || (e as any)?.name === 'AbortError') break;
+      // Rate limit exhausted retries (or another hard error). Surface it, but
+      // conversations already indexed are saved so a re-run resumes from here.
+      const msg = (e as Error)?.message ?? String(e);
+      const quota = /429|RESOURCE_EXHAUSTED|exhausted|quota/i.test(msg);
+      throw new Error(
+        quota
+          ? `Hit Gemini's embedding quota while indexing "${conv.title}". Everything indexed so far is saved — wait a minute (or raise your Gemini API tier/quota), then click "Index for Second Brain" again to pick up where it left off.`
+          : `Embedding failed on "${conv.title}": ${msg}`,
+      );
     }
+    const embedded: ImportChunk[] = chunks.map((c, idx) => ({ ...c, embedding: vecs[idx] }));
     if (embedded.length) {
       await db.putImportChunks(embedded);
       indexed++;

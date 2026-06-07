@@ -12,11 +12,12 @@ import { setGeminiKey } from './lib/ai';
 import { initApiBase } from './lib/apiBase';
 import { refreshModels } from './lib/models';
 import { onNavigate } from './lib/navigate';
+import ErrorBoundary from './components/ErrorBoundary';
 
-function TabPanel({ active, children }: { active: boolean; children: React.ReactNode }) {
+function TabPanel({ active, label, children }: { active: boolean; label: string; children: React.ReactNode }) {
   return (
     <div className="absolute inset-0 flex flex-col" style={{ display: active ? 'flex' : 'none' }}>
-      {children}
+      <ErrorBoundary label={label}>{children}</ErrorBoundary>
     </div>
   );
 }
@@ -61,13 +62,13 @@ export default function App() {
         {/* All tabs stay mounted so in-progress state (e.g. an active DeepDive
             chat) survives sidebar navigation. Inactive tabs are hidden, not
             unmounted. */}
-        <TabPanel active={active === 'deepdives'}><DeepDivesTab /></TabPanel>
-        <TabPanel active={active === 'snipping'}><SnippingTab /></TabPanel>
-        <TabPanel active={active === 'secondbrain'}><SecondBrainTab active={active === 'secondbrain'} /></TabPanel>
-        <TabPanel active={active === 'hermes'}><HermesTab /></TabPanel>
-        <TabPanel active={active === 'terminal'}><TerminalTab active={active === 'terminal'} /></TabPanel>
-        <TabPanel active={active === 'kanban'}><KanbanTab /></TabPanel>
-        <TabPanel active={active === 'settings'}><SettingsTab /></TabPanel>
+        <TabPanel active={active === 'deepdives'} label="DeepDives"><DeepDivesTab /></TabPanel>
+        <TabPanel active={active === 'snipping'} label="Snipping"><SnippingTab /></TabPanel>
+        <TabPanel active={active === 'secondbrain'} label="Second Brain"><SecondBrainTab active={active === 'secondbrain'} /></TabPanel>
+        <TabPanel active={active === 'hermes'} label="Hermes"><HermesTab /></TabPanel>
+        <TabPanel active={active === 'terminal'} label="Terminal"><TerminalTab active={active === 'terminal'} /></TabPanel>
+        <TabPanel active={active === 'kanban'} label="Kanban"><KanbanTab /></TabPanel>
+        <TabPanel active={active === 'settings'} label="Settings"><SettingsTab /></TabPanel>
       </main>
     </div>
   );

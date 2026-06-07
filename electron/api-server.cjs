@@ -1071,6 +1071,271 @@ function start() {
     }
   });
 
+  // --- Skills: write/delete .claude/skills/<name>/SKILL.md ---
+  // Skills are a *folder* per skill (Claude Code skill format): a SKILL.md with
+  // name/description frontmatter + instructions body, plus any supporting files
+  // the author adds via the IDE editor. We only create/replace SKILL.md here;
+  // supporting files are managed through the /api/fs/* endpoints below.
+  app.post('/api/skills/write-md', async (req, res) => {
+    try {
+      const { slug, workingDir, markdown } = req.body || {};
+      if (!slug || !workingDir || typeof markdown !== 'string') {
+        return res.status(400).json({ error: 'Missing slug, workingDir, or markdown.' });
+      }
+      if (!/^[a-z0-9-]+$/.test(slug)) {
+        return res.status(400).json({ error: 'Slug must be lowercase alphanumeric + dashes.' });
+      }
+      const safeSlug = slug.slice(0, 60);
+      const dir = path.resolve(workingDir, '.claude', 'skills', safeSlug);
+      const file = path.join(dir, 'SKILL.md');
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(file, markdown, 'utf8');
+      res.json({ path: file, dir });
+    } catch (err) {
+      console.error('skill write-md error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to write skill file.' });
+    }
+  });
+
+  app.post('/api/skills/delete-md', async (req, res) => {
+    try {
+      const { slug, workingDir } = req.body || {};
+      if (!slug || !workingDir) return res.status(400).json({ error: 'Missing slug or workingDir.' });
+      if (!/^[a-z0-9-]+$/.test(slug)) return res.status(400).json({ error: 'Bad slug.' });
+      // Remove the whole skill folder (SKILL.md + any supporting files).
+      const dir = path.resolve(workingDir, '.claude', 'skills', slug.slice(0, 60));
+      try { await fs.rm(dir, { recursive: true, force: true }); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('skill delete-md error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to delete skill folder.' });
+    }
+  });
+
+  // Per-field AI assist for the Skill Builder (mirrors /api/agents/draft).
+  app.post('/api/skills/draft', async (req, res) => {
+    try {
+      const { field, currentValue = '', hint = '', skill = {}, authMode } = req.body || {};
+      if (!field) return res.status(400).json({ error: 'Missing `field`.' });
+
+      const sysParts = [
+        'You are an expert at authoring Claude Code Skills (reusable SKILL.md capability packs).',
+        'You are filling in a single field of a skill definition based on the existing partial config.',
+        'Return ONLY the new field value, no commentary, no markdown fences.',
+      ];
+
+      let fieldGuidance = '';
+      if (field === 'description') {
+        fieldGuidance = 'Return a 1-sentence description (under 200 chars) stating what the skill does and, crucially, WHEN Claude should use it (trigger conditions). This is what Claude reads to decide whether to load the skill.';
+      } else if (field === 'instructions') {
+        fieldGuidance = 'Return the body of a SKILL.md (markdown is encouraged here): a focused set of instructions, steps, and guidance Claude should follow when the skill is active. Be concrete and procedural. No YAML frontmatter — just the body.';
+      } else if (field === 'tools') {
+        fieldGuidance = 'Return ONLY a JSON array of tool names this skill needs (subset of: Read, Glob, Grep, Edit, Write, Bash, WebFetch, WebSearch). Be conservative. Example: ["Read","Grep"]';
+      } else if (field === 'all') {
+        fieldGuidance = 'Return a JSON object: { "description": "...", "instructions": "...", "tools": ["..."] }. Same constraints as the individual fields.';
+      } else {
+        return res.status(400).json({ error: `Unknown field "${field}".` });
+      }
+      sysParts.push(fieldGuidance);
+
+      const ctxLines = [
+        `Skill name: ${skill.name || '(unnamed)'}`,
+        skill.description ? `Description: ${skill.description}` : '',
+        skill.instructions ? `Instructions so far: ${skill.instructions}` : '',
+        Array.isArray(skill.allowedTools) && skill.allowedTools.length ? `Allowed tools so far: ${skill.allowedTools.join(', ')}` : '',
+        currentValue ? `Current value of this field:\n${currentValue}` : '',
+        hint ? `User hint: ${hint}` : '',
+      ].filter(Boolean);
+      const userPrompt = `Context:\n${ctxLines.join('\n')}\n\nProvide the new value for "${field}" now.`;
+
+      let raw = '';
+      if (authMode === 'subscription') {
+        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const modelId = getModelId('claude') || getModelId('anthropic');
+        const stream = query({
+          prompt: userPrompt,
+          options: {
+            model: modelId,
+            systemPrompt: sysParts.join('\n'),
+            allowedTools: [],
+            permissionMode: 'bypassPermissions',
+          },
+        });
+        for await (const msg of stream) {
+          if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
+            for (const block of msg.message.content) {
+              if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
+            }
+          } else if (msg.type === 'result') break;
+        }
+      } else {
+        const key = getProviderKey('anthropic');
+        if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
+        const { default: Anthropic } = await import('@anthropic-ai/sdk');
+        const client = new Anthropic({ apiKey: key });
+        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const response = await client.messages.create({
+          model: modelId,
+          max_tokens: 1536,
+          system: sysParts.join('\n'),
+          messages: [{ role: 'user', content: userPrompt }],
+        });
+        for (const block of response.content || []) {
+          if (block.type === 'text') raw += block.text;
+        }
+      }
+
+      const value = raw.trim().replace(/^```[a-z]*\n?|\n?```$/g, '').trim();
+      res.json({ field, value });
+    } catch (err) {
+      console.error('skill draft error:', err);
+      if (!res.headersSent) res.status(500).json({ error: err?.message || 'Skill draft failed.' });
+    }
+  });
+
+  // --- IDE file ops: sandboxed read/write/list under a .claude/* folder ---
+  // Powers the "Editor" mode of the Agent/Skill creators. Every op takes an
+  // absolute `root` (the agent/skill folder) plus a `relPath` within it. To
+  // keep this from becoming an arbitrary-filesystem API, `root` MUST contain a
+  // `.claude` path segment, and the resolved target MUST stay inside `root`.
+  const FS_MAX_ENTRIES = 2000;
+  function resolveClaudeTarget(root, relPath = '') {
+    if (!root || typeof root !== 'string') throw Object.assign(new Error('Missing root.'), { status: 400 });
+    const normRoot = path.resolve(root);
+    const segs = normRoot.split(/[\\/]+/);
+    if (!segs.includes('.claude')) {
+      throw Object.assign(new Error('root must live under a .claude folder.'), { status: 400 });
+    }
+    const target = path.resolve(normRoot, relPath || '');
+    const rel = path.relative(normRoot, target);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw Object.assign(new Error('Path escapes the sandbox root.'), { status: 400 });
+    }
+    return { normRoot, target };
+  }
+
+  async function buildTree(absDir, relBase, budget) {
+    let entries;
+    try {
+      entries = await fs.readdir(absDir, { withFileTypes: true });
+    } catch (e) {
+      if (e?.code === 'ENOENT') return [];
+      throw e;
+    }
+    entries.sort((a, b) => {
+      // dirs first, then files, each alphabetical
+      if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    const out = [];
+    for (const ent of entries) {
+      if (ent.name === '.git' || ent.name === 'node_modules') continue;
+      if (budget.count >= FS_MAX_ENTRIES) break;
+      budget.count++;
+      const relPath = relBase ? `${relBase}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) {
+        out.push({
+          name: ent.name,
+          path: relPath,
+          type: 'dir',
+          children: await buildTree(path.join(absDir, ent.name), relPath, budget),
+        });
+      } else if (ent.isFile()) {
+        out.push({ name: ent.name, path: relPath, type: 'file' });
+      }
+    }
+    return out;
+  }
+
+  app.post('/api/fs/tree', async (req, res) => {
+    try {
+      const { root } = req.body || {};
+      const { normRoot } = resolveClaudeTarget(root);
+      const budget = { count: 0 };
+      const tree = await buildTree(normRoot, '', budget);
+      res.json({ root: normRoot, tree, truncated: budget.count >= FS_MAX_ENTRIES });
+    } catch (err) {
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to read tree.' });
+    }
+  });
+
+  app.post('/api/fs/read', async (req, res) => {
+    try {
+      const { root, relPath } = req.body || {};
+      const { target } = resolveClaudeTarget(root, relPath);
+      const stat = await fs.stat(target);
+      if (!stat.isFile()) return res.status(400).json({ error: 'Not a file.' });
+      if (stat.size > 2 * 1024 * 1024) return res.status(413).json({ error: 'File too large to edit here (>2 MB).' });
+      const buf = await fs.readFile(target);
+      // Reject binary-ish content so Monaco doesn't choke on a blob.
+      if (buf.includes(0)) return res.status(415).json({ error: 'Binary file — not editable.' });
+      res.json({ content: buf.toString('utf8') });
+    } catch (err) {
+      if (err?.code === 'ENOENT') return res.status(404).json({ error: 'File not found.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to read file.' });
+    }
+  });
+
+  app.post('/api/fs/write', async (req, res) => {
+    try {
+      const { root, relPath, content } = req.body || {};
+      if (typeof content !== 'string') return res.status(400).json({ error: 'Missing content.' });
+      const { target } = resolveClaudeTarget(root, relPath);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, content, 'utf8');
+      res.json({ ok: true, path: target });
+    } catch (err) {
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to write file.' });
+    }
+  });
+
+  app.post('/api/fs/create', async (req, res) => {
+    try {
+      const { root, relPath, kind = 'file' } = req.body || {};
+      if (!relPath) return res.status(400).json({ error: 'Missing relPath.' });
+      const { target } = resolveClaudeTarget(root, relPath);
+      if (kind === 'dir') {
+        await fs.mkdir(target, { recursive: true });
+      } else {
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        // Don't clobber an existing file.
+        const fh = await fs.open(target, 'wx').catch(e => { if (e?.code === 'EEXIST') return null; throw e; });
+        if (!fh) return res.status(409).json({ error: 'A file with that name already exists.' });
+        await fh.close();
+      }
+      res.json({ ok: true, path: target });
+    } catch (err) {
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to create entry.' });
+    }
+  });
+
+  app.post('/api/fs/delete', async (req, res) => {
+    try {
+      const { root, relPath } = req.body || {};
+      if (!relPath) return res.status(400).json({ error: 'Missing relPath.' });
+      const { normRoot, target } = resolveClaudeTarget(root, relPath);
+      if (target === normRoot) return res.status(400).json({ error: 'Refusing to delete the root folder here.' });
+      await fs.rm(target, { recursive: true, force: true });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to delete entry.' });
+    }
+  });
+
+  app.post('/api/fs/rename', async (req, res) => {
+    try {
+      const { root, relPath, newRelPath } = req.body || {};
+      if (!relPath || !newRelPath) return res.status(400).json({ error: 'Missing relPath or newRelPath.' });
+      const { target: from } = resolveClaudeTarget(root, relPath);
+      const { target: to } = resolveClaudeTarget(root, newRelPath);
+      await fs.mkdir(path.dirname(to), { recursive: true });
+      await fs.rename(from, to);
+      res.json({ ok: true, path: to });
+    } catch (err) {
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to rename entry.' });
+    }
+  });
+
   // --- Agent runs: actually execute an agent against a card ---
   // Streams the Vercel AI data-stream protocol so the renderer can chunk text
   // into the card's transcript live. Tool calls and tool results are formatted
@@ -1146,7 +1411,7 @@ function start() {
       const allowed = Array.isArray(agent.allowedTools) ? agent.allowedTools : [];
       const cwd = (agent.workingDir && typeof agent.workingDir === 'string') ? agent.workingDir : undefined;
 
-      writeText(`• Agent: ${agent.name || agent.slug}\n• Model: ${modelOverride || 'inherit'}\n• Tools: ${allowed.join(', ') || '(none)'}\n• Cwd: ${cwd || '(default)'}\n\n`);
+      writeText(`• Agent: ${agent.name || agent.slug}\n• Model: ${modelOverride || 'inherit'}\n• Tools: ${allowed.join(', ') || '(none)'}\n• Skills: all installed (~/.claude/skills + project)\n• Cwd: ${cwd || '(default)'}\n\n`);
 
       const stream = query({
         prompt: taskPrompt,
@@ -1154,6 +1419,13 @@ function start() {
           model: modelOverride,
           systemPrompt: agent.systemPrompt,
           allowedTools: allowed,
+          // Make every installed skill discoverable + invocable by any board
+          // agent. Per the Agent SDK, `skills: 'all'` is the single switch that
+          // turns skills on — it also wires the Skill tool, so we don't add it
+          // to each agent's allowedTools. settingSources loads ~/.claude (user)
+          // and the project's .claude (skills, subagents, CLAUDE.md).
+          skills: 'all',
+          settingSources: ['user', 'project'],
           permissionMode: 'bypassPermissions',
           cwd,
           abortController: controller,
@@ -1588,6 +1860,42 @@ Be specific and faithful to what is actually visible. Do not invent details. If 
     } catch (e) {
       console.error('Vision OCR error:', e);
       res.status(500).json({ error: e?.message || 'Vision analysis failed' });
+    }
+  });
+
+  // --- Embeddings: Gemini text embeddings, batched ---
+  // The key lives here in main (encrypted keystore), so embedding never depends
+  // on the renderer's in-memory key — which a hot-reload or boot race can wipe
+  // mid-job. Accepts { contents: string[] }, returns { embeddings: number[][] }.
+  // Upstream rate-limit / error statuses are propagated so the renderer can
+  // back off and retry.
+  app.post('/api/embeddings', async (req, res) => {
+    try {
+      const { contents } = req.body || {};
+      if (!Array.isArray(contents) || contents.length === 0) {
+        return res.status(400).json({ error: 'contents (non-empty array of strings) is required' });
+      }
+      const key = getProviderKey('gemini');
+      if (!key) return res.status(400).json({ error: 'Gemini key not configured. Add it in the Models tab.' });
+
+      const { GoogleGenAI } = await import('@google/genai');
+      const client = new GoogleGenAI({ apiKey: key });
+      const result = await client.models.embedContent({
+        model: 'gemini-embedding-001',
+        contents,
+      });
+      const embeddings = (result.embeddings || []).map(e => e.values || []);
+      res.json({ embeddings });
+    } catch (e) {
+      // Surface the upstream HTTP status (notably 429) so the client backs off.
+      let status = Number(e?.status);
+      if (!Number.isFinite(status)) {
+        const m = String(e?.message || '').match(/"code"\s*:\s*(\d{3})|\b(429|500|503)\b/);
+        status = m ? Number(m[1] || m[2]) : 500;
+      }
+      if (!(status >= 400 && status < 600)) status = 500;
+      console.error('Embeddings error:', e?.message || e);
+      res.status(status).json({ error: e?.message || 'Embedding failed' });
     }
   });
 

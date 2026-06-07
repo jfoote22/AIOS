@@ -5,13 +5,17 @@ import {
   Bot, User as UserIcon, Search, Sparkles, Loader2,
 } from 'lucide-react';
 import {
-  importFromFile, listImports, deleteImport,
+  importFromFile, listImportsMeta, getImport, deleteImport,
   indexUnindexed, estimateIndexCost, listChunkCounts,
-  type ImportedConversation, type ImportProvider, type ImportResult, type IndexProgress,
+  type ImportedConversation, type ImportMeta, type ImportProvider, type ImportResult, type IndexProgress,
 } from '../lib/imports';
 import { isGeminiReady, onGeminiReadyChange } from '../lib/ai';
 
 type FilterId = 'all' | ImportProvider;
+
+// Some imported conversations run to many thousands of messages; rendering them
+// all locks the modal. Cap the preview — everything is still indexed.
+const VIEWER_MSG_CAP = 800;
 
 const PROVIDER_LABEL: Record<ImportProvider, string> = {
   claude: 'Claude',
@@ -25,14 +29,14 @@ const PROVIDER_ACCENT: Record<ImportProvider, string> = {
 
 export default function ImportsTab() {
   const fileRef = useRef<HTMLInputElement>(null);
-  const [items, setItems] = useState<ImportedConversation[]>([]);
+  const [items, setItems] = useState<ImportMeta[]>([]);
   const [chunkCounts, setChunkCounts] = useState<Map<string, number>>(new Map());
   const [filter, setFilter] = useState<FilterId>('all');
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ImportResult | null>(null);
-  const [open, setOpen] = useState<ImportedConversation | null>(null);
+  const [open, setOpen] = useState<ImportMeta | null>(null);
   const [aiReady, setAiReady] = useState(isGeminiReady());
   const [indexPrompt, setIndexPrompt] = useState<{ conversations: number; chunks: number; approxTokens: number } | null>(null);
   const [indexing, setIndexing] = useState<IndexProgress | null>(null);
@@ -43,7 +47,7 @@ export default function ImportsTab() {
 
   const refresh = async () => {
     try {
-      const [list, counts] = await Promise.all([listImports(), listChunkCounts()]);
+      const [list, counts] = await Promise.all([listImportsMeta(), listChunkCounts()]);
       setItems(list);
       setChunkCounts(counts);
     } catch (e: any) { setError(e?.message ?? String(e)); }
@@ -121,8 +125,9 @@ export default function ImportsTab() {
     return items.filter(i => {
       if (filter !== 'all' && i.provider !== filter) return false;
       if (!q) return true;
-      if (i.title.toLowerCase().includes(q)) return true;
-      return i.messages.some(m => m.content.toLowerCase().includes(q));
+      // Titles only — message bodies aren't loaded here (they'd be huge). Use
+      // Second Brain's semantic search to find moments inside conversations.
+      return i.title.toLowerCase().includes(q);
     });
   }, [items, filter, query]);
 
@@ -232,7 +237,7 @@ export default function ImportsTab() {
           <input
             value={query}
             onChange={e => setQuery(e.target.value)}
-            placeholder="Search titles and message text…"
+            placeholder="Search titles…"
             className="w-full pl-8 pr-3 py-1.5 rounded-md bg-zinc-900/60 border border-zinc-800 text-[12px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/60"
           />
         </div>
@@ -257,7 +262,7 @@ export default function ImportsTab() {
                   <div className="text-[11px] text-zinc-500 flex items-center gap-3 mt-0.5">
                     <span className="flex items-center gap-1">
                       <MessageSquare className="w-3 h-3" />
-                      {c.messages.length}
+                      {c.messageCount}
                     </span>
                     <span>{formatDate(c.updatedAt)}</span>
                     {chunkCounts.has(c.id) ? (
@@ -286,7 +291,7 @@ export default function ImportsTab() {
       <AnimatePresence>
         {open && (
           <ConversationViewer
-            conversation={open}
+            meta={open}
             onClose={() => setOpen(null)}
             onDelete={() => onDelete(open.id)}
           />
@@ -426,12 +431,26 @@ function EmptyState({ hasItems }: { hasItems: boolean }) {
 }
 
 function ConversationViewer({
-  conversation, onClose, onDelete,
+  meta, onClose, onDelete,
 }: {
-  conversation: ImportedConversation;
+  meta: ImportMeta;
   onClose: () => void;
   onDelete: () => void;
 }) {
+  // The list only holds metadata. Fetch the full conversation (with messages)
+  // when the viewer opens, so a huge thread is loaded only on demand.
+  const [conversation, setConversation] = useState<ImportedConversation | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setConversation(null); setLoadErr(null);
+    getImport(meta.id)
+      .then(c => { if (alive) setConversation(c); })
+      .catch(e => { if (alive) setLoadErr(e?.message ?? String(e)); });
+    return () => { alive = false; };
+  }, [meta.id]);
+
+  const messages = conversation?.messages ?? [];
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -449,11 +468,11 @@ function ConversationViewer({
           className="my-auto w-full max-w-3xl bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden"
         >
           <header className="h-14 px-5 flex items-center gap-3 border-b border-zinc-800 bg-zinc-900/30">
-            <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${PROVIDER_ACCENT[conversation.provider]}`}>
-              {PROVIDER_LABEL[conversation.provider]}
+            <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${PROVIDER_ACCENT[meta.provider]}`}>
+              {PROVIDER_LABEL[meta.provider]}
             </span>
-            <h3 className="text-sm font-semibold text-zinc-100 truncate flex-1">{conversation.title}</h3>
-            <span className="text-[11px] text-zinc-500">{formatDate(conversation.updatedAt)}</span>
+            <h3 className="text-sm font-semibold text-zinc-100 truncate flex-1">{meta.title}</h3>
+            <span className="text-[11px] text-zinc-500">{formatDate(meta.updatedAt)}</span>
             <button
               onClick={onDelete}
               title="Delete"
@@ -471,7 +490,21 @@ function ConversationViewer({
           </header>
 
           <div className="max-h-[70vh] overflow-y-auto px-5 py-4 space-y-3">
-            {conversation.messages.map((m, idx) => (
+            {loadErr && (
+              <div className="text-[12px] text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-3 py-2">{loadErr}</div>
+            )}
+            {!conversation && !loadErr && (
+              <div className="flex items-center gap-2 text-[12px] text-zinc-400 py-6 justify-center">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading conversation…
+              </div>
+            )}
+            {messages.length > VIEWER_MSG_CAP && (
+              <div className="text-[11px] text-amber-300/80 bg-amber-500/10 border border-amber-500/30 rounded-md px-3 py-2">
+                Showing the first {VIEWER_MSG_CAP.toLocaleString()} of {messages.length.toLocaleString()} messages.
+                All of them are still indexed for Second Brain.
+              </div>
+            )}
+            {messages.slice(0, VIEWER_MSG_CAP).map((m, idx) => (
               <div key={idx} className="flex gap-3">
                 <div className={`shrink-0 mt-0.5 w-7 h-7 rounded-md flex items-center justify-center border ${
                   m.role === 'user'

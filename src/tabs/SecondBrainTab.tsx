@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject, type LinkObject } from 'react-force-graph-2d';
-import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle, Search } from 'lucide-react';
+import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle, Search, Plus } from 'lucide-react';
 import * as db from '../lib/db';
 import {
   embedText, cosineSimilarity, chatWithVault, isGeminiReady, onGeminiReadyChange, buildEmbedSource,
@@ -13,7 +13,7 @@ import {
   DEFAULT_SIMILARITY_THRESHOLD, DEFAULT_SIMILAR_TOP_K, DEFAULT_HUB_THRESHOLD,
   type BrainNode, type BrainLink, type BrainGraph,
 } from '../lib/graph';
-import { listImports, listAllChunks, onImportsChange, deleteImport, type ImportedConversation, type ImportChunk } from '../lib/imports';
+import { listImportsMeta, getImport, listAllChunks, onImportsChange, deleteImport, type ImportMeta, type ImportChunk } from '../lib/imports';
 import { setSeed as setDeepDiveSeed } from '../lib/deepdiveSeed';
 import { onDeepDivesChange } from '../lib/deepdiveStore';
 import { onSnippetsChange, emitSnippetsChange } from '../lib/snippetStore';
@@ -22,6 +22,12 @@ import { navigateTo } from '../lib/navigate';
 import SnippetEditor, { type CapturedItem } from '../components/SnippetEditor';
 
 interface ChatMessage extends ChatTurn { citedIds?: string[]; }
+
+function providerLabel(p: string): string {
+  if (p === 'claude') return 'Claude';
+  if (p === 'chatgpt') return 'ChatGPT';
+  return p || 'Import';
+}
 
 // Network-pulse animation timing. The wave is the ONLY animation — there is
 // no always-on continuous particle flow (that read as constant churn, with a
@@ -47,7 +53,7 @@ const CLUSTER_RING_PALETTE = ['#f0abfc', '#fca5a5', '#fcd34d', '#86efac', '#7dd3
 export default function SecondBrainTab({ active = true }: { active?: boolean }) {
   const [snippets, setSnippets] = useState<any[]>([]);
   const [deepDives, setDeepDives] = useState<any[]>([]);
-  const [imports, setImports] = useState<ImportedConversation[]>([]);
+  const [imports, setImports] = useState<ImportMeta[]>([]);
   const [chunks, setChunks] = useState<ImportChunk[]>([]);
   const [graph, setGraph] = useState<BrainGraph>({ nodes: [], links: [] });
   const [focusedNode, setFocusedNode] = useState<BrainNode | null>(null);
@@ -58,6 +64,10 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const [aiReady, setAiReady] = useState<boolean>(isGeminiReady());
   const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
   const [nodeMenu, setNodeMenu] = useState<{ node: BrainNode; x: number; y: number } | null>(null);
+  // Right-click on empty canvas → "create neuron here" menu. Carries both the
+  // screen position (to place the menu) and the graph coords (where the new
+  // node should land).
+  const [bgMenu, setBgMenu] = useState<{ x: number; y: number; gx: number; gy: number } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<BrainNode | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [backfill, setBackfill] = useState<{ done: number; total: number } | null>(null);
@@ -68,6 +78,15 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const [searchQuery, setSearchQuery] = useState('');
   const [queryEmbedding, setQueryEmbedding] = useState<number[] | null>(null);
   const [isSemanticSearching, setIsSemanticSearching] = useState(false);
+  // How many connection-layers out from the search anchors to reveal in the
+  // graph. 1 = anchors + their direct connections, 2 = + the next layer, etc.
+  const [revealDepth, setRevealDepth] = useState(1);
+  useEffect(() => {
+    db.getMeta<number>('second-brain-reveal-depth')
+      .then(d => { if (typeof d === 'number' && d >= 1) setRevealDepth(d); })
+      .catch(() => {});
+  }, []);
+  useEffect(() => { db.setMeta('second-brain-reveal-depth', revealDepth).catch(() => {}); }, [revealDepth]);
 
   // Live editable copy of the focused snippet. Kept as a synchronous mirror so
   // typing in the editor reflects instantly (the graph reload is debounced).
@@ -80,7 +99,9 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const [showPhysics, setShowPhysics] = useState(false);
   useEffect(() => {
     db.getMeta<PhysicsSettings>('second-brain-physics')
-      .then(p => { if (p) setPhysics({ ...DEFAULT_PHYSICS, ...p }); })
+      // Force the (now hidden) hub threshold to 12 regardless of any value a
+      // previously-saved physics blob carried.
+      .then(p => { if (p) setPhysics({ ...DEFAULT_PHYSICS, ...p, pulseHubThreshold: 12 }); })
       .catch(() => {});
   }, []);
   useEffect(() => { db.setMeta('second-brain-physics', physics).catch(() => {}); }, [physics]);
@@ -136,6 +157,10 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
 
   const fgRef = useRef<ForceGraphMethods | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Graph coords for freshly created neurons, keyed by node id, so the next
+  // graph rebuild drops them where the user asked (right-click position) rather
+  // than at the d3 origin.
+  const newNodePosRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   // Latest rendered graph — react-force-graph mutates these node objects in
   // place with x/y/vx/vy, so this ref always holds live positions we can carry
@@ -151,7 +176,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       const [snips, dds, imps, chks] = await Promise.all([
         db.getAllSnippets<any>(),
         db.getAllThreads<any>(),
-        listImports(),
+        listImportsMeta(),   // metadata only — never loads message bodies
         listAllChunks(),
       ]);
       setSnippets(snips);
@@ -227,6 +252,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   // Compute a conversation-level centroid (mean of chunk embeddings) so
   // imports participate in semantic similarity links the same way snippets do.
   useEffect(() => {
+   try {
     const centroids = new Map<string, number[]>();
     if (chunks.length) {
       const groups = new Map<string, number[][]>();
@@ -284,7 +310,19 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
         if (cl) { n.x = cl.x + (Math.random() - 0.5) * 20; n.y = cl.y + (Math.random() - 0.5) * 20; }
       }
     }
+    // Manually-created neurons: drop them exactly where the user right-clicked.
+    for (const n of next.nodes as any[]) {
+      const seed = newNodePosRef.current.get(n.id);
+      if (seed && typeof n.x !== 'number') {
+        n.x = seed.x; n.y = seed.y;
+        newNodePosRef.current.delete(n.id);
+      }
+    }
     setGraph(next);
+   } catch (e) {
+     // Never let a graph-build failure unmount the tab — keep the prior graph.
+     console.error('Second Brain graph build failed:', e);
+   }
   }, [snippets, deepDives, imports, chunks, connOpts, clusterDefs, collapsedSet]);
 
   // Plan the breadth-first pulse wave: Layer 1 = hubs (≥ hubThreshold links),
@@ -478,8 +516,8 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
         ...chunkRanked.slice(0, TOP_CHUNKS).filter(r => r.sim >= 0.4).map(r => ({
           id: `chunk:${r.chunk.id}`,
           title: r.chunk.conversationTitle || '(untitled)',
-          summary: `Turn ${r.chunk.turnIndex} of ${r.chunk.provider === 'claude' ? 'Claude' : 'ChatGPT'} chat`,
-          category: r.chunk.provider === 'claude' ? 'Claude' : 'ChatGPT',
+          summary: `Turn ${r.chunk.turnIndex} of ${providerLabel(r.chunk.provider)}`,
+          category: providerLabel(r.chunk.provider),
           source: 'Imported',
           tags: [],
           extractedText: r.chunk.text,
@@ -517,6 +555,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   // imports) plus a keyword fallback over label/summary/tags/extractedText.
   // Returns null when there's no active query so the graph renders normally.
   const SEARCH_SIM_THRESHOLD = 0.5;
+  const SEARCH_ANCHOR_SIM = 0.62; // strong enough to anchor a connection-layer reveal
   const searchResults = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (q.length < 2) return null;
@@ -533,8 +572,48 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       return { node: n, sim, kw: keyword(n) };
     }).filter(x => x.sim >= SEARCH_SIM_THRESHOLD || x.kw)
       .sort((a, b) => b.sim - a.sim);
-    return { results: scored.map(x => x.node), ids: new Set(scored.map(x => x.node.id)) };
+    // Anchors = literal keyword hits + very strong semantic matches. These seed
+    // the connection-layer reveal; weaker matches only surface if they're
+    // graph-connected within `revealDepth` hops. Fall back to the single best
+    // match so a search never reveals nothing.
+    const anchorIds = new Set(scored.filter(x => x.kw || x.sim >= SEARCH_ANCHOR_SIM).map(x => x.node.id));
+    if (anchorIds.size === 0 && scored[0]) anchorIds.add(scored[0].node.id);
+    return { results: scored.map(x => x.node), ids: new Set(scored.map(x => x.node.id)), anchorIds };
   }, [searchQuery, queryEmbedding, graph]);
+
+  // Connection-layer reveal: BFS outward from the search anchors over the
+  // graph's (similarity) links, layer by layer, up to `revealDepth` hops.
+  // layerIds[0] = anchors (the matches), layerIds[1] = direct connections, etc.
+  // Returns plain id sets/lists so it can sit before nodeColor without TDZ on
+  // the later nodeById/adjacency memos (it builds its own adjacency inline).
+  const reveal = useMemo(() => {
+    if (!searchResults) return null;
+    const idOf = (x: any) => (x && typeof x === 'object' ? x.id : x);
+    const adj = new Map<string, Set<string>>();
+    for (const l of graph.links as any[]) {
+      const s = idOf(l.source), t = idOf(l.target);
+      if (!s || !t) continue;
+      if (!adj.has(s)) adj.set(s, new Set());
+      if (!adj.has(t)) adj.set(t, new Set());
+      adj.get(s)!.add(t);
+      adj.get(t)!.add(s);
+    }
+    const seen = new Set<string>(searchResults.anchorIds);
+    const layerIds: string[][] = [Array.from(searchResults.anchorIds)];
+    let frontier = layerIds[0];
+    for (let d = 0; d < revealDepth && frontier.length; d++) {
+      const next: string[] = [];
+      for (const u of frontier) {
+        for (const v of adj.get(u) ?? []) {
+          if (seen.has(v)) continue;
+          seen.add(v); next.push(v);
+        }
+      }
+      if (next.length) layerIds.push(next);
+      frontier = next;
+    }
+    return { ids: seen, anchorIds: searchResults.anchorIds, layerIds };
+  }, [searchResults, graph, revealDepth]);
 
   // Node color: cited > focused > search-dim > grouped (by category)
   const groupColors = useMemo(() => {
@@ -549,10 +628,14 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     const node = n as BrainNode;
     if (citedIds.has(node.id)) return '#fde047'; // bright yellow for cited
     if (focusedNode?.id === node.id) return '#ffffff';
-    // When a search is active, dim everything that doesn't match.
-    if (searchResults && !searchResults.ids.has(node.id)) return 'rgba(110,114,128,0.18)';
+    // When a search is active, reveal the anchors (matches) brightly and their
+    // connection layers in normal color; dim everything outside the revealed set.
+    if (reveal) {
+      if (reveal.anchorIds.has(node.id)) return '#fde047'; // the search matches
+      if (!reveal.ids.has(node.id)) return 'rgba(110,114,128,0.18)';
+    }
     return groupColors[node.group] || '#9ca3af';
-  }, [citedIds, focusedNode, groupColors, searchResults]);
+  }, [citedIds, focusedNode, groupColors, reveal]);
 
   // A stable ring color per doc cluster, and a lookup of which chunk neurons
   // (when their cluster is expanded) should wear that ring so you can tell at a
@@ -611,17 +694,40 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const drawNode = useCallback((n: NodeObject, ctx: CanvasRenderingContext2D, scale: number) => {
     const node = n as unknown as BrainNode;
     if (node.kind === 'cluster') { drawClusterNode(n, ctx, scale); return; }
-    const ring = memberRing.get(node.id);
-    if (!ring) return;
     const x = (n as any).x, y = (n as any).y;
     if (typeof x !== 'number' || typeof y !== 'number') return;
     const baseR = Math.sqrt(Math.max(0, node.val || 1)) * 4;
-    ctx.beginPath();
-    ctx.arc(x, y, baseR + 3, 0, Math.PI * 2);
-    ctx.strokeStyle = ring;
-    ctx.lineWidth = 2 / scale;
-    ctx.stroke();
-  }, [drawClusterNode, memberRing]);
+
+    // Expanded-cluster member ring (static, in the cluster's color).
+    const ring = memberRing.get(node.id);
+    if (ring) {
+      ctx.beginPath();
+      ctx.arc(x, y, baseR + 3, 0, Math.PI * 2);
+      ctx.strokeStyle = ring;
+      ctx.lineWidth = 2 / scale;
+      ctx.stroke();
+    }
+
+    // Selection halo: a moderate-pace pulsing indigo ring so the focused neuron
+    // is unmistakable. Brightness eases 0.4 → 0.95 → 0.4 on a ~1.4s cycle, with
+    // a slight radius breath; a fainter outer ring adds a soft glow.
+    if (focusedNode?.id === node.id) {
+      const phase = (performance.now() % 1400) / 1400;
+      const t = (1 - Math.cos(phase * Math.PI * 2)) / 2; // eased 0 → 1 → 0
+      const alpha = 0.4 + 0.55 * t;
+      const ringR = baseR + 5 + 2 * t;
+      ctx.beginPath();
+      ctx.arc(x, y, ringR, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(129,140,248,${alpha})`; // indigo-400
+      ctx.lineWidth = 2.5 / scale;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, y, ringR + 2.5, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(129,140,248,${alpha * 0.35})`;
+      ctx.lineWidth = 1.5 / scale;
+      ctx.stroke();
+    }
+  }, [drawClusterNode, memberRing, focusedNode]);
 
   const linkColor = useCallback((l: LinkObject) => {
     const link = l as unknown as BrainLink;
@@ -678,12 +784,12 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       return;
     }
 
-    // Single click: focus + center/zoom. A cluster is a synthetic placeholder,
-    // so center/zoom on it but don't open the snippet-oriented detail panels.
-    if (node.kind !== 'cluster') setFocusedNode(node);
+    // Single click: focus (opens the detail panel — clusters get their own
+    // summary view) + center/zoom.
+    setFocusedNode(node);
     if (fgRef.current && typeof (n as any).x === 'number' && typeof (n as any).y === 'number') {
       fgRef.current.centerAt((n as any).x, (n as any).y, 600);
-      fgRef.current.zoom(2.4, 600);
+      fgRef.current.zoom(1.5, 600);
     }
   }, [expandCluster, collapseDoc]);
 
@@ -747,6 +853,34 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     db.putSnippet(next).then(() => emitSnippetsChange()).catch(e => console.error('Failed to persist snippet edit:', e));
   }, []);
 
+  // Create a blank neuron (an empty snippet). Optionally drop it at a graph
+  // position (right-click in empty space). Persisting + emitting with `newId`
+  // reuses the capture flow's auto-focus, so the editor opens on the new node
+  // ready to be named, typed into, and given images.
+  const createNeuron = useCallback((at?: { x: number; y: number }) => {
+    const id = Math.random().toString(36).slice(2, 11);
+    const item: CapturedItem = {
+      id,
+      image: '',
+      timestamp: Date.now(),
+      tags: [],
+      title: '',
+      summary: '',
+      source: '',
+      category: '',
+      entities: [],
+      subImages: [],
+      extractedText: '',
+      status: 'ready',
+    };
+    if (at) newNodePosRef.current.set(`snip:${id}`, at);
+    setNodeMenu(null);
+    setBgMenu(null);
+    db.putSnippet(item)
+      .then(() => emitSnippetsChange({ newId: id }))
+      .catch(e => console.error('Failed to create neuron:', e));
+  }, []);
+
   // Category suggestions for the snippet editor's datalist.
   const categories = useMemo(
     () => Array.from(new Set(snippets.map((s: any) => s.category).filter(Boolean))) as string[],
@@ -796,14 +930,14 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     }
   };
 
-  // Close the right-click menu on any outside interaction.
+  // Close the right-click menus on any outside interaction.
   useEffect(() => {
-    if (!nodeMenu) return;
-    const close = () => setNodeMenu(null);
+    if (!nodeMenu && !bgMenu) return;
+    const close = () => { setNodeMenu(null); setBgMenu(null); };
     window.addEventListener('click', close);
     window.addEventListener('keydown', close);
     return () => { window.removeEventListener('click', close); window.removeEventListener('keydown', close); };
-  }, [nodeMenu]);
+  }, [nodeMenu, bgMenu]);
 
   const stats = useMemo(() => {
     const snipCount = graph.nodes.filter(n => n.kind === 'snippet').length;
@@ -824,7 +958,16 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
             {stats.snipCount} snips · {stats.ddCount} deepdives{stats.clusterCount > 0 ? ` · ${stats.clusterCount} clusters` : ''} · {stats.categories} categories · {stats.linkCount} links
           </span>
         </div>
-        <button onClick={loadData} className="text-[10px] text-zinc-500 hover:text-indigo-400 uppercase tracking-widest">Refresh</button>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => createNeuron()}
+            title="Create a blank neuron, then name it and add text/images"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 text-indigo-300 text-[10px] font-bold uppercase tracking-widest transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />New Neuron
+          </button>
+          <button onClick={loadData} className="text-[10px] text-zinc-500 hover:text-indigo-400 uppercase tracking-widest">Refresh</button>
+        </div>
       </header>
 
       <div className="flex-1 min-h-0 flex overflow-hidden">
@@ -844,6 +987,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
             {leftView === 'ask' ? (
               <p className="text-[11px] text-zinc-500">Queries retrieve across all snippets and DeepDive sessions. Cited items light up in the graph.</p>
             ) : (
+              <>
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
                 <input type="text"
@@ -862,6 +1006,28 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
                   )}
                 </div>
               </div>
+              {searchResults && (
+                <div className="mt-3">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[9px] uppercase tracking-widest text-zinc-500 font-bold">Reveal connections</span>
+                    <span className="text-[10px] text-indigo-300 font-bold tabular-nums">
+                      {revealDepth} layer{revealDepth === 1 ? '' : 's'} · {reveal?.ids.size ?? 0} neuron{(reveal?.ids.size ?? 0) === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <input
+                    type="range" min={1} max={6} step={1}
+                    value={revealDepth}
+                    onChange={(e) => setRevealDepth(parseInt(e.target.value, 10))}
+                    title="How many connection layers to reveal outward from the matches"
+                    className="w-full h-1 accent-indigo-500 cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[8px] text-zinc-600 mt-0.5 uppercase tracking-wider">
+                    <span>Direct only</span>
+                    <span>Further out</span>
+                  </div>
+                </div>
+              )}
+              </>
             )}
           </div>
 
@@ -939,26 +1105,45 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               {searchResults && searchResults.results.length === 0 && (
                 <p className="text-xs text-zinc-500 italic px-2 py-4 text-center">No neurons match "{searchQuery}".</p>
               )}
-              {searchResults && searchResults.results.length > 0 && (
+              {searchResults && searchResults.results.length > 0 && reveal && (
                 <>
-                  <div className="px-2 pb-1 text-[10px] uppercase tracking-widest text-zinc-600 font-bold">
-                    {searchResults.results.length} match{searchResults.results.length === 1 ? '' : 'es'}
-                  </div>
-                  {searchResults.results.map(node => {
-                    const Icon = kindIcon(node.kind);
-                    const d: any = node.data || {};
+                  {reveal.layerIds.map((ids, layer) => {
+                    const layerNodes = ids.map(id => nodeById.get(id)).filter(Boolean) as BrainNode[];
+                    if (!layerNodes.length) return null;
+                    const heading = layer === 0 ? 'Matches' : layer === 1 ? 'Direct connections' : `Layer ${layer}`;
                     return (
-                      <button key={node.id} onClick={() => onNodeClick(node as any)}
-                        className={`w-full flex items-start gap-2 px-2.5 py-2 rounded-lg text-left transition-colors ${focusedNode?.id === node.id ? 'bg-indigo-600/20 border border-indigo-500/30' : 'hover:bg-zinc-800/60 border border-transparent'}`}>
-                        <Icon className="w-3.5 h-3.5 mt-0.5 shrink-0 text-indigo-300" />
-                        <div className="min-w-0 flex-1">
-                          <div className="text-[12px] font-semibold text-zinc-100 truncate">{node.label}</div>
-                          <div className="text-[10px] text-zinc-500 uppercase tracking-widest">{node.group}</div>
-                          {d.summary && <div className="text-[11px] text-zinc-400 leading-snug line-clamp-2 mt-0.5">{d.summary}</div>}
+                      <div key={layer} className="space-y-1.5">
+                        <div className={`px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-widest font-bold flex items-center gap-1.5 ${layer === 0 ? 'text-amber-300/80' : 'text-zinc-600'}`}>
+                          {layer > 0 && <span className="text-zinc-700">└</span>}
+                          {heading}
+                          <span className="text-zinc-600 font-normal">· {layerNodes.length}</span>
                         </div>
-                      </button>
+                        {layerNodes.map(node => {
+                          const Icon = kindIcon(node.kind);
+                          const d: any = node.data || {};
+                          return (
+                            <button key={node.id} onClick={() => onNodeClick(node as any)}
+                              className={`w-full flex items-start gap-2 px-2.5 py-2 rounded-lg text-left transition-colors ${focusedNode?.id === node.id ? 'bg-indigo-600/20 border border-indigo-500/30' : 'hover:bg-zinc-800/60 border border-transparent'}`}>
+                              <Icon className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${layer === 0 ? 'text-amber-300' : 'text-indigo-300'}`} />
+                              <div className="min-w-0 flex-1">
+                                <div className="text-[12px] font-semibold text-zinc-100 truncate">{node.label}</div>
+                                <div className="text-[10px] text-zinc-500 uppercase tracking-widest">{node.group}</div>
+                                {d.summary && <div className="text-[11px] text-zinc-400 leading-snug line-clamp-2 mt-0.5">{d.summary}</div>}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
                     );
                   })}
+                  {(() => {
+                    const hidden = searchResults.results.filter(n => !reveal.ids.has(n.id)).length;
+                    return hidden > 0 ? (
+                      <div className="px-2 pt-2 text-[10px] text-zinc-600 italic leading-snug">
+                        {hidden} weaker match{hidden === 1 ? '' : 'es'} hidden — not connected within {revealDepth} layer{revealDepth === 1 ? '' : 's'}. Drag the slider to reveal more.
+                      </div>
+                    ) : null;
+                  })()}
                 </>
               )}
             </div>
@@ -1002,14 +1187,14 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               nodeCanvasObjectMode={(n) => {
                 const node = n as unknown as BrainNode;
                 if (node.kind === 'cluster') return 'replace' as any;
-                if (memberRing.has(node.id)) return 'after' as any;
+                if (memberRing.has(node.id) || focusedNode?.id === node.id) return 'after' as any;
                 return undefined as any;
               }}
               nodeCanvasObject={drawNode as any}
-              // Force continuous repaint only while a collapsed cluster is on
-              // screen, so its breathing animation runs; otherwise keep the
-              // default power-saving pause when the simulation is idle.
-              autoPauseRedraw={collapsedSet.size === 0}
+              // Force continuous repaint while a collapsed cluster's breathing
+              // animation OR the focused-neuron selection pulse needs to run;
+              // otherwise keep the default power-saving pause when idle.
+              autoPauseRedraw={collapsedSet.size === 0 && !focusedNode}
               linkColor={linkColor as any}
               linkWidth={(l) => Math.min(2.5, ((l as any).value ?? 1) * 0.4)}
               // No continuous emission — dots exist only as the BFS pulse wave
@@ -1032,7 +1217,17 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
                 if (node.kind !== 'cluster') setFocusedNode(node);
                 setNodeMenu({ node, x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY });
               }}
-              onBackgroundClick={() => { setFocusedNode(null); setNodeMenu(null); }}
+              onBackgroundClick={() => { setFocusedNode(null); setNodeMenu(null); setBgMenu(null); }}
+              onBackgroundRightClick={(e) => {
+                const ev = e as MouseEvent;
+                ev.preventDefault?.();
+                const rect = containerRef.current?.getBoundingClientRect();
+                const canvasX = ev.clientX - (rect?.left ?? 0);
+                const canvasY = ev.clientY - (rect?.top ?? 0);
+                const g = fgRef.current?.screen2GraphCoords(canvasX, canvasY) ?? { x: 0, y: 0 };
+                setNodeMenu(null);
+                setBgMenu({ x: ev.clientX, y: ev.clientY, gx: g.x, gy: g.y });
+              }}
               backgroundColor="rgba(0,0,0,0)"
               enableNodeDrag={true}
               minZoom={0.2}
@@ -1066,8 +1261,8 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
                 onClose={() => setFocusedNode(null)}
                 onAsk={askAboutFocused}
                 onDelete={() => setPendingDelete(focusedNode)}
-                onDeepDive={() => {
-                  const seed = nodeToSeed(focusedNode, chunks);
+                onDeepDive={async () => {
+                  const seed = await nodeToSeed(focusedNode, chunks);
                   if (!seed) return;
                   setDeepDiveSeed(seed);
                   setFocusedNode(null);
@@ -1103,6 +1298,23 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
                   <Trash2 className="w-3.5 h-3.5" /> Delete neuron
                 </button>
               )}
+            </div>
+          )}
+
+          {/* Empty-space right-click menu — create a neuron right where you clicked */}
+          {bgMenu && (
+            <div
+              className="fixed z-30 min-w-[180px] bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl py-1"
+              style={{ left: bgMenu.x, top: bgMenu.y }}
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => createNeuron({ x: bgMenu.gx, y: bgMenu.gy })}
+                className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-indigo-300 hover:bg-indigo-500/10 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> New neuron here
+              </button>
             </div>
           )}
 
@@ -1198,6 +1410,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
 function kindIcon(kind: BrainNode['kind']) {
   if (kind === 'snippet') return Scissors;
   if (kind === 'deepdive') return Compass;
+  if (kind === 'cluster') return Network;
   return DownloadIcon;
 }
 
@@ -1332,7 +1545,7 @@ const DEFAULT_PHYSICS: PhysicsSettings = {
   chargeStrength: -100,
   simThreshold: DEFAULT_SIMILARITY_THRESHOLD,
   maxLinks: DEFAULT_SIMILAR_TOP_K,
-  pulseHubThreshold: DEFAULT_HUB_THRESHOLD,
+  pulseHubThreshold: 12, // fixed; its slider is hidden from the Physics panel
 };
 
 function PhysicsPanel({
@@ -1408,14 +1621,6 @@ function PhysicsPanel({
       <div className="border-t border-zinc-800 pt-2.5 mt-1 space-y-3">
         <div className="text-[9px] uppercase tracking-widest text-zinc-600 font-bold">Connections</div>
         <SliderRow
-          label="Link threshold"
-          hint="lower = more connections between topics"
-          value={physics.simThreshold}
-          min={0.4} max={0.8} step={0.01}
-          decimals={2}
-          onChange={v => setPhysics(p => ({ ...p, simThreshold: v }))}
-        />
-        <SliderRow
           label="Max links / node"
           hint="how many connections each node can form"
           value={physics.maxLinks}
@@ -1437,13 +1642,6 @@ function PhysicsPanel({
 
       <div className="border-t border-zinc-800 pt-2.5 mt-1 space-y-2.5">
         <div className="text-[9px] uppercase tracking-widest text-zinc-600 font-bold">Network pulse</div>
-        <SliderRow
-          label="Hub threshold"
-          hint="min connections for a node to start a pulse (Layer 1)"
-          value={physics.pulseHubThreshold}
-          min={1} max={12} step={1}
-          onChange={v => setPhysics(p => ({ ...p, pulseHubThreshold: Math.round(v) }))}
-        />
         <div className="text-[9px] text-zinc-600 leading-snug">
           A wave ripples outward from the busiest neurons every 5s, flowing through up to {physics.maxLinks} layer{physics.maxLinks !== 1 ? 's' : ''} (set by “Max links / node”).
         </div>
@@ -1516,6 +1714,7 @@ function NeuronDetailPanel({
         {node.kind === 'snippet' && <Scissors className="w-3.5 h-3.5 text-indigo-300 shrink-0" />}
         {node.kind === 'deepdive' && <Compass className="w-3.5 h-3.5 text-indigo-300 shrink-0" />}
         {node.kind === 'import' && <DownloadIcon className="w-3.5 h-3.5 text-indigo-300 shrink-0" />}
+        {node.kind === 'cluster' && <Network className="w-3.5 h-3.5 text-indigo-300 shrink-0" />}
         <div className="min-w-0 flex-1">
           <div className="text-[9px] uppercase tracking-widest text-zinc-500">{node.group}</div>
           <div className="text-[12px] font-semibold text-zinc-100 truncate">{node.label}</div>
@@ -1539,6 +1738,7 @@ function NeuronDetailPanel({
         )}
         {node.kind === 'deepdive' && <DeepDiveBody data={node.data} />}
         {node.kind === 'import'   && <ImportBody data={node.data} allChunks={allChunks} />}
+        {node.kind === 'cluster'  && <ClusterBody data={node.data} />}
       </div>
 
       <footer className="px-3 py-3 border-t border-zinc-800 bg-zinc-900/40 shrink-0 flex items-center gap-2">
@@ -1557,7 +1757,7 @@ function NeuronDetailPanel({
         >
           Ask
         </button>
-        {node.kind !== 'snippet' && (
+        {node.kind !== 'snippet' && node.kind !== 'cluster' && (
           <button
             onClick={onDelete}
             className="px-3 py-2 rounded-md bg-red-600/10 hover:bg-red-600/20 border border-red-500/20 text-red-400 transition-colors"
@@ -1568,6 +1768,49 @@ function NeuronDetailPanel({
         )}
       </footer>
     </motion.div>
+  );
+}
+
+function ClusterBody({ data }: { data: any }) {
+  const members: any[] = data.members ?? [];
+  const summary = members.find(m => m.summary)?.summary || '';
+  const totalChars = members.reduce((a: number, m: any) => a + (m.extractedText?.length ?? 0), 0);
+  // Tags minus the synthetic doc-slug/origin tags is noisy; just show what's there.
+  const tags: string[] = members[0]?.tags ?? [];
+  return (
+    <>
+      <div className="text-[10px] uppercase tracking-widest text-zinc-500">Collapsed cluster · {members.length} parts</div>
+      {summary && <p className="text-zinc-300 leading-relaxed">{summary}</p>}
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <Field label="Parts" value={String(members.length)} />
+        <Field label="Total text" value={`${totalChars.toLocaleString()} chars`} />
+      </div>
+      {tags.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {tags.slice(0, 12).map((t, i) => (
+            <span key={i} className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-400">{t}</span>
+          ))}
+        </div>
+      )}
+      {members.length > 0 && (
+        <details open>
+          <summary className="text-[10px] uppercase tracking-wider text-zinc-500 cursor-pointer hover:text-zinc-300">All parts</summary>
+          <div className="mt-2 space-y-2">
+            {members.map((m: any, i: number) => (
+              <div key={i} className="rounded-md border border-zinc-800 bg-zinc-900/40 p-2">
+                <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
+                  Part {m.memoryPart ?? i + 1}/{m.memoryParts ?? members.length}
+                </div>
+                <div className="text-[11px] text-zinc-400 leading-snug whitespace-pre-wrap line-clamp-5">
+                  {m.extractedText || m.summary || '(no text)'}
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+      <p className="text-[10px] text-zinc-500">Double-click the node to expand this cluster into its chunks.</p>
+    </>
   );
 }
 
@@ -1599,23 +1842,38 @@ function DeepDiveBody({ data }: { data: any }) {
 
 function ImportBody({ data, allChunks }: { data: any; allChunks: ImportChunk[] }) {
   const indexed = allChunks.filter(c => c.conversationId === data.id).length;
-  const msgs = data.messages ?? [];
+  // `data` is lightweight metadata (no message bodies). Pull the first turns on
+  // demand so opening a 35k-message thread doesn't load it all into memory.
+  const [full, setFull] = useState<any>(null);
+  useEffect(() => {
+    let alive = true;
+    getImport(data.id).then(c => { if (alive) setFull(c); }).catch(() => {});
+    return () => { alive = false; };
+  }, [data.id]);
+  const msgs = full?.messages ?? [];
+  const count = data.messageCount ?? msgs.length;
   return (
     <>
       <div className="grid grid-cols-2 gap-2 text-[11px]">
-        <Field label="Provider" value={data.provider === 'claude' ? 'Claude' : 'ChatGPT'} />
-        <Field label="Messages" value={String(msgs.length)} />
+        <Field label="Provider" value={providerLabel(data.provider)} />
+        <Field label="Messages" value={String(count)} />
         <Field label="Created" value={data.createdAt ? new Date(data.createdAt).toLocaleDateString() : '—'} />
         <Field label="Indexed" value={indexed ? `${indexed} chunks` : 'no'} />
       </div>
       <details open>
         <summary className="text-[10px] uppercase tracking-wider text-zinc-500 cursor-pointer hover:text-zinc-300">First few turns</summary>
         <div className="mt-2 space-y-2">
-          {msgs.slice(0, 6).map((m: any, i: number) => (
-            <MessageRow key={i} role={m.role} content={m.content} />
-          ))}
-          {msgs.length > 6 && (
-            <div className="text-[10px] text-zinc-500 italic">…{msgs.length - 6} more</div>
+          {!full ? (
+            <div className="text-[10px] text-zinc-500 italic">Loading…</div>
+          ) : (
+            <>
+              {msgs.slice(0, 6).map((m: any, i: number) => (
+                <MessageRow key={i} role={m.role} content={m.content} />
+              ))}
+              {msgs.length > 6 && (
+                <div className="text-[10px] text-zinc-500 italic">…{msgs.length - 6} more</div>
+              )}
+            </>
           )}
         </div>
       </details>
@@ -1648,8 +1906,9 @@ function Field({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Build the seed payload that gets handed to DeepDives.
-function nodeToSeed(node: BrainNode, allChunks: ImportChunk[]) {
+// Build the seed payload that gets handed to DeepDives. Async because an import
+// node carries only metadata — its transcript is fetched on demand.
+async function nodeToSeed(node: BrainNode, allChunks: ImportChunk[]) {
   if (node.kind === 'snippet') {
     const s = node.data;
     const body = [
@@ -1668,13 +1927,22 @@ function nodeToSeed(node: BrainNode, allChunks: ImportChunk[]) {
   }
   if (node.kind === 'import') {
     const im = node.data;
-    const transcript = (im.messages ?? [])
+    const full = await getImport(im.id);
+    const transcript = (full?.messages ?? [])
       .map((m: any) => `${(m.role || '').toUpperCase()}: ${m.content}`)
-      .join('\n\n');
+      .join('\n\n')
+      .slice(0, 12000); // a giant conversation shouldn't blow up the DeepDive seed
     const indexed = allChunks.filter(c => c.conversationId === im.id).length;
-    const header = `Imported ${im.provider === 'claude' ? 'Claude' : 'ChatGPT'} conversation` +
+    const header = `Imported ${providerLabel(im.provider)} conversation` +
       (indexed ? ` (${indexed} indexed chunks).` : '.');
     return { title: im.title || node.label, source: header, body: transcript };
+  }
+  if (node.kind === 'cluster') {
+    const members: any[] = node.data?.members ?? [];
+    const summary = members.find(m => m.summary)?.summary || '';
+    const fullText = members.map(m => m.extractedText || '').filter(Boolean).join('\n\n---\n\n');
+    const body = [summary, fullText].filter(Boolean).join('\n\n');
+    return { title: node.data?.label || node.label, source: `clustered note (${members.length} parts)`, body: body || node.label };
   }
   return null;
 }

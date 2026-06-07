@@ -186,7 +186,7 @@ export default function SnippetEditor({
   // Latest item, so async callbacks (embed/analyze) merge onto fresh data.
   const itemRef = useRef(item);
   itemRef.current = item;
-  const extractedTextRef = useRef<HTMLPreElement | null>(null);
+  const extractedTextRef = useRef<HTMLTextAreaElement | null>(null);
   const [textSelection, setTextSelection] = useState('');
 
   const patch = (partial: Partial<CapturedItem>, options: { reembed?: boolean } = {}) => {
@@ -357,10 +357,22 @@ export default function SnippetEditor({
           </button>
         </div>
         <div className="space-y-3">
-          {/* Main capture */}
-          <div className="bg-zinc-800 rounded-2xl overflow-hidden border border-zinc-700 shadow-inner flex items-center justify-center max-h-[60vh]">
-            <img src={item.image} alt="High resolution capture" className="max-w-full max-h-[60vh] object-contain" />
-          </div>
+          {/* Main capture (omitted for manually-created neurons with no image) */}
+          {item.image && (
+            <div className="bg-zinc-800 rounded-2xl overflow-hidden border border-zinc-700 shadow-inner flex items-center justify-center max-h-[60vh]">
+              <img src={item.image} alt="High resolution capture" className="max-w-full max-h-[60vh] object-contain" />
+            </div>
+          )}
+          {/* Nothing captured yet — nudge toward Add Shot */}
+          {!item.image && item.subImages.length <= 1 && (item.addedShots ?? []).length === 0 && (
+            <button
+              onClick={requestAddShot}
+              className="w-full py-8 rounded-2xl border border-dashed border-zinc-700 text-zinc-600 hover:text-indigo-300 hover:border-indigo-500/40 text-xs uppercase tracking-widest transition-colors flex flex-col items-center gap-2"
+            >
+              <Plus className="w-5 h-5" />
+              Add an image
+            </button>
+          )}
 
           {/* Legacy extra captures (older snippets stored shots here, no text) */}
           {item.subImages.slice(1).map((img, i) => {
@@ -389,31 +401,29 @@ export default function SnippetEditor({
         </div>
       </section>
 
-      {/* 2. Extracted text — main capture first, then one block per added shot */}
-      {(item.extractedText || (item.addedShots ?? []).some(s => s.extractedText || s.status !== 'ready')) && (
-        <section>
-          <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Extracted Text</p>
-          {item.extractedText && (
-            <>
-              <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl max-h-64 overflow-y-auto">
-                <pre ref={extractedTextRef} className="text-xs text-zinc-300 whitespace-pre-wrap font-mono select-text" onMouseUp={() => {
-                  const sel = window.getSelection();
-                  const node = extractedTextRef.current;
-                  if (!sel || !node || sel.isCollapsed) { setTextSelection(''); return; }
-                  const text = sel.toString();
-                  if (text && node.contains(sel.anchorNode) && node.contains(sel.focusNode)) setTextSelection(text);
-                  else setTextSelection('');
-                }}>{item.extractedText}</pre>
-              </div>
-              <div className="mt-2 flex items-center justify-between gap-3">
-                <button onClick={() => copyToClipboard(item.extractedText)} className="text-[10px] text-indigo-400 hover:text-indigo-300 uppercase tracking-widest">Copy all text</button>
-                <button disabled={!textSelection.trim()} onClick={() => { const sel = textSelection; setTextSelection(''); window.getSelection()?.removeAllRanges(); extractChunk(sel); }}
-                  className="text-[10px] px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-lg text-white uppercase tracking-widest font-bold transition-colors">
-                  Extract Selection
-                </button>
-              </div>
-            </>
-          )}
+      {/* 2. Text — editable body. OCR fills it for captures; type or paste it
+            for manually-created neurons. Then one block per added shot. */}
+      <section>
+        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Text</p>
+        <textarea
+          ref={extractedTextRef}
+          value={item.extractedText}
+          onChange={(e) => patch({ extractedText: e.target.value }, { reembed: true })}
+          onSelect={(e) => {
+            const ta = e.currentTarget;
+            setTextSelection(ta.value.slice(ta.selectionStart ?? 0, ta.selectionEnd ?? 0));
+          }}
+          placeholder="Paste or type this neuron's text…"
+          rows={6}
+          className="w-full resize-y bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-xs text-zinc-300 font-mono leading-relaxed focus:outline-none focus:ring-1 focus:ring-indigo-500"
+        />
+        <div className="mt-2 flex items-center justify-between gap-3">
+          <button disabled={!item.extractedText} onClick={() => copyToClipboard(item.extractedText)} className="text-[10px] text-indigo-400 hover:text-indigo-300 disabled:text-zinc-700 disabled:cursor-not-allowed uppercase tracking-widest">Copy all text</button>
+          <button disabled={!textSelection.trim()} onClick={() => { const sel = textSelection; setTextSelection(''); extractedTextRef.current?.setSelectionRange(0, 0); extractChunk(sel); }}
+            className="text-[10px] px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-lg text-white uppercase tracking-widest font-bold transition-colors">
+            Extract Selection
+          </button>
+        </div>
 
           {/* One section per added shot */}
           {(item.addedShots ?? []).map((shot, i) => (
@@ -440,8 +450,7 @@ export default function SnippetEditor({
               </div>
             )
           ))}
-        </section>
-      )}
+      </section>
 
       {/* 3. Tags — drag chips to reorder */}
       <section>

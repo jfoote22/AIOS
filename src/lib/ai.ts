@@ -273,17 +273,128 @@ export async function analyzeMarkdown(text: string): Promise<MarkdownAnalysis> {
   return parsed;
 }
 
-export async function embedText(text: string): Promise<number[]> {
-  const ai = getClient();
-  const trimmed = (text || '').slice(0, 8000);
-  if (!trimmed) return [];
-  const result = await ai.models.embedContent({
-    model: 'gemini-embedding-001',
-    contents: trimmed,
+const EMBED_MAX_CHARS = 8000;        // per-item cap (model input limit)
+// Batch several chunks per request to stay well under the requests-per-minute
+// quota. Bounded by both item count and total chars so a request never gets
+// large enough to be rejected.
+const EMBED_BATCH_ITEMS = 16;
+const EMBED_BATCH_CHARS = 50_000;
+const EMBED_MAX_RETRIES = 8;
+
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+/** Pull an HTTP status out of a genai SDK error (number field or JSON message). */
+function embedErrorStatus(e: any): number | null {
+  if (typeof e?.status === 'number') return e.status;
+  if (typeof e?.code === 'number') return e.code;
+  const msg = String(e?.message ?? e ?? '');
+  const m = msg.match(/"code"\s*:\s*(\d{3})/) || msg.match(/\b(400|429|500|503)\b/);
+  return m ? Number(m[1]) : null;
+}
+
+const isQuotaOrTransient = (s: number | null) => s === 429 || s === 500 || s === 503;
+
+/** Backoff delay; honors a server-provided `retryDelay: "37s"` when present. */
+function embedRetryDelayMs(e: any, attempt: number): number {
+  const msg = String(e?.message ?? '');
+  const m = msg.match(/retryDelay["']?\s*[:=]\s*["']?(\d+(?:\.\d+)?)s/i);
+  if (m) return Math.ceil(parseFloat(m[1]) * 1000) + 500;
+  return Math.min(60_000, 2_000 * 2 ** attempt) + Math.floor(Math.random() * 1000);
+}
+
+async function rawEmbed(contents: string[]): Promise<number[][]> {
+  // Embeddings run through the local Electron API server, which holds the
+  // Gemini key in main (encrypted keystore). This is immune to the renderer's
+  // in-memory key being wiped by a hot-reload or boot race mid-job.
+  const res = await fetch(apiUrl('/api/embeddings'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents }),
   });
-  const values = result.embeddings?.[0]?.values;
-  if (!values) throw new Error('Gemini returned no embedding');
-  return values;
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { const j = await res.json(); if (j?.error) msg = j.error; } catch { /* keep default */ }
+    const err = new Error(msg) as Error & { status?: number };
+    err.status = res.status; // so embedErrorStatus() can drive backoff on 429
+    throw err;
+  }
+  const data = await res.json();
+  const embs = data?.embeddings;
+  if (!Array.isArray(embs) || !embs.length) throw new Error('Gemini returned no embeddings');
+  return embs.map((v: unknown) => {
+    if (!Array.isArray(v) || !v.length) throw new Error('Gemini returned an empty embedding');
+    return v as number[];
+  });
+}
+
+/** Embed one batch, retrying quota/transient errors and falling back to
+ *  per-item requests if the batch endpoint rejects the multi-content request. */
+async function embedBatch(batch: string[], signal?: AbortSignal): Promise<number[][]> {
+  let attempt = 0;
+  for (;;) {
+    if (signal?.aborted) throw new DOMException('Embedding aborted', 'AbortError');
+    try {
+      const vecs = await rawEmbed(batch);
+      if (vecs.length === batch.length) return vecs;
+      if (batch.length > 1) return embedEach(batch, signal); // count mismatch → per-item
+      throw new Error('Gemini returned the wrong number of embeddings');
+    } catch (e) {
+      const status = embedErrorStatus(e);
+      if (status === 400 && batch.length > 1) return embedEach(batch, signal); // too large → split
+      if (isQuotaOrTransient(status) && attempt < EMBED_MAX_RETRIES) {
+        await sleep(embedRetryDelayMs(e, attempt));
+        attempt++;
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+async function embedEach(batch: string[], signal?: AbortSignal): Promise<number[][]> {
+  const out: number[][] = [];
+  for (const t of batch) out.push((await embedBatch([t], signal))[0]);
+  return out;
+}
+
+/**
+ * Embed many texts efficiently: groups them into batched requests (bounded by
+ * item count and total chars), with retry/backoff on rate limits. Reports
+ * cumulative progress and supports cancellation.
+ */
+export async function embedTexts(
+  texts: string[],
+  opts?: { signal?: AbortSignal; onProgress?: (done: number, total: number) => void },
+): Promise<number[][]> {
+  const prepared = texts.map(t => (t || '').slice(0, EMBED_MAX_CHARS) || ' ');
+  const out: number[][] = [];
+  let i = 0;
+  while (i < prepared.length) {
+    if (opts?.signal?.aborted) throw new DOMException('Embedding aborted', 'AbortError');
+    // Build the next char/item-bounded batch.
+    const batch: string[] = [];
+    let chars = 0;
+    while (
+      i < prepared.length &&
+      batch.length < EMBED_BATCH_ITEMS &&
+      (batch.length === 0 || chars + prepared[i].length <= EMBED_BATCH_CHARS)
+    ) {
+      chars += prepared[i].length;
+      batch.push(prepared[i]);
+      i++;
+    }
+    const vecs = await embedBatch(batch, opts?.signal);
+    out.push(...vecs);
+    opts?.onProgress?.(out.length, prepared.length);
+  }
+  return out;
+}
+
+export async function embedText(text: string): Promise<number[]> {
+  const trimmed = (text || '').slice(0, EMBED_MAX_CHARS);
+  if (!trimmed) return [];
+  const [vec] = await embedBatch([trimmed]);
+  return vec;
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {

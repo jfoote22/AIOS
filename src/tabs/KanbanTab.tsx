@@ -19,7 +19,7 @@ import {
   loadMaestroState, saveMaestroState, ensureMaestroAgent, tick as maestroTick,
   reviewCard, DEFAULT_MAESTRO, type MaestroState,
 } from '../lib/maestro';
-import AgentBuilder from '../components/AgentBuilder';
+import CreatorPanel from '../components/CreatorPanel';
 import AgentRunDrawer from '../components/AgentRunDrawer';
 import MaestroControls from '../components/MaestroControls';
 
@@ -56,12 +56,12 @@ export default function KanbanTab() {
           <div className="p-1.5 bg-zinc-800 rounded-md"><KanbanSquare className="w-4 h-4 text-indigo-400" /></div>
           <h1 className="text-sm font-bold uppercase tracking-widest text-zinc-100">Orchestra</h1>
         </div>
-        <span className="text-[11px] text-zinc-500">Agent builder · task board · Maestro</span>
+        <span className="text-[11px] text-zinc-500">Agent &amp; skill builder · task board · Maestro</span>
       </header>
 
       <div className="flex-1 min-h-0 flex">
         <div className="w-[38%] min-w-[380px] border-r border-zinc-800 relative">
-          <AgentBuilder onAgentsChange={setAgents} />
+          <CreatorPanel onAgentsChange={setAgents} />
         </div>
         <div className="flex-1 min-w-0 relative">
           <AgentBoard agents={agents} />

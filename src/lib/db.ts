@@ -115,6 +115,16 @@ export async function getAllImports<T>(): Promise<T[]> {
   return call<T[]>('getAllImports');
 }
 
+/** Per-import metadata only (no message bodies) — cheap to load in bulk. */
+export async function getImportsMeta<T>(): Promise<T[]> {
+  return call<T[]>('getImportsMeta');
+}
+
+/** One full conversation (with messages), or null if not found. */
+export async function getImport<T>(id: string): Promise<T | null> {
+  return call<T | null>('getImport', [id]);
+}
+
 export async function putImports<T extends { id: string }>(items: T[]): Promise<void> {
   if (!items.length) return;
   await call('putImports', [items]);
@@ -135,6 +145,19 @@ export async function putAgent<T extends { id: string }>(item: T): Promise<void>
 
 export async function removeAgent(id: string): Promise<void> {
   await call('removeAgent', [id]);
+}
+
+// --- Skills (reusable SKILL.md definitions, mirror of agents) ---
+export async function getAllSkills<T>(): Promise<T[]> {
+  return call<T[]>('getAllSkills');
+}
+
+export async function putSkill<T extends { id: string }>(item: T): Promise<void> {
+  await call('putSkill', [item]);
+}
+
+export async function removeSkill(id: string): Promise<void> {
+  await call('removeSkill', [id]);
 }
 
 // --- Runs (each Play of an agent on a card creates one run) ---

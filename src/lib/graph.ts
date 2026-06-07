@@ -64,11 +64,23 @@ interface DeepDiveLike {
   embedding?: number[];
 }
 
+function importProviderLabel(p: string): string {
+  if (p === 'claude') return 'Claude';
+  return 'ChatGPT';
+}
+
+function importMsgCount(im: { messageCount?: number; messages?: unknown[] }): number {
+  return im.messageCount ?? im.messages?.length ?? 0;
+}
+
 interface ImportLike {
   id: string;
   provider: 'claude' | 'chatgpt';
   title: string;
-  messages: { role: string; content: string }[];
+  /** Present only when a full conversation is loaded; graph nodes usually carry
+   *  just `messageCount` (metadata) to avoid materializing every message. */
+  messages?: { role: string; content: string }[];
+  messageCount?: number;
   createdAt: number;
   updatedAt: number;
   /** Optional conversation-level centroid (mean of chunk embeddings).
@@ -187,8 +199,8 @@ export function buildGraph(
       id: `import:${im.id}`,
       kind: 'import',
       label: im.title || '(untitled)',
-      group: im.provider === 'claude' ? 'Claude' : 'ChatGPT',
-      val: 5 + Math.min(10, (im.messages?.length ?? 0) * 0.15),
+      group: importProviderLabel(im.provider),
+      val: 5 + Math.min(10, importMsgCount(im) * 0.15),
       data: im,
     });
   }
@@ -389,13 +401,19 @@ export function applyCollapsedClusters(
     const clusterId = `cluster:${c.docId}`;
     for (const id of present) memberToCluster.set(id, clusterId);
     const group = nodeById.get(present[0])?.group ?? 'Uncategorized';
+    // Carry the member snippet records (ordered by part) so the detail panel can
+    // summarize the whole subnetwork and DeepDive/Ask can use it as context.
+    const members = present
+      .map(id => nodeById.get(id)?.data)
+      .filter(Boolean)
+      .sort((a: any, b: any) => (a?.memoryPart ?? 0) - (b?.memoryPart ?? 0));
     clusterNodes.push({
       id: clusterId,
       kind: 'cluster',
       label: c.label,
       group,
       val: 10 + Math.min(16, present.length * 1.5),
-      data: { docId: c.docId, count: present.length, memberIds: present, label: c.label },
+      data: { docId: c.docId, count: present.length, memberIds: present, label: c.label, members },
     });
   }
   if (!clusterNodes.length) return graph;
@@ -503,8 +521,8 @@ export function nodeAsContextItem(node: BrainNode) {
     return {
       id: node.id,
       title: im.title || '(untitled)',
-      summary: `Imported ${im.provider === 'claude' ? 'Claude' : 'ChatGPT'} conversation, ${im.messages?.length ?? 0} messages.`,
-      category: im.provider === 'claude' ? 'Claude' : 'ChatGPT',
+      summary: `Imported ${importProviderLabel(im.provider)} conversation, ${importMsgCount(im)} messages.`,
+      category: importProviderLabel(im.provider),
       source: 'Imported',
       tags: [],
       extractedText: text,

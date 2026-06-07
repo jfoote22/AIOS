@@ -96,6 +96,14 @@ function migrateSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_agents_updated ON agents(updatedAt);
 
+    CREATE TABLE IF NOT EXISTS skills (
+      id TEXT PRIMARY KEY,
+      slug TEXT UNIQUE,
+      updatedAt INTEGER,
+      data TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_skills_updated ON skills(updatedAt);
+
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
       cardId TEXT,
@@ -194,6 +202,51 @@ function getAllImports() {
       .all(),
   );
 }
+/**
+ * Lightweight per-import metadata WITHOUT the message bodies. A large export
+ * can hold tens of thousands of messages; shipping all of them to the renderer
+ * just to size graph nodes / render a list will exhaust renderer memory. JSON1's
+ * json_array_length/json_extract read the count and a couple of fields straight
+ * from the stored blob without materializing the messages.
+ */
+function getImportsMeta() {
+  const d = ensure();
+  try {
+    // Fast path: JSON1 reads the count + a few fields without materializing
+    // any message bodies.
+    return d.prepare(`
+      SELECT id,
+             provider,
+             COALESCE(json_extract(data, '$.title'), '') AS title,
+             createdAt,
+             updatedAt,
+             COALESCE(json_array_length(data, '$.messages'), 0) AS messageCount
+      FROM imports
+      ORDER BY COALESCE(updatedAt, createdAt, 0) DESC
+    `).all();
+  } catch (e) {
+    // Fallback (JSON1 unavailable): parse on the main side and strip messages.
+    // Still never ships message bodies over IPC to the renderer.
+    console.warn('getImportsMeta: JSON1 path failed, falling back to JS parse:', e?.message || e);
+    const rows = d.prepare('SELECT data FROM imports ORDER BY COALESCE(updatedAt, createdAt, 0) DESC').all();
+    return rows.map((r) => {
+      const o = JSON.parse(r.data);
+      return {
+        id: o.id,
+        provider: o.provider,
+        title: o.title || '',
+        createdAt: o.createdAt ?? null,
+        updatedAt: o.updatedAt ?? null,
+        messageCount: Array.isArray(o.messages) ? o.messages.length : 0,
+      };
+    });
+  }
+}
+/** Fetch one full conversation (with messages) — used for lazy detail views. */
+function getImport(id) {
+  const row = ensure().prepare('SELECT data FROM imports WHERE id = ?').get(id);
+  return row ? JSON.parse(row.data) : null;
+}
 const _putImport = (stmt) => (item) =>
   stmt.run(item.id, item.provider ?? null, num(item.createdAt), num(item.updatedAt), JSON.stringify(item));
 function putImports(items) {
@@ -275,6 +328,27 @@ function removeAgent(id) {
   ensure().prepare('DELETE FROM agents WHERE id = ?').run(id);
 }
 
+// ── skills (slug is UNIQUE, mirrors agents) ──────────────────────────────────
+// db.ts sorts by updatedAt DESC.
+
+function getAllSkills() {
+  return parseAll(ensure().prepare('SELECT data FROM skills ORDER BY updatedAt DESC').all());
+}
+function putSkill(item) {
+  // Upsert on id; a duplicate slug on a different id raises UNIQUE (matches
+  // agents' behavior). INSERT OR REPLACE avoided so we don't clobber the skill
+  // that already owns the slug.
+  ensure()
+    .prepare(
+      `INSERT INTO skills (id, slug, updatedAt, data) VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET slug = excluded.slug, updatedAt = excluded.updatedAt, data = excluded.data`,
+    )
+    .run(item.id, item.slug ?? null, num(item.updatedAt), JSON.stringify(item));
+}
+function removeSkill(id) {
+  ensure().prepare('DELETE FROM skills WHERE id = ?').run(id);
+}
+
 // ── runs ─────────────────────────────────────────────────────────────────────
 // db.ts sorts by startedAt DESC (both getAllRuns and getRunsForCard).
 
@@ -305,6 +379,7 @@ function bulkLoad(payload) {
     if (payload.imports && payload.imports.length) putImports(payload.imports);
     if (payload.importChunks && payload.importChunks.length) putImportChunks(payload.importChunks);
     if (payload.agents) for (const a of payload.agents) putAgent(a);
+    if (payload.skills) for (const s of payload.skills) putSkill(s);
     if (payload.runs) for (const r of payload.runs) putRun(r);
   })();
 }
@@ -315,9 +390,10 @@ const ops = {
   getMeta, setMeta,
   getAllThreads, putThread, removeThread,
   getMessagesForThread, putMessage,
-  getAllImports, putImports, removeImport, clearImports,
+  getAllImports, getImportsMeta, getImport, putImports, removeImport, clearImports,
   getAllImportChunks, getChunksForConversation, getConversationChunkCounts, putImportChunks, deleteChunksForConversation,
   getAllAgents, putAgent, removeAgent,
+  getAllSkills, putSkill, removeSkill,
   getAllRuns, getRunsForCard, putRun,
   bulkLoad,
 };
