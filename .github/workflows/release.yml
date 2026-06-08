@@ -31,7 +31,11 @@ jobs:
         # (better-sqlite3, node-pty) compile cleanly — no cross-compilation.
         include:
           - os: macos-14        # Apple Silicon  -> arm64 .dmg / .zip
-          - os: macos-13        # Intel          -> x64 .dmg / .zip
+          # Intel Mac (x64) is disabled for v1: GitHub's macos-13 (Intel)
+          # runners are scarce / being retired and the job sits queued
+          # indefinitely. Apple Silicon covers the vast majority of current
+          # Macs. Re-enable this line when Intel coverage is needed again.
+          # - os: macos-13      # Intel          -> x64 .dmg / .zip
           - os: windows-latest  # -> NSIS .exe (x64)
           - os: ubuntu-latest   # -> .AppImage + .deb (x64)
     runs-on: ${{ matrix.os }}

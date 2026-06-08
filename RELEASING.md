@@ -23,8 +23,12 @@ Artifacts produced:
 | Platform | File |
 |----------|------|
 | Windows  | `AIOS-Setup-<version>.exe` (NSIS installer, x64) |
-| macOS    | `AIOS-<version>-arm64.dmg` + `AIOS-<version>-x64.dmg` (and `.zip`) |
+| macOS    | `AIOS-<version>-arm64.dmg` (Apple Silicon) + `.zip` |
 | Linux    | `AIOS-<version>-x64.AppImage` + `.deb` |
+
+> Intel Mac (`macos-13`/x64) builds are disabled for v1 — GitHub's Intel runners
+> are scarce/being retired and queue indefinitely. Re-enable the `macos-13` line
+> in `.github/workflows/release.yml` if you need an Intel `.dmg`.
 
 You can also trigger the workflow manually from the **Actions** tab
 (`workflow_dispatch`) to test a build without creating a release.
