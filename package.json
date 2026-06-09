@@ -15,6 +15,7 @@
     "electron:build": "vite build && electron-builder",
     "dist": "vite build && electron-builder --publish never",
     "lint": "tsc --noEmit",
+    "prep:brain": "node scripts/prep-brain-assets.cjs",
     "rebuild:native": "electron-rebuild -f --only better-sqlite3,node-pty",
     "postinstall": "electron-rebuild -f --only better-sqlite3,node-pty"
   },
@@ -50,8 +51,10 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-force-graph-2d": "^1.27.0",
+    "react-force-graph-3d": "^1.29.1",
     "react-markdown": "^9.0.1",
     "replicate": "^1.0.1",
+    "three": "^0.179.0",
     "turndown": "^7.2.4",
     "xlsx": "^0.18.5",
     "zod": "^4.4.3"
@@ -61,6 +64,7 @@
     "@types/node": "^22.14.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/three": "^0.179.0",
     "@vitejs/plugin-react": "^5.0.4",
     "concurrently": "^9.2.1",
     "electron": "^41.3.0",

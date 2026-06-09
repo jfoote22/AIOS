@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, Copy, Inbox, KeyRound, Loader2, RefreshCw, Save, Server, XCircle } from 'lucide-react';
+import { CheckCircle2, Copy, Inbox, KeyRound, Loader2, RefreshCw, Save, Server, Smartphone, XCircle } from 'lucide-react';
 import { apiUrl, initApiBase } from '../lib/apiBase';
-import type { MemoryIngestStatus } from '../electron';
+import type { MemoryIngestStatus, MobileGatewayStatus } from '../electron';
 
 interface HermesConfig {
   baseUrl: string;
@@ -25,6 +25,12 @@ export default function HermesSettingsTab() {
   const [memSaving, setMemSaving] = useState(false);
   const [copied, setCopied] = useState<'url' | 'token' | 'curl' | null>(null);
 
+  // Mobile companion gateway (LAN/remote).
+  const [mob, setMob] = useState<MobileGatewayStatus | null>(null);
+  const [mobPort, setMobPort] = useState(8766);
+  const [mobSaving, setMobSaving] = useState(false);
+  const [mobCopied, setMobCopied] = useState<'url' | 'token' | 'code' | null>(null);
+
   useEffect(() => {
     (async () => {
       try {
@@ -44,8 +50,45 @@ export default function HermesSettingsTab() {
       } catch (e) {
         console.error('Failed to load memory ingest config:', e);
       }
+      try {
+        const cfg = await window.aios?.mobile?.getConfig();
+        if (cfg) { setMob(cfg); setMobPort(cfg.port); }
+      } catch (e) {
+        console.error('Failed to load mobile gateway config:', e);
+      }
     })();
   }, []);
+
+  const applyMob = async (next: { enabled?: boolean; port?: number }) => {
+    setMobSaving(true);
+    try {
+      const cfg = await window.aios?.mobile?.setConfig(next);
+      if (cfg) { setMob(cfg); setMobPort(cfg.port); }
+    } catch (e) {
+      console.error('Failed to update mobile gateway config:', e);
+    } finally {
+      setMobSaving(false);
+    }
+  };
+
+  const regenerateMobToken = async () => {
+    try {
+      const cfg = await window.aios?.mobile?.regenerateToken();
+      if (cfg) setMob(cfg);
+    } catch (e) {
+      console.error('Failed to regenerate mobile gateway token:', e);
+    }
+  };
+
+  const copyMobile = async (text: string, which: 'url' | 'token' | 'code') => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setMobCopied(which);
+      setTimeout(() => setMobCopied(null), 1500);
+    } catch (e) {
+      console.error('Copy failed:', e);
+    }
+  };
 
   const applyMem = async (next: { enabled?: boolean; port?: number }) => {
     setMemSaving(true);
@@ -77,6 +120,12 @@ export default function HermesSettingsTab() {
       console.error('Copy failed:', e);
     }
   };
+
+  const mobUrl = mob ? `http://${mob.address}:${mob.port}` : '';
+  // One-field pairing: base64(JSON) the app decodes into { url, token }.
+  const pairingCode = mob && mob.token
+    ? btoa(JSON.stringify({ url: mobUrl, token: mob.token }))
+    : '';
 
   const ingestUrl = mem ? `http://${mem.address}:${mem.port}/api/memory/ingest` : '';
   const curlSnippet = mem
@@ -272,6 +321,96 @@ export default function HermesSettingsTab() {
               {mem?.error && (
                 <div className="flex items-center gap-2 text-xs text-red-400">
                   <XCircle className="w-4 h-4" />{mem.error}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Mobile companion gateway: token-gated front door for the Android app. */}
+        <div className="mt-6 p-5 bg-zinc-900/50 border border-zinc-800 rounded-2xl">
+          <div className="flex items-start gap-3 mb-5">
+            <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${mob?.running ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-zinc-800 text-zinc-500 border border-zinc-700'}`}>
+              <Smartphone className="w-4 h-4" />
+            </div>
+            <div className="flex-1">
+              <p className="font-bold text-sm">Mobile companion</p>
+              <p className="text-[11px] text-zinc-500 leading-relaxed">
+                Token-gated gateway for the AIOS Android app: browse Second Brain, run DeepDives,
+                create agents &amp; skills, OCR screenshots, and open a terminal — all powered by this
+                desktop. Off by default. For access away from home, put both devices on a Tailscale/VPN.
+              </p>
+            </div>
+            <button
+              onClick={() => applyMob({ enabled: !mob?.enabled })}
+              disabled={mobSaving || !window.aios?.mobile}
+              className={`shrink-0 px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-colors ${mob?.enabled ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'} disabled:opacity-50`}
+            >
+              {mobSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : mob?.enabled ? 'Enabled' : 'Disabled'}
+            </button>
+          </div>
+
+          {!window.aios?.mobile ? (
+            <p className="text-[11px] text-amber-400">The mobile gateway requires running inside the AIOS desktop app.</p>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-3 gap-3">
+                <label className="block">
+                  <span className="text-[11px] uppercase tracking-widest text-zinc-500">Port</span>
+                  <input
+                    type="number"
+                    value={mobPort}
+                    onChange={(e) => setMobPort(Number(e.target.value))}
+                    onBlur={() => { if (mobPort !== mob?.port) applyMob({ port: mobPort }); }}
+                    className="mt-1 w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </label>
+                <div className="col-span-2 block">
+                  <span className="text-[11px] uppercase tracking-widest text-zinc-500">Gateway URL</span>
+                  <div className="mt-1 flex items-center gap-2">
+                    <code className="flex-1 truncate bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono text-zinc-300">{mobUrl || '—'}</code>
+                    <button onClick={() => copyMobile(mobUrl, 'url')} disabled={!mobUrl} title="Copy URL"
+                      className="p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-zinc-300 disabled:opacity-40">
+                      {mobCopied === 'url' ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="block">
+                <span className="text-[11px] uppercase tracking-widest text-zinc-500">Bearer token</span>
+                <div className="mt-1 flex items-center gap-2">
+                  <code className="flex-1 truncate bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs font-mono text-zinc-300">{mob?.token || '—'}</code>
+                  <button onClick={() => mob?.token && copyMobile(mob.token, 'token')} disabled={!mob?.token} title="Copy token"
+                    className="p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-zinc-300 disabled:opacity-40">
+                    {mobCopied === 'token' ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  </button>
+                  <button onClick={regenerateMobToken} title="Regenerate token"
+                    className="p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-zinc-300">
+                    <RefreshCw className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="block">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] uppercase tracking-widest text-zinc-500">Pairing code</span>
+                  <button onClick={() => pairingCode && copyMobile(pairingCode, 'code')} disabled={!pairingCode}
+                    className="flex items-center gap-1.5 text-[11px] text-zinc-400 hover:text-zinc-200 disabled:opacity-40">
+                    {mobCopied === 'code' ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    Copy
+                  </button>
+                </div>
+                <code className="mt-1 block break-all bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-[11px] font-mono text-zinc-400">{pairingCode || '—'}</code>
+                <p className="mt-1 text-[10px] text-zinc-600 leading-relaxed">
+                  In the AIOS app, tap <span className="text-zinc-400">Pair → Paste code</span> and paste this.
+                  It bundles the URL + token. Regenerating the token invalidates paired devices.
+                </p>
+              </div>
+
+              {mob?.error && (
+                <div className="flex items-center gap-2 text-xs text-red-400">
+                  <XCircle className="w-4 h-4" />{mob.error}
                 </div>
               )}
             </div>

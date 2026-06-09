@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "AIOS",
+    "slug": "aios-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "aios",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#09090b"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.aios.mobile"
+    },
+    "android": {
+      "package": "com.aios.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#09090b"
+      }
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "AIOS needs access to your photos to OCR screenshots and images."
+        }
+      ],
+      "expo-asset",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "9dde9a53-7266-4d55-89de-64731b9150d9"
+      }
+    }
+  }
+}

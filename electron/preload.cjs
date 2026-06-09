@@ -50,6 +50,13 @@ contextBridge.exposeInMainWorld('aios', {
     },
   },
 
+  // Mobile gateway (LAN/remote companion app: read APIs, proxy, terminal bridge).
+  mobile: {
+    getConfig: () => ipcRenderer.invoke('mobile:get-config'),
+    setConfig: (cfg) => ipcRenderer.invoke('mobile:set-config', cfg || {}),
+    regenerateToken: () => ipcRenderer.invoke('mobile:regenerate-token'),
+  },
+
   // Terminal (Kanban → Terminal pane)
   term: {
     available: () => ipcRenderer.invoke('term:available'),

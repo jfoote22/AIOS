@@ -68,6 +68,17 @@ export async function enrichPendingMemory(): Promise<number> {
 }
 
 async function enrichOne(item: CapturedItem): Promise<void> {
+  // Pre-analyzed items (e.g. a mobile OCR capture that already carries a
+  // Gemini-derived title/summary/tags/entities) only need an embedding so they
+  // land in the graph and semantic search — re-analyzing would clobber the good
+  // vision-based metadata, so we skip straight to embedding.
+  if ((item as any).preAnalyzed) {
+    const ready: CapturedItem = { ...item, status: 'ready', error: undefined, memoryPending: false };
+    const embedding = await ai.embedText(ai.buildEmbedSource(ready));
+    await db.putSnippet({ ...ready, embedding, preAnalyzed: false } as CapturedItem);
+    return;
+  }
+
   const content = item.extractedText || '';
   const analysis = await ai.analyzeMarkdown(content.slice(0, ANALYZE_HEAD_CHARS));
 

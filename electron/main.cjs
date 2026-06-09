@@ -8,6 +8,7 @@ const terminal = require('./terminal.cjs');
 const reportExport = require('./report-export.cjs');
 const sqliteStore = require('./sqlite-store.cjs');
 const memoryIngest = require('./memory-ingest.cjs');
+const mobileGateway = require('./mobile-gateway.cjs');
 
 // Keep the renderer fully alive when the main window is minimized during a
 // capture. "Add Shot" minimizes the window (so AIOS stays out of the shot),
@@ -287,6 +288,7 @@ app.whenReady().then(async () => {
   try {
     const { port } = await apiServer.start();
     apiPort = port;
+    mobileGateway.setApiPort(port);
   } catch (e) {
     console.error('Failed to start API server:', e);
   }
@@ -298,6 +300,15 @@ app.whenReady().then(async () => {
       await memoryIngest.start({ getWebContents: () => mainWindow?.webContents });
     } catch (e) {
       console.error('Failed to start memory ingest server:', e);
+    }
+  }
+
+  // LAN/remote gateway for the Android companion app (off by default).
+  if (mobileGateway.isEnabled()) {
+    try {
+      await mobileGateway.start({ apiPort, getWebContents: () => mainWindow?.webContents });
+    } catch (e) {
+      console.error('Failed to start mobile gateway:', e);
     }
   }
 
@@ -323,6 +334,7 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   terminal.killAll();
+  mobileGateway.stop();
 });
 
 ipcMain.handle('app:get-version', () => app.getVersion());
@@ -352,6 +364,32 @@ ipcMain.handle('memory:set-config', async (_e, cfg = {}) => {
 ipcMain.handle('memory:regenerate-token', () => {
   memoryIngest.regenerateToken();
   return memoryIngest.status();
+});
+
+// --- Mobile gateway (LAN/remote companion app) config ---
+ipcMain.handle('mobile:get-config', () => mobileGateway.status());
+ipcMain.handle('mobile:set-config', async (_e, cfg = {}) => {
+  const { enabled, port } = cfg;
+  if (typeof port === 'number' && Number.isFinite(port) && port > 0 && port < 65536) {
+    setProviderKey('mobile_gateway_port', String(Math.floor(port)));
+  }
+  if (typeof enabled === 'boolean') {
+    setProviderKey('mobile_gateway_enabled', enabled ? '1' : '');
+  }
+  // Restart so a port change takes effect; start/stop to match `enabled`.
+  mobileGateway.stop();
+  if (mobileGateway.isEnabled()) {
+    try {
+      await mobileGateway.start({ apiPort, getWebContents: () => mainWindow?.webContents });
+    } catch (e) {
+      return { ...mobileGateway.status(), error: e?.message || 'Failed to start gateway.' };
+    }
+  }
+  return mobileGateway.status();
+});
+ipcMain.handle('mobile:regenerate-token', () => {
+  mobileGateway.regenerateToken();
+  return mobileGateway.status();
 });
 
 // SQLite data store bridge. The renderer's src/lib/db.ts calls these by op

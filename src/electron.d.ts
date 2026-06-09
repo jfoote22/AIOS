@@ -10,6 +10,17 @@ export interface MemoryIngestStatus {
   error?: string;
 }
 
+export interface MobileGatewayStatus {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  address: string;
+  hasToken: boolean;
+  token: string;
+  hasTerminal: boolean;
+  error?: string;
+}
+
 declare global {
   interface Window {
     aios?: {
@@ -44,6 +55,12 @@ declare global {
         setConfig: (cfg: { enabled?: boolean; port?: number }) => Promise<MemoryIngestStatus>;
         regenerateToken: () => Promise<MemoryIngestStatus>;
         onIngested: (cb: (payload: { id: string }) => void) => () => void;
+      };
+      /** LAN/remote gateway for the Android companion app. */
+      mobile: {
+        getConfig: () => Promise<MobileGatewayStatus>;
+        setConfig: (cfg: { enabled?: boolean; port?: number }) => Promise<MobileGatewayStatus>;
+        regenerateToken: () => Promise<MobileGatewayStatus>;
       };
       term: {
         available: () => Promise<{ available: boolean; platform: string }>;

@@ -18,6 +18,7 @@ import { setSeed as setDeepDiveSeed } from '../lib/deepdiveSeed';
 import { onDeepDivesChange } from '../lib/deepdiveStore';
 import { onSnippetsChange, emitSnippetsChange } from '../lib/snippetStore';
 import { enrichPendingMemory } from '../lib/memory';
+import { BrainView3D } from '../components/BrainView3D';
 import { navigateTo } from '../lib/navigate';
 import SnippetEditor, { type CapturedItem } from '../components/SnippetEditor';
 
@@ -56,6 +57,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const [imports, setImports] = useState<ImportMeta[]>([]);
   const [chunks, setChunks] = useState<ImportChunk[]>([]);
   const [graph, setGraph] = useState<BrainGraph>({ nodes: [], links: [] });
+  const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d');
   const [focusedNode, setFocusedNode] = useState<BrainNode | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
@@ -793,6 +795,35 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     }
   }, [expandCluster, collapseDoc]);
 
+  // ── 3D view data: stable per-node base color + embedding, id-based links ──
+  // Color is the stable group color (NOT the focus-aware nodeColor) so changing
+  // focus doesn't rebuild this memo and re-shuffle 3D placement.
+  const graph3d = useMemo(() => ({
+    nodes: graph.nodes.map((n) => ({
+      id: n.id,
+      label: n.label,
+      category: n.group,
+      val: n.val,
+      color: groupColors[n.group] || '#9ca3af',
+      embedding: (n.data as any)?.embedding as number[] | undefined,
+    })),
+    links: graph.links.map((l) => {
+      const s: any = (l as any).source, t: any = (l as any).target;
+      return { source: typeof s === 'object' ? s.id : s, target: typeof t === 'object' ? t.id : t };
+    }),
+  }), [graph, groupColors]);
+
+  const highlight3d = useMemo(() => {
+    const s = new Set<string>(memberRing.keys());
+    if (focusedNode) s.add(focusedNode.id);
+    return s;
+  }, [memberRing, focusedNode]);
+
+  const onNode3DClick = useCallback((id: string) => {
+    const node = graph.nodes.find((n) => n.id === id) || null;
+    setFocusedNode(node);
+  }, [graph]);
+
   const askAboutFocused = () => {
     if (!focusedNode) return;
     setChatInput(`Tell me about "${focusedNode.label}"`);
@@ -1152,6 +1183,20 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
 
         {/* Right 2/3 — force-directed graph */}
         <div ref={containerRef} onContextMenu={(e) => e.preventDefault()} className="flex-1 relative bg-gradient-to-br from-zinc-950 via-zinc-950 to-zinc-900 overflow-hidden">
+          {/* 2D ⇄ 3D view toggle */}
+          {graph.nodes.length > 0 && (
+            <div className="absolute top-3 left-3 z-20 flex rounded-lg overflow-hidden border border-zinc-700 bg-zinc-900/85 backdrop-blur">
+              {(['2d', '3d'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setViewMode(m)}
+                  className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-colors ${viewMode === m ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          )}
           {graph.nodes.length === 0 ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-8 space-y-4">
               <div className="w-24 h-24 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center relative">
@@ -1163,6 +1208,14 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
                 <p className="text-xs text-zinc-600 leading-relaxed">Capture some snippets and save a DeepDive — they'll appear here as a graph showing how everything relates.</p>
               </div>
             </div>
+          ) : viewMode === '3d' ? (
+            <BrainView3D
+              graph={graph3d}
+              focusedId={focusedNode?.id ?? null}
+              highlightIds={highlight3d}
+              onNodeClick={onNode3DClick}
+              onBackground={() => { setFocusedNode(null); setNodeMenu(null); setBgMenu(null); }}
+            />
           ) : (
             <ForceGraph2D
               ref={fgRef as any}
