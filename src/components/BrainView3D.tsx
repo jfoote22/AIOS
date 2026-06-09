@@ -19,7 +19,20 @@ export type ShellMode = 'translucent' | 'off' | 'textured';
 const SHELL_CYCLE: ShellMode[] = ['translucent', 'off', 'textured'];
 const ASSET = './brain';
 const NODE_BASE_R = 0.0035;
+const NEURON_SIZE = 7.5;   // size multiplier for the neuron mesh (×old sphere diameter)
+const TAU = Math.PI * 2;
 const linkEnd = (e: any) => (typeof e === 'object' && e ? e.id : e);
+
+// Deterministic 0..1 from a node id + salt (FNV-1a). Drives each neuron's random
+// rotation and scale jitter so a given neuron always looks the same — no
+// Math.random, which would re-roll (and visibly spin/resize) every rebuild.
+function hash01(str: string, salt: number): number {
+  let h = (2166136261 ^ salt) >>> 0;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return ((h >>> 0) % 1_000_000) / 1_000_000;
+}
+
+interface NeuronTpl { geo: THREE.BufferGeometry; matNormal: THREE.Material; matDim: THREE.Material; matFocused: THREE.Material; maxDim: number }
 
 // ── point-cloud shader: faint motes that glow only near neurons ──────────────
 const CLOUD_VERT = `
@@ -73,6 +86,8 @@ export function BrainView3D({
   const cloudProxRef = useRef<THREE.BufferAttribute | null>(null);
   const shellRef = useRef<THREE.Mesh | null>(null);
   const texRef = useRef<THREE.Texture[] | null>(null);
+  const neuronTplRef = useRef<NeuronTpl | null>(null);   // shared neuron mesh + 3 material variants
+  const [neuronReady, setNeuronReady] = useState(false); // flips nodeObject from sphere → mesh
   const rafRef = useRef<number>(0);
 
   // stable placement state (persists across cluster toggles / graph rebuilds)
@@ -179,6 +194,43 @@ export function BrainView3D({
       shellRef.current = mesh; scene.add(mesh); applyShell('translucent');
     }, undefined, (e) => console.error('[brain3d] mesh load failed', e));
 
+    // neuron mesh — loaded once, cloned per node. We bake the Houdini node
+    // transforms into the geometry and center it on its bounding box so it sits
+    // exactly on each interior point, then keep the glTF's own PBR material.
+    new GLTFLoader().load(`${ASSET}/neuronMesh.gltf`, (gltf) => {
+      if (disposed) return;
+      gltf.scene.updateMatrixWorld(true);
+      let found: THREE.Mesh | null = null;
+      gltf.scene.traverse((o) => { if ((o as THREE.Mesh).isMesh && !found) found = o as THREE.Mesh; });
+      const src = found as THREE.Mesh | null;
+      if (!src) return;
+      const geo = src.geometry.clone();
+      geo.applyMatrix4(src.matrixWorld);          // bake exporter rotation/scale
+      geo.computeBoundingBox();
+      const c = geo.boundingBox!.getCenter(new THREE.Vector3());
+      geo.translate(-c.x, -c.y, -c.z);            // origin = mesh center
+      const sz = geo.boundingBox!.getSize(new THREE.Vector3());
+      const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+      const matNormal = Array.isArray(src.material) ? src.material[0] : src.material;
+      const matDim = matNormal.clone(); matDim.transparent = true; matDim.opacity = 0.28;
+      const matFocused = matNormal.clone() as THREE.MeshStandardMaterial;
+      if ('emissive' in matFocused) { matFocused.emissive = new THREE.Color(0x6fd0ff); matFocused.emissiveIntensity = 0.9; }
+
+      // react-force-graph calls geometry.dispose()/material.dispose()/map.dispose()
+      // for EVERY node it removes from the digest (e.g. on cluster toggles). These
+      // resources are SHARED across all neurons, so neutralize per-node disposal —
+      // we free them ourselves on teardown instead (see cleanup below).
+      const noop = () => {};
+      geo.dispose = noop;
+      for (const mm of [matNormal, matDim, matFocused]) {
+        mm.dispose = noop;
+        const t = (mm as THREE.MeshStandardMaterial).map; if (t) t.dispose = noop;
+      }
+
+      neuronTplRef.current = { geo, matNormal, matDim, matFocused, maxDim };
+      setNeuronReady(true);
+    }, undefined, (e) => console.error('[brain3d] neuron mesh load failed', e));
+
     // custom pulse rig — small bright sparks that glide along links. Radius is
     // fully ours (the library can't go below 0.05), so these stay neuron-scale.
     const PULSE_R = 0.002, PULSE_MS = 1300, PULSE_EVERY = 3200, PULSE_CAP = 60;
@@ -231,6 +283,15 @@ export function BrainView3D({
       pulseGeo.dispose(); pulseMat.dispose();
       if (cloudRef.current) { scene.remove(cloudRef.current); cloudRef.current.geometry.dispose(); }
       if (shellRef.current) scene.remove(shellRef.current);
+      const tpl = neuronTplRef.current;
+      if (tpl) {
+        // dispose for real (instance .dispose was neutered above) via the prototypes
+        THREE.BufferGeometry.prototype.dispose.call(tpl.geo);
+        const std = tpl.matNormal as THREE.MeshStandardMaterial;
+        for (const t of [std.map, std.metalnessMap, std.roughnessMap, std.normalMap]) if (t) THREE.Texture.prototype.dispose.call(t);
+        for (const mm of [tpl.matNormal, tpl.matDim, tpl.matFocused]) THREE.Material.prototype.dispose.call(mm);
+        neuronTplRef.current = null;
+      }
       scene.remove(amb, key, rim); scene.fog = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -375,26 +436,33 @@ export function BrainView3D({
   }, [stableGraph]);
 
   // ── neuron objects ────────────────────────────────────────────────────────
-  // focused  → bright glow (the one you clicked)
+  // Each neuron is a clone of the loaded glTF mesh (shared geometry + one of three
+  // shared material variants), given a deterministic random rotation and a 0.85–
+  // 1.15 size jitter derived from its id (stable across rebuilds).
+  // focused  → larger + emissive glow (the one you clicked)
   // member   → expanded-cluster sibling: SAME look, just half the size
-  // normal   → small dot, faint halo
+  // normal   → full PBR look at its semantic size
   // dim      → faded (something else is focused)
   const nodeObject = useMemo(() => (node: any) => {
     const n = node as GNode;
-    const col = new THREE.Color(n.color || '#7fd4ff');
     const focused = focusedId === n.id;
     const member = !focused && (highlightIds?.has(n.id) ?? false);
     const dim = (focusedId || (highlightIds && highlightIds.size)) && !focused && !member;
+    // semantic radius: base + connection count, then focus/member emphasis
     const r = (NODE_BASE_R + Math.min(Math.cbrt(n.val || 1), 5) * 0.0016) * (focused ? 1.7 : member ? 0.5 : 1);
-    const coreMul = focused ? 1.3 : dim ? 0.45 : 0.9;
-    const g = new THREE.Group();
-    g.add(new THREE.Mesh(new THREE.SphereGeometry(r, 14, 14), new THREE.MeshBasicMaterial({ color: col.clone().multiplyScalar(coreMul) })));
-    g.add(new THREE.Mesh(
-      new THREE.SphereGeometry(r * (focused ? 1.5 : 1.2), 14, 14),
-      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: focused ? 0.28 : dim ? 0.02 : 0.05, blending: THREE.AdditiveBlending, depthWrite: false }),
-    ));
-    return g;
-  }, [focusedId, highlightIds]);
+
+    const tpl = neuronTplRef.current;
+    if (!tpl) {
+      // mesh not loaded yet — placeholder dot so nodes aren't invisible
+      return new THREE.Mesh(new THREE.SphereGeometry(r, 8, 8), new THREE.MeshBasicMaterial({ color: n.color || '#7fd4ff' }));
+    }
+    const mat = focused ? tpl.matFocused : dim ? tpl.matDim : tpl.matNormal;
+    const m = new THREE.Mesh(tpl.geo, mat);
+    m.rotation.set(hash01(n.id, 1) * TAU, hash01(n.id, 2) * TAU, hash01(n.id, 3) * TAU);
+    const jitter = 0.85 + hash01(n.id, 4) * 0.30;   // per-neuron scale 0.85–1.15
+    m.scale.setScalar((2 * r * jitter * NEURON_SIZE) / tpl.maxDim); // fit longest axis to old sphere diameter × size factor
+    return m;
+  }, [focusedId, highlightIds, neuronReady]);
 
   return (
     <div ref={wrapRef} style={{ position: 'relative', width: '100%', height: '100%' }}>
