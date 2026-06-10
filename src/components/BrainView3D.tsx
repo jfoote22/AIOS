@@ -19,7 +19,7 @@ export type ShellMode = 'translucent' | 'off' | 'textured';
 const SHELL_CYCLE: ShellMode[] = ['translucent', 'off', 'textured'];
 const ASSET = './brain';
 const NODE_BASE_R = 0.0035;
-const NEURON_SIZE = 7.5;   // size multiplier for the neuron mesh (×old sphere diameter)
+const NEURON_SIZE = 3.75;   // size multiplier for the neuron mesh (×old sphere diameter)
 const TAU = Math.PI * 2;
 const linkEnd = (e: any) => (typeof e === 'object' && e ? e.id : e);
 
@@ -100,7 +100,9 @@ export function BrainView3D({
   // custom pulse system (the library floors its particle radius at 0.05, so we
   // roll our own to fully control size + keep it alive across cluster toggles)
   const pulseLinksRef = useRef<{ s: string; t: string }[]>([]);
-  const pulseActiveRef = useRef<{ m: THREE.Mesh; s: Vec3; e: Vec3; t0: number }[]>([]);
+  // u/v/len/ph are the per-pulse wiggle basis (see PULSE WIGGLE block) — optional
+  // so removing the feature needs no type change.
+  const pulseActiveRef = useRef<{ m: THREE.Mesh; s: Vec3; e: Vec3; t0: number; u?: Vec3; v?: Vec3; len?: number; ph?: number }[]>([]);
   const pulsePoolRef = useRef<THREE.Mesh[]>([]);
 
   // ── fit the canvas to the panel (was rendering at window size) ────────────
@@ -196,7 +198,8 @@ export function BrainView3D({
 
     // neuron mesh — loaded once, cloned per node. We bake the Houdini node
     // transforms into the geometry and center it on its bounding box so it sits
-    // exactly on each interior point, then keep the glTF's own PBR material.
+    // exactly on each interior point. The mesh carries baked vertex colors
+    // (COLOR_0) rather than textures, so we render it unlit with vertexColors.
     new GLTFLoader().load(`${ASSET}/neuronMesh.gltf`, (gltf) => {
       if (disposed) return;
       gltf.scene.updateMatrixWorld(true);
@@ -211,10 +214,31 @@ export function BrainView3D({
       geo.translate(-c.x, -c.y, -c.z);            // origin = mesh center
       const sz = geo.boundingBox!.getSize(new THREE.Vector3());
       const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
-      const matNormal = Array.isArray(src.material) ? src.material[0] : src.material;
-      const matDim = matNormal.clone(); matDim.transparent = true; matDim.opacity = 0.28;
-      const matFocused = matNormal.clone() as THREE.MeshStandardMaterial;
-      if ('emissive' in matFocused) { matFocused.emissive = new THREE.Color(0x6fd0ff); matFocused.emissiveIntensity = 0.9; }
+
+      // Houdini baked COLOR_0 with values well outside [0,1] (raw Cd). Normalize
+      // by the largest channel so the hues survive the framebuffer clamp.
+      const colAttr = geo.getAttribute('color') as THREE.BufferAttribute | undefined;
+      const hasVertexColors = !!colAttr;
+      if (colAttr) {
+        const a = colAttr.array as Float32Array;
+        let mx = 0; for (let i = 0; i < a.length; i++) if (a[i] > mx) mx = a[i];
+        if (mx > 1) for (let i = 0; i < a.length; i++) a[i] /= mx;
+        colAttr.needsUpdate = true;
+      }
+
+      let matNormal: THREE.Material, matDim: THREE.Material, matFocused: THREE.Material;
+      if (hasVertexColors) {
+        // unlit so the baked colors read exactly as authored (and bloom-friendly)
+        matNormal = new THREE.MeshBasicMaterial({ vertexColors: true });
+        matDim = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.28 });
+        matFocused = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false }); // brighter → bloom glow
+      } else {
+        matNormal = Array.isArray(src.material) ? src.material[0] : src.material;
+        matDim = matNormal.clone(); matDim.transparent = true; matDim.opacity = 0.28;
+        matFocused = matNormal.clone();
+        const mf = matFocused as THREE.MeshStandardMaterial;
+        if ('emissive' in mf) { mf.emissive = new THREE.Color(0x6fd0ff); mf.emissiveIntensity = 0.9; }
+      }
 
       // react-force-graph calls geometry.dispose()/material.dispose()/map.dispose()
       // for EVERY node it removes from the digest (e.g. on cluster toggles). These
@@ -234,6 +258,31 @@ export function BrainView3D({
     // custom pulse rig — small bright sparks that glide along links. Radius is
     // fully ours (the library can't go below 0.05), so these stay neuron-scale.
     const PULSE_R = 0.002, PULSE_MS = 1300, PULSE_EVERY = 3200, PULSE_CAP = 60;
+
+    // ── PULSE WIGGLE (revertible) ────────────────────────────────────────────
+    // Adds chaotic 3D jiggle to sparks instead of a straight A→B line. To revert:
+    // set PULSE_WIGGLE = false (or delete this block + the wiggle branch in tick).
+    const PULSE_WIGGLE = true;
+    const WIGGLE_AMP = 0.045;   // offset as a fraction of link length (peak, mid-flight)
+    const WIGGLE_F1 = 6.3, WIGGLE_F2 = 9.7;   // spatial frequencies along the path
+    const WIGGLE_T1 = 2.1, WIGGLE_T2 = 3.3;   // temporal frequencies (per second)
+    let pulseSeed = 0;        // per-pulse phase so each spark wiggles differently
+    // unit basis (u,v) spanning the plane perpendicular to the link direction
+    const perpBasis = (s: Vec3, e: Vec3): { u: Vec3; v: Vec3; len: number } => {
+      let dx = e.x - s.x, dy = e.y - s.y, dz = e.z - s.z;
+      const len = Math.hypot(dx, dy, dz) || 1e-6;
+      dx /= len; dy /= len; dz /= len;
+      // pick a reference axis not parallel to the direction
+      const ax = Math.abs(dy) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+      // u = normalize(dir × ax)
+      let ux = dy * ax.z - dz * ax.y, uy = dz * ax.x - dx * ax.z, uz = dx * ax.y - dy * ax.x;
+      const ul = Math.hypot(ux, uy, uz) || 1e-6; ux /= ul; uy /= ul; uz /= ul;
+      // v = dir × u (already unit)
+      const vx = dy * uz - dz * uy, vy = dz * ux - dx * uz, vz = dx * uy - dy * ux;
+      return { u: { x: ux, y: uy, z: uz }, v: { x: vx, y: vy, z: vz }, len };
+    };
+    // ─────────────────────────────────────────────────────────────────────────
+
     const pulseGeo = new THREE.SphereGeometry(PULSE_R, 8, 8);
     const pulseMat = new THREE.MeshBasicMaterial({ color: 0xcfeeff, transparent: true, opacity: 0.875, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
     const emitPulses = (now: number) => {
@@ -244,7 +293,9 @@ export function BrainView3D({
         if (!s || !e) continue;
         const m = pulsePoolRef.current.pop() || new THREE.Mesh(pulseGeo, pulseMat);
         m.position.set(s.x, s.y, s.z); m.visible = true; scene.add(m);
-        pulseActiveRef.current.push({ m, s, e, t0: now }); count++;
+        const w = PULSE_WIGGLE ? perpBasis(s, e) : null;
+        pulseActiveRef.current.push({ m, s, e, t0: now, u: w?.u, v: w?.v, len: w?.len, ph: (pulseSeed++ * 1.618) % (Math.PI * 2) });
+        count++;
       }
     };
 
@@ -266,7 +317,20 @@ export function BrainView3D({
       for (let i = act.length - 1; i >= 0; i--) {
         const a = act[i]; const p = (ms - a.t0) / PULSE_MS;
         if (p >= 1) { scene.remove(a.m); pulsePoolRef.current.push(a.m); act.splice(i, 1); continue; }
-        a.m.position.set(a.s.x + (a.e.x - a.s.x) * p, a.s.y + (a.e.y - a.s.y) * p, a.s.z + (a.e.z - a.s.z) * p);
+        let px = a.s.x + (a.e.x - a.s.x) * p, py = a.s.y + (a.e.y - a.s.y) * p, pz = a.s.z + (a.e.z - a.s.z) * p;
+        // ── PULSE WIGGLE (revertible): perpendicular noise, zero at both ends ──
+        if (a.u && a.v) {
+          const ph = a.ph ?? 0;
+          const env = Math.sin(p * Math.PI);                 // 0 at A and B, 1 mid-flight
+          const amp = WIGGLE_AMP * (a.len ?? 1) * env;
+          const o1 = Math.sin(p * WIGGLE_F1 + ph + t * WIGGLE_T1) + 0.5 * Math.sin(p * WIGGLE_F2 + ph * 1.7 + t * WIGGLE_T2);
+          const o2 = Math.cos(p * WIGGLE_F2 - ph + t * WIGGLE_T2) + 0.5 * Math.cos(p * WIGGLE_F1 + ph * 0.6 - t * WIGGLE_T1);
+          px += (a.u.x * o1 + a.v.x * o2) * amp;
+          py += (a.u.y * o1 + a.v.y * o2) * amp;
+          pz += (a.u.z * o1 + a.v.z * o2) * amp;
+        }
+        // ──────────────────────────────────────────────────────────────────────
+        a.m.position.set(px, py, pz);
         a.m.scale.setScalar(0.4 + 0.6 * Math.sin(p * Math.PI)); // fade in/out
       }
       if (ms > nextPulse) { nextPulse = ms + PULSE_EVERY; emitPulses(ms); }

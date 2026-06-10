@@ -53,12 +53,52 @@
 			],
 			"max":[0.999919474,0.999980211,0.999943852
 			]
+		},
+		{
+			"bufferView":5,
+			"componentType":5123,
+			"count":9774,
+			"type":"SCALAR",
+			"min":[0
+			],
+			"max":[3349
+			]
+		},
+		{
+			"bufferView":6,
+			"componentType":5126,
+			"count":3350,
+			"type":"VEC3",
+			"min":[-2.41311526,-2.35522604,-2.09493613
+			],
+			"max":[3.15016294,2.81397033,3.22837782
+			]
+		},
+		{
+			"bufferView":7,
+			"componentType":5126,
+			"count":3350,
+			"type":"VEC3",
+			"min":[0.340561181,0.402194977,1.21822834
+			],
+			"max":[2.59781504,2.95126605,3.5631144
+			]
+		},
+		{
+			"bufferView":8,
+			"componentType":5126,
+			"count":3350,
+			"type":"VEC3",
+			"min":[-0.996941566,-0.999111772,-0.999308228
+			],
+			"max":[0.99950099,0.998955786,0.999688148
+			]
 		}
 	],
 	"buffers":[
 		{
-			"uri":"nueron_01_data.bin",
-			"byteLength":620832,
+			"uri":"nueron_02_data.bin",
+			"byteLength":760980,
 			"name":"main_buffer"
 		}
 	],
@@ -91,11 +131,35 @@
 			"byteOffset":480624,
 			"byteLength":140208,
 			"target":34962
+		},
+		{
+			"buffer":0,
+			"byteOffset":620832,
+			"byteLength":19548,
+			"target":34963
+		},
+		{
+			"buffer":0,
+			"byteOffset":640380,
+			"byteLength":40200,
+			"target":34962
+		},
+		{
+			"buffer":0,
+			"byteOffset":680580,
+			"byteLength":40200,
+			"target":34962
+		},
+		{
+			"buffer":0,
+			"byteOffset":720780,
+			"byteLength":40200,
+			"target":34962
 		}
 	],
 	"nodes":[
 		{
-			"children":[7
+			"children":[10
 			],
 			"name":"Root"
 		},
@@ -126,10 +190,22 @@
 			"name":"material"
 		},
 		{
+			"children":[8
+			],
+			"name":"nueron_1_glb"
+		},
+		{
 			"matrix":[1,0,0,0,0,0,1,0,0,-1,0,0,0,0,0,1
 			],
 			"name":"node_0",
 			"mesh":0
+		},
+		{
+			"name":"nueron_growth"
+		},
+		{
+			"name":"nueron_growth",
+			"mesh":1
 		}
 	],
 	"meshes":[
@@ -144,6 +220,19 @@
 					},
 					"indices":0,
 					"material":0
+				}
+			],
+			"name":"NUERON_OUT"
+		},
+		{
+			"primitives":[
+				{
+					"attributes":{
+						"POSITION":6,
+						"COLOR_0":7,
+						"NORMAL":8
+					},
+					"indices":5
 				}
 			],
 			"name":"NUERON_OUT"

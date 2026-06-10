@@ -11,33 +11,33 @@
 			"type":"SCALAR",
 			"min":[0
 			],
-			"max":[137897
+			"max":[135477
 			]
 		},
 		{
 			"bufferView":1,
 			"componentType":5126,
-			"count":137898,
+			"count":135478,
 			"type":"VEC3",
-			"min":[-0.475471526,-0.583791912,-0.477337539
+			"min":[-0.503534913,-0.615971506,-0.505453467
 			],
-			"max":[0.475373626,0.580289423,0.480875552
+			"max":[0.503417373,0.612323642,0.508960843
 			]
 		},
 		{
 			"bufferView":2,
 			"componentType":5126,
-			"count":137898,
+			"count":135478,
 			"type":"VEC4",
-			"min":[-0.999944031,-0.999830782,-0.999852896,1
+			"min":[-0.999974072,-0.999975801,-0.999960244,1
 			],
-			"max":[0.999956608,0.999709964,0.999970734,1
+			"max":[0.999990582,0.999982297,0.999974787,1
 			]
 		},
 		{
 			"bufferView":3,
 			"componentType":5126,
-			"count":137898,
+			"count":135478,
 			"type":"VEC2",
 			"min":[-0.000190027131,-2.61068344e-05
 			],
@@ -47,18 +47,18 @@
 		{
 			"bufferView":4,
 			"componentType":5126,
-			"count":137898,
+			"count":135478,
 			"type":"VEC3",
-			"min":[-0.999995589,-1,-1
+			"min":[-0.999976575,-0.999988556,-0.999999225
 			],
-			"max":[0.999991953,0.999997556,0.999997199
+			"max":[0.999987245,0.999997616,0.999991477
 			]
 		}
 	],
 	"buffers":[
 		{
 			"uri":"brainMesh_data.bin",
-			"byteLength":8386896,
+			"byteLength":8270736,
 			"name":"main_buffer"
 		}
 	],
@@ -71,25 +71,25 @@
 		{
 			"buffer":0,
 			"byteOffset":1767792,
-			"byteLength":1654776,
+			"byteLength":1625736,
 			"target":34962
 		},
 		{
 			"buffer":0,
-			"byteOffset":3422568,
-			"byteLength":2206368,
+			"byteOffset":3393528,
+			"byteLength":2167648,
 			"target":34962
 		},
 		{
 			"buffer":0,
-			"byteOffset":5628936,
-			"byteLength":1103184,
+			"byteOffset":5561176,
+			"byteLength":1083824,
 			"target":34962
 		},
 		{
 			"buffer":0,
-			"byteOffset":6732120,
-			"byteLength":1654776,
+			"byteOffset":6645000,
+			"byteLength":1625736,
 			"target":34962
 		}
 	],
@@ -120,6 +120,27 @@
 			"matrix":[1,0,0,0,0,0,1,0,0,-1,0,0,0,0,0,1
 			],
 			"name":"material"
+		},
+		{
+			"children":[7
+			],
+			"name":"nueron_1_glb"
+		},
+		{
+			"matrix":[1,0,0,0,0,0,1,0,0,-1,0,0,0,0,0,1
+			],
+			"name":"node_0"
+		},
+		{
+			"name":"nueron_growth"
+		},
+		{
+			"children":[10
+			],
+			"name":"gltf_hierarchy1"
+		},
+		{
+			"name":"nueron_growth"
 		}
 	],
 	"meshes":[
@@ -136,7 +157,7 @@
 					"material":0
 				}
 			],
-			"name":"polyreduce1"
+			"name":"peak1"
 		}
 	],
 	"materials":[

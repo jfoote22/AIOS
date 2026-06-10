@@ -1597,7 +1597,8 @@ const DEFAULT_PHYSICS: PhysicsSettings = {
   linkStrength: 1,
   chargeStrength: -100,
   simThreshold: DEFAULT_SIMILARITY_THRESHOLD,
-  maxLinks: DEFAULT_SIMILAR_TOP_K,
+  maxLinks: 12, // was DEFAULT_SIMILAR_TOP_K (5); raised so more neighbor nodes connect + deeper pulse layers
+
   pulseHubThreshold: 12, // fixed; its slider is hidden from the Physics panel
 };
 
