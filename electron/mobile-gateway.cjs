@@ -22,6 +22,7 @@ const express = require('express');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const os = require('node:os');
+const path = require('node:path');
 const sqliteStore = require('./sqlite-store.cjs');
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
 
@@ -296,6 +297,23 @@ function buildApp() {
   // can reach the host before validating the token.
   app.get('/api/mobile/health', (_req, res) => res.json({ ok: true, name: 'AIOS' }));
 
+  // ── 3D Second Brain page (mobile landing view) ───────────────────────────
+  // Serves the Vite-built `brain-mobile.html` entry + its assets (the same
+  // BrainView3D the desktop renders) out of dist/. The phone loads it in a
+  // WebView. Static files are code + cosmetic art (mesh/textures/points) with
+  // NO user data, so they're intentionally unauthenticated — the page itself
+  // fetches its data from /api/mobile/brain-graph, which IS token-gated.
+  const distDir = path.join(__dirname, '..', 'dist');
+  app.use('/brain3d', express.static(distDir, { index: 'brain-mobile.html' }));
+  app.use('/brain3d', (_req, res) => {
+    res.status(503).send(
+      '<html><body style="background:#04060d;color:#cfe3ff;font-family:sans-serif;padding:24px">' +
+      '<h3>3D brain page not built yet</h3>' +
+      '<p>Run <code>npm run build</code> in <code>app/</code> on the desktop, then reload.</p>' +
+      '</body></html>',
+    );
+  });
+
   // The reverse proxy must see the RAW request body, so mount it BEFORE the JSON
   // parser. Auth still applies.
   app.all('/api/proxy/*', requireToken, proxyToApi);
@@ -382,6 +400,62 @@ function buildApp() {
     try {
       sqliteStore.call('removeSnippet', [req.params.id]);
       res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  // ── Second Brain: full graph data for the 3D view ────────────────────────
+  // Everything the brain-mobile page needs to run the SAME buildGraph the
+  // desktop SecondBrainTab runs: snippets WITH embeddings (images stripped —
+  // they're heavy and the 3D view never shows them), slim DeepDive sessions
+  // (no message bodies), import metadata with a per-conversation chunk
+  // centroid (mirrors the renderer's centroid computation), and the user's
+  // saved connection settings so links match the desktop graph.
+  app.get('/api/mobile/brain-graph', requireToken, (_req, res) => {
+    try {
+      const snippets = sqliteStore.call('getAllSnippets', []).map((s) => {
+        const { image, subImages, ...rest } = s || {};
+        return { ...rest, hasImage: !!image, subImageCount: Array.isArray(subImages) ? subImages.length : 0 };
+      });
+
+      const deepDives = sqliteStore.call('getAllThreads', []).map((t) => ({
+        id: t.id,
+        title: t.title || t.name || '',
+        timestamp: t.timestamp || 0,
+        updatedAt: t.updatedAt,
+        embedding: Array.isArray(t.embedding) && t.embedding.length ? t.embedding : undefined,
+        msgCount:
+          (Array.isArray(t.mainMessages) ? t.mainMessages.length : 0) +
+          (Array.isArray(t.threads)
+            ? t.threads.reduce((a, th) => a + (Array.isArray(th?.messages) ? th.messages.length : 0), 0)
+            : 0),
+        threadIds: Array.isArray(t.threads) ? t.threads.map((th) => th?.id).filter(Boolean) : [],
+      }));
+
+      // Conversation-level centroid = mean of that conversation's chunk
+      // embeddings (same math as SecondBrainTab's import centroids).
+      const sums = new Map(); // conversationId -> { sum: Float64Array, n }
+      for (const c of sqliteStore.call('getAllImportChunks', [])) {
+        const e = c?.embedding;
+        if (!c?.conversationId || !Array.isArray(e) || !e.length) continue;
+        let acc = sums.get(c.conversationId);
+        if (!acc) { acc = { sum: new Float64Array(e.length), n: 0 }; sums.set(c.conversationId, acc); }
+        if (acc.sum.length !== e.length) continue;
+        for (let i = 0; i < e.length; i++) acc.sum[i] += e[i];
+        acc.n++;
+      }
+      const imports = sqliteStore.call('getImportsMeta', []).map((im) => {
+        const acc = sums.get(im.id);
+        return { ...im, embedding: acc && acc.n ? Array.from(acc.sum, (v) => v / acc.n) : undefined };
+      });
+
+      let physics = null;
+      let expandedDocs = [];
+      try { physics = sqliteStore.call('getMeta', ['second-brain-physics']); } catch {}
+      try { expandedDocs = sqliteStore.call('getMeta', ['second-brain-expanded-docs']) || []; } catch {}
+
+      res.json({ snippets, deepDives, imports, physics, expandedDocs });
     } catch (e) {
       res.status(500).json({ error: e?.message || String(e) });
     }

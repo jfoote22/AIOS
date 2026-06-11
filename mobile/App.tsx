@@ -58,7 +58,8 @@ function Tabs() {
         tabBarIcon: ({ color }) => <TabIcon route={route.name} color={color} />,
       })}
     >
-      <Tab.Screen name="Brain" component={BrainScreen} options={{ title: 'Second Brain' }} />
+      {/* Landing tab: full-bleed 3D brain — the screen draws its own chrome. */}
+      <Tab.Screen name="Brain" component={BrainScreen} options={{ title: 'Second Brain', headerShown: false }} />
       <Tab.Screen name="Dives" component={DivesScreen} options={{ title: 'DeepDives' }} />
       <Tab.Screen name="Build" component={BuildScreen} options={{ title: 'Build' }} />
       <Tab.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal' }} />

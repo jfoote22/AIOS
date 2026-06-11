@@ -273,6 +273,213 @@ export async function analyzeMarkdown(text: string): Promise<MarkdownAnalysis> {
   return parsed;
 }
 
+// --- DeepDive Understanding: semantic topic map of a conversation. ---
+// Reads the whole transcript and returns the subject matter itself (topics,
+// concrete takeaways, topic-to-topic relationships) rather than chat structure.
+
+export interface UnderstandingTopic {
+  id: string;
+  label: string;
+  summary: string;
+  /** id of the parent topic when this is a subtopic; empty string for top-level. */
+  parentId: string;
+}
+
+export interface UnderstandingInsight {
+  topicId: string;
+  label: string;
+  detail: string;
+}
+
+export interface UnderstandingCrossLink {
+  fromTopicId: string;
+  toTopicId: string;
+  label: string;
+}
+
+export interface UnderstandingSourceAssignment {
+  sourceId: string;
+  topicId: string;
+}
+
+export interface DeepDiveUnderstanding {
+  title: string;
+  summary: string;
+  topics: UnderstandingTopic[];
+  insights: UnderstandingInsight[];
+  crossLinks: UnderstandingCrossLink[];
+  sourceAssignments: UnderstandingSourceAssignment[];
+}
+
+const understandingSchema = {
+  type: Type.OBJECT,
+  properties: {
+    title: { type: Type.STRING, description: '3-8 word title for what this conversation is fundamentally about' },
+    summary: { type: Type.STRING, description: '2-3 sentence plain-language overview of what was explored and what was learned' },
+    topics: {
+      type: Type.ARRAY,
+      description: 'The core subjects actually discussed: 4-10 top-level topics, plus subtopics where a topic has clearly distinct sub-areas',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          id: { type: Type.STRING, description: 'Short stable kebab-case slug, e.g. "neural-rendering"' },
+          label: { type: Type.STRING, description: '2-5 word topic name' },
+          summary: { type: Type.STRING, description: '1-2 sentences on what the conversation actually said about this topic' },
+          parentId: { type: Type.STRING, description: 'id of the parent topic if this is a subtopic, otherwise an empty string' },
+        },
+        required: ['id', 'label', 'summary', 'parentId'],
+      },
+    },
+    insights: {
+      type: Type.ARRAY,
+      description: 'Concrete takeaways: specific facts, conclusions, mechanisms, numbers, or recommendations the conversation established. Aim for 2-5 per topic.',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          topicId: { type: Type.STRING, description: 'id of the topic this insight belongs to' },
+          label: { type: Type.STRING, description: 'Short headline for the insight (under 12 words)' },
+          detail: { type: Type.STRING, description: '1-3 sentences stating the insight plainly, faithful to the transcript' },
+        },
+        required: ['topicId', 'label', 'detail'],
+      },
+    },
+    crossLinks: {
+      type: Type.ARRAY,
+      description: 'Meaningful relationships BETWEEN topics (not parent/child), each with a short relationship label',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          fromTopicId: { type: Type.STRING },
+          toTopicId: { type: Type.STRING },
+          label: { type: Type.STRING, description: 'Short relationship phrase, e.g. "depends on", "contrasts with", "enables", "is an example of"' },
+        },
+        required: ['fromTopicId', 'toTopicId', 'label'],
+      },
+    },
+    sourceAssignments: {
+      type: Type.ARRAY,
+      description: 'For each provided source id, the topic it most directly supports. Omit sources that fit nowhere.',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          sourceId: { type: Type.STRING },
+          topicId: { type: Type.STRING },
+        },
+        required: ['sourceId', 'topicId'],
+      },
+    },
+  },
+  required: ['title', 'summary', 'topics', 'insights', 'crossLinks', 'sourceAssignments'],
+};
+
+export interface UnderstandingSourceInput {
+  id: string;
+  title: string;
+  description: string;
+}
+
+export async function analyzeDeepDiveUnderstanding(
+  transcript: string,
+  sources: UnderstandingSourceInput[],
+): Promise<DeepDiveUnderstanding> {
+  const ai = getClient();
+
+  const sourcesBlock = sources.length
+    ? sources.map(s => `[${s.id}] ${s.title}${s.description ? ` — ${s.description.slice(0, 200)}` : ''}`).join('\n')
+    : '(no sources)';
+
+  const prompt = `You are analyzing the full transcript of a "DeepDive" — a branching research conversation between a user and AI assistants. Your job is NOT to describe the chat's structure (threads, messages, branches). It is to map the SUBJECT MATTER itself: the actual ideas, facts, and themes that were discussed, and how they relate to each other.
+
+Extract:
+1. topics — the core subjects of the conversation. Use the user's questions to find what they were trying to understand, and the assistant responses for the substance. Add subtopics (via parentId) only when a topic has a clearly distinct sub-area that earned real discussion.
+2. insights — the meat and bones: concrete facts, conclusions, mechanisms, trade-offs, numbers, and recommendations the conversation established, each attached to its topic.
+3. crossLinks — how topics relate to EACH OTHER (depends on, contrasts with, enables, is an example of, ...). Only include relationships the transcript actually supports.
+4. sourceAssignments — match each listed source to the single topic it most supports.
+
+Ground everything in the transcript. Do not invent topics or insights that were not actually discussed. Write labels and summaries in plain language a reader could understand without seeing the chat.
+
+SOURCES REFERENCED IN THE CONVERSATION:
+${sourcesBlock}
+
+TRANSCRIPT:
+"""
+${transcript}
+"""`;
+
+  const result = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    config: { responseMimeType: 'application/json', responseSchema: understandingSchema },
+  });
+
+  const out = result.text;
+  if (!out) throw new Error('Gemini returned no content');
+  return validateUnderstanding(JSON.parse(out) as DeepDiveUnderstanding);
+}
+
+function validateUnderstanding(parsed: DeepDiveUnderstanding): DeepDiveUnderstanding {
+  parsed.topics = (parsed.topics ?? []).filter(t => t?.id && t?.label);
+  if (!parsed.topics.length) throw new Error('The analysis found no topics in this conversation.');
+  parsed.insights = (parsed.insights ?? []).filter(i => i?.label);
+  parsed.crossLinks = (parsed.crossLinks ?? []).filter(l => l?.fromTopicId && l?.toTopicId);
+  parsed.sourceAssignments = parsed.sourceAssignments ?? [];
+  return parsed;
+}
+
+/**
+ * Drill-down analysis: build a sub-network for ONE topic node of an existing
+ * understanding map. Strictly conversation-grounded — it re-reads the same
+ * transcript zoomed into the focus topic and maps only what was actually said
+ * about it, so deeper levels never drift into invented material.
+ */
+export async function analyzeUnderstandingDrilldown(
+  focus: { label: string; detail: string },
+  path: string[],
+  transcript: string,
+  sources: UnderstandingSourceInput[],
+): Promise<DeepDiveUnderstanding> {
+  const ai = getClient();
+
+  const sourcesBlock = sources.length
+    ? sources.map(s => `[${s.id}] ${s.title}${s.description ? ` — ${s.description.slice(0, 200)}` : ''}`).join('\n')
+    : '(no sources)';
+
+  const prompt = `You are analyzing the full transcript of a "DeepDive" — a branching research conversation between a user and AI assistants. An understanding map of the whole conversation already exists; the user is now DRILLING DOWN into one node of it to see its internal structure.
+
+DRILL PATH (outer map → focus): ${path.join(' → ') || '(top level)'}
+
+FOCUS TOPIC: ${focus.label}
+${focus.detail ? `FOCUS CONTEXT: ${focus.detail}` : ''}
+
+Map the internal structure of the FOCUS TOPIC ONLY, using strictly what the transcript actually says about it (or directly relates to it):
+1. title — restate the focus topic in 3-8 words.
+2. summary — 2-3 sentences on what the conversation established about this specific topic.
+3. topics — the distinct facets/aspects OF THE FOCUS TOPIC that earned real discussion. These become the hubs of the sub-network. Use subtopics (parentId) sparingly.
+4. insights — concrete facts, conclusions, mechanisms, trade-offs the conversation established about each facet.
+5. crossLinks — how the facets relate to each other, with short relationship labels.
+6. sourceAssignments — only sources that directly support a facet of the focus topic; omit the rest.
+
+CRITICAL: Stay strictly grounded in the transcript. Do NOT pad with your own general knowledge of the topic. If the conversation only touched the focus topic briefly, return FEWER topics and insights — a small honest map beats an invented one.
+
+SOURCES REFERENCED IN THE CONVERSATION:
+${sourcesBlock}
+
+TRANSCRIPT:
+"""
+${transcript}
+"""`;
+
+  const result = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    config: { responseMimeType: 'application/json', responseSchema: understandingSchema },
+  });
+
+  const out = result.text;
+  if (!out) throw new Error('Gemini returned no content');
+  return validateUnderstanding(JSON.parse(out) as DeepDiveUnderstanding);
+}
+
 const EMBED_MAX_CHARS = 8000;        // per-item cap (model input limit)
 // Batch several chunks per request to stay well under the requests-per-minute
 // quota. Bounded by both item count and total chars so a request never gets

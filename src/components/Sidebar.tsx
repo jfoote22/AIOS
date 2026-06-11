@@ -1,13 +1,14 @@
 import { motion } from 'motion/react';
-import { Scissors, Brain, BrainCircuit, Feather, Settings, ChevronLeft, ChevronRight, Camera, KanbanSquare, Terminal as TerminalIcon } from 'lucide-react';
+import { Scissors, Brain, BrainCircuit, Feather, Settings, ChevronLeft, ChevronRight, Home, KanbanSquare, Terminal as TerminalIcon } from 'lucide-react';
 
-export type TabId = 'deepdives' | 'snipping' | 'secondbrain' | 'terminal' | 'kanban' | 'hermes' | 'settings';
+export type TabId = 'home' | 'deepdives' | 'snipping' | 'secondbrain' | 'terminal' | 'kanban' | 'hermes' | 'settings';
 
 interface TabDef { id: TabId; label: string; icon: React.ComponentType<{ className?: string }>; }
 // NOTE: The 'snipping' tab is intentionally absent here — snippet capture and
 // editing now live inside Second Brain. SnippingTab stays mounted (App.tsx) as
 // the global capture host, and the Quick Snip CTA below still triggers it.
 const MAIN_TABS: TabDef[] = [
+  { id: 'home',          label: 'Home',          icon: Home },
   { id: 'secondbrain',   label: 'Second Brain',  icon: Brain },
   { id: 'deepdives',     label: 'DeepDive',      icon: BrainCircuit },
   { id: 'kanban',        label: 'Orchestra',     icon: KanbanSquare },
@@ -50,12 +51,7 @@ export default function Sidebar({ active, onSelect, collapsed, onToggle, onQuick
     >
       <div className={`flex items-center ${collapsed ? 'justify-center' : 'justify-between'} px-4 h-16 border-b border-zinc-800`}>
         {!collapsed && (
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-md bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center">
-              <Camera className="w-4 h-4 text-white" />
-            </div>
-            <span className="text-sm font-bold tracking-tight">AIOS</span>
-          </div>
+          <span className="text-sm font-bold tracking-tight">AIOS</span>
         )}
         <button
           onClick={onToggle}

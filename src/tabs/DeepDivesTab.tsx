@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Save, FolderOpen, Plus, Copy, X, AlertCircle, MessageSquare, Trash2, Clock, Bot, Layers, Network, Search, Link2, Video, ArrowRight, ArrowDown } from 'lucide-react';
+import { Save, FolderOpen, Plus, Copy, X, AlertCircle, MessageSquare, Trash2, Clock, Bot, Layers, Network, Search, Link2, Video, Loader2, RefreshCw, Brain, ArrowUp, ChevronRight, FileText, Target, Check } from 'lucide-react';
 import ThreadedChat from '../components/ThreadedChat';
 import * as db from '../lib/db';
 import { onConfiguredChange, getConfigured, type ProviderId } from '../lib/providers';
 import { consumeSeed, onSeedChange, type DeepDiveSeed } from '../lib/deepdiveSeed';
 import { emitDeepDivesChange } from '../lib/deepdiveStore';
+import { emitSnippetsChange } from '../lib/snippetStore';
+import {
+  isGeminiReady, analyzeDeepDiveUnderstanding, analyzeUnderstandingDrilldown,
+  embedText, buildEmbedSource,
+  type DeepDiveUnderstanding, type UnderstandingSourceInput,
+} from '../lib/ai';
 
 export interface DeepDiveRecord {
   id: string;
@@ -20,12 +26,14 @@ export interface DeepDiveRecord {
   activeThreadId?: string | null;
   timestamp: number;
   updatedAt: number;
+  /** Saved Understanding hierarchy (root network + drill-down sub-networks). */
+  understanding?: UnderstandingTree;
 }
 
 interface UnderstandingNode {
   id: string;
   label: string;
-  group: 'root' | 'main' | 'thread' | 'concept' | 'source';
+  group: 'root' | 'topic' | 'subtopic' | 'insight' | 'source';
   kind: string;
   val: number;
   detail?: string;
@@ -37,7 +45,9 @@ interface UnderstandingNode {
 interface UnderstandingLink {
   source: string;
   target: string;
-  kind: 'contains' | 'context' | 'parent' | 'mentions' | 'source';
+  kind: 'contains' | 'insight' | 'relates' | 'source';
+  /** Relationship phrase shown on 'relates' edges (e.g. "depends on"). */
+  label?: string;
   value: number;
 }
 
@@ -46,7 +56,48 @@ interface UnderstandingGraph {
   links: UnderstandingLink[];
 }
 
-type UnderstandingLayout = 'horizontal' | 'vertical';
+/** One network in the drill-down hierarchy. The root level maps the whole
+ *  conversation; every other level zooms into one node of its parent. */
+interface UnderstandingLevel {
+  id: string;
+  title: string;
+  parentId: string | null;
+  /** node.id in the PARENT level's graph that this level drills into. */
+  parentNodeId: string | null;
+  graph: UnderstandingGraph;
+  /** node.id (in THIS level's graph) -> child level id. */
+  children: Record<string, string>;
+}
+
+interface UnderstandingTree {
+  rootId: string;
+  levels: Record<string, UnderstandingLevel>;
+}
+
+type UnderstandingStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error';
+type NodeChatAction = 'ask' | 'details' | 'simplify' | 'examples' | 'links' | 'videos' | 'deep';
+
+// Same action set (and ordering) as ThreadedChat's text-selection context menu.
+const NODE_CHAT_ACTIONS: { action: NodeChatAction; label: string; Icon: any; color: string }[] = [
+  { action: 'details', label: 'Get more details', Icon: Search, color: 'text-emerald-400' },
+  { action: 'links', label: 'Get links', Icon: Link2, color: 'text-sky-400' },
+  { action: 'videos', label: 'Get videos', Icon: Video, color: 'text-yellow-400' },
+  { action: 'deep', label: 'Deep Dive (autonomous research)', Icon: Brain, color: 'text-purple-400' },
+  { action: 'examples', label: 'Give examples', Icon: FileText, color: 'text-violet-400' },
+  { action: 'simplify', label: 'Simplify this', Icon: Target, color: 'text-orange-400' },
+  { action: 'ask', label: 'Ask about this', Icon: MessageSquare, color: 'text-cyan-400' },
+];
+
+function levelPath(tree: UnderstandingTree, levelId: string): UnderstandingLevel[] {
+  const path: UnderstandingLevel[] = [];
+  let cur: UnderstandingLevel | undefined = tree.levels[levelId];
+  let guard = 0;
+  while (cur && guard++ < 50) {
+    path.unshift(cur);
+    cur = cur.parentId ? tree.levels[cur.parentId] : undefined;
+  }
+  return path;
+}
 
 export default function DeepDivesTab() {
   const threadedChatRef = useRef<any>(null);
@@ -60,10 +111,18 @@ export default function DeepDivesTab() {
   const [configured, setConfigured] = useState<Set<ProviderId>>(getConfigured());
   const [showNewChatConfirm, setShowNewChatConfirm] = useState(false);
   const [showUnderstanding, setShowUnderstanding] = useState(false);
-  const [understanding, setUnderstanding] = useState<UnderstandingGraph>({ nodes: [], links: [] });
+  const [tree, setTree] = useState<UnderstandingTree | null>(null);
+  const [currentLevelId, setCurrentLevelId] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<UnderstandingNode | null>(null);
   const [understandingQuery, setUnderstandingQuery] = useState('');
-  const [understandingLayout, setUnderstandingLayout] = useState<UnderstandingLayout>('horizontal');
+  const [understandingStatus, setUnderstandingStatus] = useState<UnderstandingStatus>('idle');
+  const [understandingError, setUnderstandingError] = useState('');
+  const [drillingNodeId, setDrillingNodeId] = useState<string | null>(null);
+  const [nodeMenu, setNodeMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
+  const [brainStatus, setBrainStatus] = useState<'idle' | 'sending' | 'sent'>('idle');
+
+  const currentLevel = tree && currentLevelId ? tree.levels[currentLevelId] ?? null : null;
+  const understanding: UnderstandingGraph = currentLevel?.graph ?? { nodes: [], links: [] };
 
   useEffect(() => onConfiguredChange(setConfigured), []);
   useEffect(() => { refresh(); }, []);
@@ -73,8 +132,14 @@ export default function DeepDivesTab() {
     const apply = (seed: DeepDiveSeed | null) => {
       if (!seed) return;
       const prompt = buildSeedPrompt(seed);
-      // Small delay so the ref is wired up when navigating from another tab
-      setTimeout(() => threadedChatRef.current?.setMainInput?.(prompt), 80);
+      // Small delay so the ref is wired up when navigating from another tab.
+      // Send immediately — no extra "press send" step — then focus lands back
+      // in the (now empty) input, ready for a follow-up question.
+      setTimeout(() => {
+        const chat = threadedChatRef.current;
+        if (chat?.sendMainMessage) chat.sendMainMessage(prompt);
+        else chat?.setMainInput?.(prompt);
+      }, 80);
     };
     apply(consumeSeed());
     return onSeedChange(s => { apply(s); consumeSeed(); });
@@ -112,6 +177,7 @@ export default function DeepDivesTab() {
         activeThreadId: state.activeThreadId ?? null,
         timestamp: currentId ? (saved.find(s => s.id === currentId)?.timestamp ?? Date.now()) : Date.now(),
         updatedAt: Date.now(),
+        understanding: tree ?? undefined,
       };
       // Best-effort: embed the session's assistant text so it joins the Second
       // Brain semantic graph as a connectable node (non-fatal if Gemini is off).
@@ -149,6 +215,15 @@ export default function DeepDivesTab() {
       setCurrentId(record.id);
       setSaveTitle(record.title);
       setSaveDescription(record.description ?? '');
+      // Restore the saved Understanding hierarchy (if any) so Understand opens
+      // it instantly instead of re-running the analysis.
+      const savedTree = record.understanding && record.understanding.rootId && record.understanding.levels?.[record.understanding.rootId]
+        ? record.understanding : null;
+      setTree(savedTree);
+      setCurrentLevelId(savedTree?.rootId ?? null);
+      setSelectedNode(null);
+      setUnderstandingStatus(savedTree ? 'ready' : 'idle');
+      setUnderstandingError('');
       setShowLoad(false);
     } catch (e: any) {
       console.error('Load failed:', e);
@@ -182,27 +257,158 @@ export default function DeepDivesTab() {
     setSaveTitle('');
     setSaveDescription('');
     setShowNewChatConfirm(false);
+    setTree(null);
+    setCurrentLevelId(null);
+    setSelectedNode(null);
+    setUnderstandingStatus('idle');
+    setUnderstandingError('');
   };
 
   const handleCopy = () => threadedChatRef.current?.copyAllAIResponses?.();
 
-  const handleUnderstand = () => {
+  const runRootAnalysis = () => {
     threadedChatRef.current?.forceUpdateThreadMessages?.();
-    setTimeout(() => {
-      const state = threadedChatRef.current?.getCurrentState?.();
-      const graph = buildUnderstandingGraph(state, understandingLayout);
-      setUnderstanding(graph);
-      setSelectedNode(graph.nodes[0] ?? null);
-      setShowUnderstanding(true);
+    setUnderstandingStatus('loading');
+    setUnderstandingError('');
+    setSelectedNode(null);
+    setNodeMenu(null);
+    // Small delay so forceUpdateThreadMessages has flushed before we read state.
+    setTimeout(async () => {
+      try {
+        const state = threadedChatRef.current?.getCurrentState?.();
+        const hasContent = (state?.mainMessages?.length ?? 0) > 0 || (state?.threads?.length ?? 0) > 0;
+        if (!hasContent) { setUnderstandingStatus('empty'); return; }
+        if (!isGeminiReady()) {
+          throw new Error('Gemini API key is not configured. Open Models to add your key — it powers the topic analysis.');
+        }
+        const graph = await buildUnderstandingGraph(state);
+        if (!graph.nodes.length) { setTree(null); setCurrentLevelId(null); setUnderstandingStatus('empty'); return; }
+        const rootId = `lvl-${Date.now().toString(36)}`;
+        const rootLabel = graph.nodes.find(n => n.id === 'root')?.label || 'Overview';
+        setTree({
+          rootId,
+          levels: { [rootId]: { id: rootId, title: rootLabel, parentId: null, parentNodeId: null, graph, children: {} } },
+        });
+        setCurrentLevelId(rootId);
+        setSelectedNode(graph.nodes[0] ?? null);
+        setUnderstandingStatus('ready');
+      } catch (e: any) {
+        console.error('Understand failed:', e);
+        setUnderstandingError(e?.message ?? String(e));
+        setUnderstandingStatus('error');
+      }
     }, 120);
   };
 
-  const relayoutUnderstanding = (layout: UnderstandingLayout) => {
-    setUnderstandingLayout(layout);
-    setUnderstanding(prev => layoutUnderstandingGraph({
-      ...prev,
-      nodes: prev.nodes.map(n => ({ ...n, x: undefined, y: undefined })),
-    }, layout));
+  const handleUnderstand = () => {
+    setShowUnderstanding(true);
+    // An existing tree (from this session or a loaded save) opens instantly;
+    // Re-analyze forces a fresh run.
+    if (tree && understandingStatus === 'ready') return;
+    runRootAnalysis();
+  };
+
+  const handleReanalyze = () => {
+    if (tree && Object.keys(tree.levels).length > 1 &&
+        !confirm('Re-analyzing rebuilds the root network and discards all drill-down sub-networks. Continue?')) return;
+    setTree(null);
+    setCurrentLevelId(null);
+    runRootAnalysis();
+  };
+
+  const navigateToLevel = (levelId: string) => {
+    if (!tree || !tree.levels[levelId]) return;
+    setCurrentLevelId(levelId);
+    setSelectedNode(tree.levels[levelId].graph.nodes[0] ?? null);
+    setUnderstandingQuery('');
+    setNodeMenu(null);
+  };
+
+  // Create (or open, if it already exists) the drill-down sub-network for a node.
+  const handleDrill = async (node: UnderstandingNode) => {
+    if (!tree || !currentLevelId || node.group === 'root') return;
+    const existing = tree.levels[currentLevelId]?.children[node.id];
+    if (existing) { navigateToLevel(existing); return; }
+    if (drillingNodeId) return; // one drill at a time
+    setNodeMenu(null);
+    setDrillingNodeId(node.id);
+    const levelIdAtStart = currentLevelId;
+    try {
+      if (!isGeminiReady()) {
+        throw new Error('Gemini API key is not configured. Open Models to add your key.');
+      }
+      threadedChatRef.current?.forceUpdateThreadMessages?.();
+      await new Promise(r => setTimeout(r, 120));
+      const state = threadedChatRef.current?.getCurrentState?.();
+      const { transcript, sources } = buildAnalysisInput(
+        Array.isArray(state?.mainMessages) ? state.mainMessages : [],
+        Array.isArray(state?.threads) ? state.threads : [],
+        Array.isArray(state?.attachments) ? state.attachments : [],
+      );
+      if (!transcript.trim()) throw new Error('No conversation content to analyze.');
+      const path = levelPath(tree, levelIdAtStart).map(l => l.title);
+      const analysis = await analyzeUnderstandingDrilldown(
+        { label: node.label, detail: node.detail || '' },
+        [...path, node.label],
+        transcript,
+        sources.map(s => ({ id: s.id, title: s.title, description: s.description })),
+      );
+      const graph = layoutUnderstandingGraph(graphFromAnalysis(analysis, sources));
+      const levelId = `lvl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      setTree(prev => {
+        if (!prev || !prev.levels[levelIdAtStart]) return prev;
+        const parent = prev.levels[levelIdAtStart];
+        return {
+          ...prev,
+          levels: {
+            ...prev.levels,
+            [levelIdAtStart]: { ...parent, children: { ...parent.children, [node.id]: levelId } },
+            [levelId]: { id: levelId, title: node.label, parentId: levelIdAtStart, parentNodeId: node.id, graph, children: {} },
+          },
+        };
+      });
+    } catch (e: any) {
+      console.error('Drill-down failed:', e);
+      alert(`Sub-network failed: ${e?.message ?? e}`);
+    } finally {
+      setDrillingNodeId(null);
+    }
+  };
+
+  // Text handed to the chat when a node is sent to a context action — the same
+  // role the selected text plays in the normal selection flow.
+  const nodeContextText = (node: UnderstandingNode) => {
+    const detail = (node.detail || '').trim();
+    return clip(detail ? `${node.label} — ${detail}` : node.label, 1500);
+  };
+
+  const spawnFromNode = (node: UnderstandingNode, action: NodeChatAction) => {
+    const text = nodeContextText(node);
+    setNodeMenu(null);
+    setShowUnderstanding(false);
+    // Let the modal close before the thread spawns so the new thread is visible.
+    setTimeout(() => threadedChatRef.current?.spawnThreadFromContext?.(text, action), 150);
+  };
+
+  // Export the CURRENT network to the Second Brain as a doc cluster: one
+  // overview neuron + one neuron per topic, sharing a memoryDocId so the
+  // brain's existing collapse/expand switch shows them as one node (compact)
+  // or one neuron per topic (expanded).
+  const handleSendToBrain = async () => {
+    if (!currentLevel || brainStatus !== 'idle') return;
+    try {
+      setBrainStatus('sending');
+      if (!isGeminiReady()) {
+        throw new Error('Gemini API key is not configured. Open Models to add your key.');
+      }
+      await exportUnderstandingToBrain(currentLevel, tree && currentLevelId ? levelPath(tree, currentLevelId).map(l => l.title) : []);
+      setBrainStatus('sent');
+      setTimeout(() => setBrainStatus('idle'), 2500);
+    } catch (e: any) {
+      console.error('Send to Brain failed:', e);
+      setBrainStatus('idle');
+      alert(`Send to Brain failed: ${e?.message ?? e}`);
+    }
   };
 
   const formatDate = (ts: number) => {
@@ -339,31 +545,76 @@ export default function DeepDivesTab() {
                     <div className="p-2 bg-indigo-600/10 border border-indigo-500/20 rounded-lg"><Network className="w-4 h-4 text-indigo-400" /></div>
                     <div>
                       <h2 className="text-sm font-bold uppercase tracking-widest text-zinc-100">DeepDive Understanding</h2>
-                      <p className="text-[11px] text-zinc-500">{understanding.nodes.length} nodes · {understanding.links.length} relationships</p>
+                      <p className="text-[11px] text-zinc-500">
+                        {understandingStatus === 'loading'
+                          ? 'Reading the conversation and mapping topics…'
+                          : understandingStatus === 'ready'
+                            ? `${understanding.nodes.filter(n => n.group === 'topic' || n.group === 'subtopic').length} topics · ${understanding.nodes.filter(n => n.group === 'insight').length} insights · ${understanding.links.length} relationships`
+                            : 'Topic map of what this DeepDive is about'}
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-1">
-                      <button
-                        onClick={() => relayoutUnderstanding('horizontal')}
-                        className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${understandingLayout === 'horizontal' ? 'bg-indigo-600/20 text-indigo-300' : 'text-zinc-500 hover:text-white hover:bg-zinc-800'}`}
-                        title="Lay out left to right"
-                      >
-                        <ArrowRight className="w-3.5 h-3.5" />Left to Right
-                      </button>
-                      <button
-                        onClick={() => relayoutUnderstanding('vertical')}
-                        className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${understandingLayout === 'vertical' ? 'bg-indigo-600/20 text-indigo-300' : 'text-zinc-500 hover:text-white hover:bg-zinc-800'}`}
-                        title="Lay out top to bottom"
-                      >
-                        <ArrowDown className="w-3.5 h-3.5" />Top to Bottom
-                      </button>
-                    </div>
+                    <button
+                      onClick={handleSendToBrain}
+                      disabled={understandingStatus !== 'ready' || brainStatus === 'sending'}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 border text-[10px] font-bold uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50 ${
+                        brainStatus === 'sent'
+                          ? 'bg-emerald-600/15 border-emerald-500/40 text-emerald-300'
+                          : 'bg-indigo-600/15 hover:bg-indigo-600/25 border-indigo-500/30 text-indigo-300 hover:text-indigo-200'
+                      }`}
+                      title="Save this network to the Second Brain (one neuron per topic, collapsible to a single cluster)"
+                    >
+                      {brainStatus === 'sending' ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : brainStatus === 'sent' ? <Check className="w-3.5 h-3.5" />
+                        : <Brain className="w-3.5 h-3.5" />}
+                      {brainStatus === 'sent' ? 'Sent to Brain' : 'Send to Brain'}
+                    </button>
+                    <button
+                      onClick={handleReanalyze}
+                      disabled={understandingStatus === 'loading'}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white text-[10px] font-bold uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50"
+                      title="Re-run the topic analysis on the current conversation"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${understandingStatus === 'loading' ? 'animate-spin' : ''}`} />Re-analyze
+                    </button>
                     <button onClick={() => setShowUnderstanding(false)} className="p-2 rounded-full bg-white/10 hover:bg-white/20 transition-colors">
                       <X className="w-5 h-5" />
                     </button>
                   </div>
                 </header>
+
+                {/* Level breadcrumbs — visible once a hierarchy exists */}
+                {understandingStatus === 'ready' && tree && currentLevel && (
+                  <div className="h-10 px-5 border-b border-zinc-800 flex items-center gap-2 shrink-0 bg-zinc-950/60">
+                    <button
+                      onClick={() => currentLevel.parentId && navigateToLevel(currentLevel.parentId)}
+                      disabled={!currentLevel.parentId}
+                      className="flex items-center gap-1 px-2 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-md text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white transition-colors disabled:opacity-40 disabled:hover:bg-zinc-900 disabled:hover:text-zinc-400"
+                      title="Go up one level"
+                    >
+                      <ArrowUp className="w-3 h-3" />Up
+                    </button>
+                    <div className="flex items-center gap-1 min-w-0 overflow-x-auto scrollbar-hide">
+                      {levelPath(tree, currentLevel.id).map((lvl, i, arr) => (
+                        <div key={lvl.id} className="flex items-center gap-1 shrink-0">
+                          {i > 0 && <ChevronRight className="w-3 h-3 text-zinc-700" />}
+                          <button
+                            onClick={() => navigateToLevel(lvl.id)}
+                            className={`px-2 py-0.5 rounded text-[11px] font-semibold transition-colors ${
+                              i === arr.length - 1 ? 'bg-indigo-600/15 text-indigo-300' : 'text-zinc-500 hover:text-white hover:bg-zinc-800'
+                            }`}
+                          >
+                            {lvl.title.length > 40 ? lvl.title.slice(0, 40) + '…' : lvl.title}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <span className="ml-auto shrink-0 text-[10px] text-zinc-600">
+                      Right-click a node for actions · double-click outlined nodes to dive in
+                    </span>
+                  </div>
+                )}
 
                 <div className="flex-1 min-h-0 grid grid-cols-[320px_minmax(0,1fr)_360px]">
                   <aside className="border-r border-zinc-800 p-4 overflow-y-auto">
@@ -395,22 +646,59 @@ export default function DeepDivesTab() {
                     </div>
                   </aside>
 
-                  <main className="relative min-h-0 bg-zinc-950 overflow-auto">
-                    {understanding.nodes.length === 0 ? (
+                  <main className="relative min-h-0 bg-zinc-950 overflow-hidden">
+                    {understandingStatus === 'loading' ? (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-sm text-zinc-400">
+                        <Loader2 className="w-8 h-8 text-indigo-400 animate-spin" />
+                        <div className="text-center">
+                          <p className="font-semibold text-zinc-300">Reading the conversation…</p>
+                          <p className="text-xs text-zinc-500 mt-1">Extracting topics, key insights, and how they relate.</p>
+                        </div>
+                      </div>
+                    ) : understandingStatus === 'error' ? (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 p-8 text-center">
+                        <AlertCircle className="w-8 h-8 text-red-400" />
+                        <p className="text-sm text-zinc-300 max-w-md leading-relaxed">{understandingError || 'Analysis failed.'}</p>
+                        <button onClick={handleUnderstand}
+                          className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold rounded-lg uppercase tracking-wider transition-colors">
+                          <RefreshCw className="w-3.5 h-3.5" />Try again
+                        </button>
+                      </div>
+                    ) : understanding.nodes.length === 0 ? (
                       <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500">
-                        No DeepDive content to map yet.
+                        No DeepDive content to map yet. Start a conversation first.
                       </div>
                     ) : (
                       <UnderstandingMap
+                        key={currentLevelId || 'root'}
                         graph={understanding}
-                        layout={understandingLayout}
                         selectedId={selectedNode?.id || null}
+                        childNodeIds={new Set(Object.keys(currentLevel?.children ?? {}))}
+                        drillingNodeId={drillingNodeId}
                         onSelect={setSelectedNode}
+                        onNodeContextMenu={(node, x, y) => {
+                          setSelectedNode(node);
+                          setNodeMenu({ x, y, nodeId: node.id });
+                        }}
+                        onNodeDoubleClick={(node) => {
+                          const child = currentLevel?.children[node.id];
+                          if (child) navigateToLevel(child);
+                        }}
                         onMoveNode={(id, x, y) => {
-                          setUnderstanding(prev => ({
-                            ...prev,
-                            nodes: prev.nodes.map(n => (n.id === id ? { ...n, x, y } : n)),
-                          }));
+                          setTree(prev => {
+                            if (!prev || !currentLevelId || !prev.levels[currentLevelId]) return prev;
+                            const lvl = prev.levels[currentLevelId];
+                            return {
+                              ...prev,
+                              levels: {
+                                ...prev.levels,
+                                [currentLevelId]: {
+                                  ...lvl,
+                                  graph: { ...lvl.graph, nodes: lvl.graph.nodes.map(n => (n.id === id ? { ...n, x, y } : n)) },
+                                },
+                              },
+                            };
+                          });
                           setSelectedNode(prev => (prev?.id === id ? { ...prev, x, y } : prev));
                         }}
                       />
@@ -435,6 +723,28 @@ export default function DeepDivesTab() {
                             Open source
                           </a>
                         )}
+                        {selectedNode.group !== 'root' && (
+                          <div className="space-y-2">
+                            <button
+                              onClick={() => handleDrill(selectedNode)}
+                              disabled={!!drillingNodeId}
+                              className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all active:scale-95 disabled:opacity-60 disabled:active:scale-100 ${
+                                currentLevel?.children[selectedNode.id]
+                                  ? 'bg-zinc-900 hover:bg-zinc-800 border border-indigo-500/40 text-indigo-300'
+                                  : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/10'
+                              }`}
+                            >
+                              {drillingNodeId === selectedNode.id ? (
+                                <><Loader2 className="w-3.5 h-3.5 animate-spin" />Building sub-network…</>
+                              ) : currentLevel?.children[selectedNode.id] ? (
+                                <><Layers className="w-3.5 h-3.5" />Open sub-network</>
+                              ) : (
+                                <><Network className="w-3.5 h-3.5" />Create sub-network</>
+                              )}
+                            </button>
+                            <p className="text-[10px] text-zinc-600 text-center">Right-click the node for chat actions (details, links, deep dive…)</p>
+                          </div>
+                        )}
                         <div className="border-t border-zinc-800 pt-4">
                           <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Connected relationships</p>
                           <div className="space-y-1">
@@ -446,7 +756,7 @@ export default function DeepDivesTab() {
                                 const targetId = typeof l.target === 'string' ? l.target : (l.target as any).id;
                                 const otherId = sourceId === selectedNode.id ? targetId : sourceId;
                                 const other = understanding.nodes.find(n => n.id === otherId);
-                                return <p key={idx} className="text-xs text-zinc-500"><span className="text-zinc-400">{l.kind}</span> · {other?.label || otherId}</p>;
+                                return <p key={idx} className="text-xs text-zinc-500"><span className="text-zinc-400">{l.label || l.kind}</span> · {other?.label || otherId}</p>;
                               })}
                           </div>
                         </div>
@@ -458,6 +768,56 @@ export default function DeepDivesTab() {
                     )}
                   </aside>
                 </div>
+
+                {/* Node right-click menu */}
+                {nodeMenu && (() => {
+                  const node = understanding.nodes.find(n => n.id === nodeMenu.nodeId);
+                  if (!node) return null;
+                  const left = Math.max(8, Math.min(nodeMenu.x, window.innerWidth - 280));
+                  const top = Math.max(8, Math.min(nodeMenu.y, window.innerHeight - (node.group === 'root' ? 330 : 390)));
+                  return (
+                    <div
+                      className="fixed inset-0 z-[200]"
+                      onClick={() => setNodeMenu(null)}
+                      onContextMenu={(e) => { e.preventDefault(); setNodeMenu(null); }}
+                    >
+                      <div
+                        className="absolute w-64 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden"
+                        style={{ left, top }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="px-3 py-2 border-b border-zinc-800 bg-zinc-950/60">
+                          <p className="text-[9px] uppercase tracking-widest text-zinc-500">{node.kind}</p>
+                          <p className="text-xs font-bold text-zinc-100 truncate">{node.label}</p>
+                        </div>
+                        <div className="py-1">
+                          {NODE_CHAT_ACTIONS.map(({ action, label, Icon, color }) => (
+                            <button
+                              key={action}
+                              onClick={() => spawnFromNode(node, action)}
+                              className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors"
+                            >
+                              <Icon className={`w-3.5 h-3.5 ${color}`} />{label}
+                            </button>
+                          ))}
+                        </div>
+                        {node.group !== 'root' && (
+                          <div className="py-1 border-t border-zinc-800">
+                            <button
+                              onClick={() => handleDrill(node)}
+                              disabled={!!drillingNodeId}
+                              className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs font-semibold text-indigo-300 hover:bg-indigo-600/15 transition-colors disabled:opacity-50"
+                            >
+                              {currentLevel?.children[node.id]
+                                ? <><Layers className="w-3.5 h-3.5" />Open sub-network</>
+                                : <><Network className="w-3.5 h-3.5" />Create sub-network</>}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           </motion.div>
@@ -590,7 +950,95 @@ function buildSeedPrompt(seed: DeepDiveSeed): string {
   ].join('\n');
 }
 
-function buildUnderstandingGraph(state: any, layout: UnderstandingLayout = 'horizontal'): UnderstandingGraph {
+// ---------- Understanding graph: semantic topic map ----------
+// Collects the whole conversation (main chat + every thread + research reports
+// + attachments) into a transcript, sends it to Gemini for topic/insight
+// extraction, and builds a cluster graph of the SUBJECT MATTER — not the chat
+// structure.
+
+interface SourceRef extends UnderstandingSourceInput {
+  url?: string;
+  isVideo?: boolean;
+}
+
+const MAX_MSG_CHARS = 2500;
+const MAX_REPORT_CHARS = 9000;
+const MAX_TRANSCRIPT_CHARS = 90_000;
+const MAX_SOURCES = 24;
+
+function clip(text: string, max: number): string {
+  const t = (text || '').trim();
+  return t.length > max ? t.slice(0, max) + ' …' : t;
+}
+
+function buildAnalysisInput(mainMessages: any[], threads: any[], attachments: any[]): { transcript: string; sources: SourceRef[] } {
+  const parts: string[] = [];
+  const sources: SourceRef[] = [];
+  let sourceN = 0;
+  const pushSource = (raw: any, isVideo: boolean, description: string) => {
+    if (sources.length >= MAX_SOURCES) return;
+    const title = raw?.title || raw?.url || raw?.channel || 'Source';
+    sourceN += 1;
+    sources.push({ id: `S${sourceN}`, title, description: clip(description, 240), url: raw?.url, isVideo });
+  };
+
+  if (mainMessages.length) {
+    parts.push('=== MAIN CHAT ===');
+    for (const m of mainMessages) {
+      const content = (m?.content || '').trim();
+      if (!content) continue;
+      parts.push(`${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${clip(content, MAX_MSG_CHARS)}`);
+    }
+  }
+
+  for (const [idx, thread] of threads.entries()) {
+    parts.push(`=== THREAD: ${thread.title || `Thread ${idx + 1}`} ===`);
+    if (thread.selectedContext) parts.push(`(branched from this selected text): ${clip(thread.selectedContext, 1200)}`);
+    for (const m of thread.messages || []) {
+      const content = (m?.content || '').trim();
+      if (!content) continue;
+      parts.push(`${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${clip(content, MAX_MSG_CHARS)}`);
+    }
+    const r = thread.research;
+    if (r?.intro) parts.push(`RESEARCH INTRO: ${clip(r.intro, 1500)}`);
+    if (r?.kind === 'deep' && r.report) parts.push(`DEEP RESEARCH REPORT:\n${clip(r.report, MAX_REPORT_CHARS)}`);
+
+    for (const s of r?.links || []) pushSource(s, false, s.reason || s.source || s.url || '');
+    for (const v of r?.videos || []) pushSource(v, true, v.reason || v.channel || '');
+    for (const s of r?.sources || []) pushSource(s, false, s.summary || s.subQuestion || s.url || '');
+  }
+
+  const readyAttachments = attachments.filter((a: any) => a?.text);
+  if (readyAttachments.length) {
+    parts.push('=== ATTACHED MATERIAL ===');
+    for (const a of readyAttachments) {
+      parts.push(`ATTACHMENT "${a.title || a.label || a.source}": ${clip(a.text, 2000)}`);
+    }
+  }
+
+  let transcript = parts.join('\n\n');
+  if (transcript.length > MAX_TRANSCRIPT_CHARS) {
+    transcript = transcript.slice(0, MAX_TRANSCRIPT_CHARS) + '\n\n…(transcript truncated for length)';
+  }
+  return { transcript, sources };
+}
+
+async function buildUnderstandingGraph(state: any): Promise<UnderstandingGraph> {
+  const mainMessages = Array.isArray(state?.mainMessages) ? state.mainMessages : [];
+  const threads = Array.isArray(state?.threads) ? state.threads : [];
+  const attachments = Array.isArray(state?.attachments) ? state.attachments : [];
+
+  const { transcript, sources } = buildAnalysisInput(mainMessages, threads, attachments);
+  if (!transcript.trim()) return { nodes: [], links: [] };
+
+  const analysis = await analyzeDeepDiveUnderstanding(
+    transcript,
+    sources.map(s => ({ id: s.id, title: s.title, description: s.description })),
+  );
+  return layoutUnderstandingGraph(graphFromAnalysis(analysis, sources));
+}
+
+function graphFromAnalysis(analysis: DeepDiveUnderstanding, sources: SourceRef[]): UnderstandingGraph {
   const nodes: UnderstandingNode[] = [];
   const links: UnderstandingLink[] = [];
   const addNode = (node: UnderstandingNode) => {
@@ -600,211 +1048,336 @@ function buildUnderstandingGraph(state: any, layout: UnderstandingLayout = 'hori
     if (link.source !== link.target && !links.some(l => l.source === link.source && l.target === link.target && l.kind === link.kind)) links.push(link);
   };
 
-  const mainMessages = Array.isArray(state?.mainMessages) ? state.mainMessages : [];
-  const threads = Array.isArray(state?.threads) ? state.threads : [];
-  const attachments = Array.isArray(state?.attachments) ? state.attachments : [];
-
-  if (!mainMessages.length && !threads.length && !attachments.length) return { nodes, links };
-
   addNode({
     id: 'root',
-    label: 'Current DeepDive',
+    label: analysis.title || 'This DeepDive',
     group: 'root',
     kind: 'overview',
     val: 14,
-    detail: `${mainMessages.length} main messages, ${threads.length} context threads, ${attachments.length} attachments.`,
+    detail: analysis.summary || '',
   });
 
-  if (mainMessages.length) {
-    const assistantText = mainMessages.filter((m: any) => m?.role === 'assistant').map((m: any) => m.content || '').join('\n\n');
+  const topicIds = new Set(analysis.topics.map(t => t.id));
+  const topicNodeId = (id: string) => `topic:${id}`;
+  // A subtopic whose parent the model never emitted is promoted to top-level.
+  const isSub = (t: { id: string; parentId: string }) => !!t.parentId && t.parentId !== t.id && topicIds.has(t.parentId);
+
+  for (const t of analysis.topics) {
+    const sub = isSub(t);
     addNode({
-      id: 'main',
-      label: 'Main Chat',
-      group: 'main',
-      kind: 'conversation',
-      val: 10,
-      detail: summarizeText(assistantText || mainMessages.map((m: any) => m.content || '').join('\n\n')),
+      id: topicNodeId(t.id),
+      label: t.label,
+      group: sub ? 'subtopic' : 'topic',
+      kind: sub ? 'subtopic' : 'topic',
+      val: sub ? 8 : 11,
+      detail: t.summary,
     });
-    addLink({ source: 'root', target: 'main', kind: 'contains', value: 3 });
+  }
+  for (const t of analysis.topics) {
+    addLink({
+      source: isSub(t) ? topicNodeId(t.parentId) : 'root',
+      target: topicNodeId(t.id),
+      kind: 'contains',
+      value: isSub(t) ? 2 : 3,
+    });
   }
 
-  const conceptCounts = new Map<string, { count: number; threadIds: Set<string>; samples: string[] }>();
-
-  for (const [idx, thread] of threads.entries()) {
-    const threadId = `thread:${thread.id || idx}`;
-    const label = thread.title || `${actionLabel(thread.actionType)} ${idx + 1}`;
-    const isDeep = thread.research?.kind === 'deep';
-    const threadText = [
-      thread.selectedContext || '',
-      ...(thread.messages || []).map((m: any) => m?.content || ''),
-      thread.research?.intro || '',
-      isDeep ? (thread.research?.report || '') : '',
-    ].join('\n\n');
-
-    addNode({
-      id: threadId,
-      label,
-      group: 'thread',
-      kind: actionLabel(thread.actionType),
-      val: 8 + Math.min(8, (thread.messages?.length || 0) * 1.2),
-      detail: [
-        thread.selectedContext ? `Context:\n${thread.selectedContext}` : '',
-        summarizeText(threadText) ? `\nSummary:\n${summarizeText(threadText)}` : '',
-      ].filter(Boolean).join('\n').trim(),
-      data: thread,
+  analysis.insights.forEach((ins, i) => {
+    const id = `insight:${i}`;
+    addNode({ id, label: ins.label, group: 'insight', kind: 'insight', val: 6, detail: ins.detail });
+    addLink({
+      source: topicIds.has(ins.topicId) ? topicNodeId(ins.topicId) : 'root',
+      target: id,
+      kind: 'insight',
+      value: 2,
     });
-    addLink({ source: 'root', target: threadId, kind: 'context', value: 2 });
+  });
 
-    if (thread.parentThreadId) {
-      addLink({ source: `thread:${thread.parentThreadId}`, target: threadId, kind: 'parent', value: 4 });
-    } else if (thread.sourceType === 'main' && mainMessages.length) {
-      addLink({ source: 'main', target: threadId, kind: 'context', value: 2 });
-    }
-
-    for (const concept of extractConcepts(threadText)) {
-      const current = conceptCounts.get(concept) || { count: 0, threadIds: new Set<string>(), samples: [] };
-      current.count += 1;
-      current.threadIds.add(threadId);
-      if (current.samples.length < 3 && thread.selectedContext) current.samples.push(thread.selectedContext.slice(0, 180));
-      conceptCounts.set(concept, current);
-    }
-
-    // Deep Research threads: render the planner's real decomposition —
-    // sub-questions become concept nodes, and each read source attaches to the
-    // sub-question it answered. This replaces the regex heuristics with the
-    // agent's actual research tree.
-    if (isDeep) {
-      const plan: string[] = thread.research?.plan || [];
-      const planNodeId = (qi: number) => `deepq:${thread.id || idx}:${qi}`;
-      plan.forEach((q, qi) => {
-        addNode({
-          id: planNodeId(qi),
-          label: `Q${qi + 1}. ${q.length > 70 ? q.slice(0, 70) + '…' : q}`,
-          group: 'concept',
-          kind: 'question',
-          val: 7,
-          detail: q,
-        });
-        addLink({ source: threadId, target: planNodeId(qi), kind: 'mentions', value: 2 });
-      });
-
-      const deepSources: any[] = thread.research?.sources || [];
-      for (const [sourceIdx, source] of deepSources.slice(0, 16).entries()) {
-        const sourceId = `deepsrc:${thread.id || idx}:${sourceIdx}`;
-        addNode({
-          id: sourceId,
-          label: source.title || source.url || 'Source',
-          group: 'source',
-          kind: 'link',
-          val: 4,
-          detail: source.summary || source.url || '',
-          data: { url: source.url },
-        });
-        const matchedQ = plan.findIndex(q => q === source.subQuestion);
-        addLink({
-          source: matchedQ >= 0 ? planNodeId(matchedQ) : threadId,
-          target: sourceId,
-          kind: 'source',
-          value: 1.5,
-        });
-      }
-      continue;
-    }
-
-    const researchLinks = thread.research?.links || [];
-    const researchVideos = thread.research?.videos || [];
-    for (const [sourceIdx, source] of [...researchLinks, ...researchVideos].slice(0, 8).entries()) {
-      const isVideo = !!source.videoId;
-      const sourceId = `source:${thread.id || idx}:${sourceIdx}`;
-      addNode({
-        id: sourceId,
-        label: source.title || source.url || source.channel || 'Source',
-        group: 'source',
-        kind: isVideo ? 'video' : 'link',
-        val: 4,
-        detail: source.reason || source.channel || source.source || source.url || '',
-        data: source,
-      });
-      addLink({ source: threadId, target: sourceId, kind: 'source', value: 1.5 });
-    }
+  for (const cl of analysis.crossLinks) {
+    if (!topicIds.has(cl.fromTopicId) || !topicIds.has(cl.toTopicId)) continue;
+    addLink({
+      source: topicNodeId(cl.fromTopicId),
+      target: topicNodeId(cl.toTopicId),
+      kind: 'relates',
+      label: cl.label || 'relates to',
+      value: 2,
+    });
   }
 
-  const topConcepts = Array.from(conceptCounts.entries())
-    .filter(([, info]) => info.count >= 2 || info.threadIds.size >= 2)
-    .sort((a, b) => (b[1].threadIds.size - a[1].threadIds.size) || (b[1].count - a[1].count))
-    .slice(0, 24);
-
-  for (const [concept, info] of topConcepts) {
-    const conceptId = `concept:${concept.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+  const assignedTopic = new Map(analysis.sourceAssignments.map(a => [a.sourceId, a.topicId]));
+  sources.forEach((s, i) => {
+    const topicId = assignedTopic.get(s.id);
+    if (!topicId || !topicIds.has(topicId)) return; // model judged it irrelevant
+    const id = `source:${i}`;
     addNode({
-      id: conceptId,
-      label: concept,
-      group: 'concept',
-      kind: 'concept',
-      val: 5 + Math.min(10, info.threadIds.size * 2),
-      detail: `Appears across ${info.threadIds.size} thread${info.threadIds.size === 1 ? '' : 's'}.`,
-      data: { samples: info.samples },
+      id,
+      label: s.title,
+      group: 'source',
+      kind: s.isVideo ? 'video' : 'link',
+      val: 4,
+      detail: s.description,
+      data: { url: s.url },
     });
-    for (const threadId of info.threadIds) {
-      addLink({ source: threadId, target: conceptId, kind: 'mentions', value: 1 + info.count * 0.2 });
-    }
-  }
+    addLink({ source: topicNodeId(topicId), target: id, kind: 'source', value: 1.5 });
+  });
 
-  return layoutUnderstandingGraph({ nodes, links }, layout);
+  return { nodes, links };
 }
 
-function layoutUnderstandingGraph(graph: UnderstandingGraph, layout: UnderstandingLayout): UnderstandingGraph {
-  const columns: UnderstandingNode['group'][] = ['root', 'main', 'thread', 'concept', 'source'];
-  const xByGroup: Record<string, number> = {};
-  const yByGroup: Record<string, number> = {};
-  const nextOffset: Record<string, number> = {};
-  for (const [idx, group] of columns.entries()) {
-    xByGroup[group] = layout === 'horizontal' ? 80 + idx * 340 : 100;
-    yByGroup[group] = layout === 'horizontal' ? 80 : 80 + idx * 260;
-    nextOffset[group] = 0;
+// Radial cluster layout: the overview sits in the center, topics fan around it,
+// and each topic's subtopics/insights/sources fan outward within the topic's
+// angular sector — so everything about one topic stays visually together.
+function layoutUnderstandingGraph(graph: UnderstandingGraph): UnderstandingGraph {
+  if (!graph.nodes.length) return graph;
+
+  const children = new Map<string, string[]>();
+  const hasParent = new Set<string>();
+  for (const l of graph.links) {
+    if (l.kind === 'relates') continue; // cross-links don't define clusters
+    if (!children.has(l.source)) children.set(l.source, []);
+    children.get(l.source)!.push(l.target);
+    hasParent.add(l.target);
   }
 
-  const nodes = graph.nodes.map(node => {
-    const group = node.group;
-    const size = cardSize(node);
-    const gap = group === 'thread' ? 36 : 26;
-    const x = layout === 'horizontal'
-      ? xByGroup[group] ?? 760
-      : (xByGroup[group] ?? 100) + nextOffset[group];
-    const y = layout === 'horizontal'
-      ? (yByGroup[group] ?? 80) + nextOffset[group]
-      : yByGroup[group] ?? 80;
-    nextOffset[group] += layout === 'horizontal' ? size.h + gap : size.w + gap;
-    return { ...node, x, y };
+  const leafCount = (id: string): number => {
+    const kids = children.get(id) || [];
+    return kids.length ? kids.reduce((sum, k) => sum + leafCount(k), 0) : 1;
+  };
+
+  const RADII = [0, 540, 1010, 1400, 1720];
+  const pos = new Map<string, { x: number; y: number }>();
+
+  const place = (id: string, depth: number, a0: number, a1: number) => {
+    if (depth === 0) {
+      pos.set(id, { x: 0, y: 0 });
+    } else {
+      const mid = (a0 + a1) / 2;
+      const r = RADII[Math.min(depth, RADII.length - 1)];
+      pos.set(id, { x: r * Math.cos(mid), y: r * Math.sin(mid) });
+    }
+    const kids = children.get(id) || [];
+    if (!kids.length) return;
+    const total = kids.reduce((s, k) => s + leafCount(k), 0);
+    let start = a0;
+    for (const k of kids) {
+      const span = ((a1 - a0) * leafCount(k)) / total;
+      place(k, depth + 1, start, start + span);
+      start += span;
+    }
+  };
+
+  place('root', 0, -Math.PI / 2, (3 * Math.PI) / 2);
+
+  // Anything not reachable from the root (shouldn't normally happen) lines up below.
+  let strayX = 0;
+  for (const n of graph.nodes) {
+    if (!pos.has(n.id)) {
+      pos.set(n.id, { x: strayX, y: RADII[RADII.length - 1] + 360 });
+      strayX += cardSize(n).w + 40;
+    }
+  }
+
+  const placed = graph.nodes.map(n => {
+    const p = pos.get(n.id)!;
+    const size = cardSize(n);
+    return { ...n, x: p.x - size.w / 2, y: p.y - size.h / 2 };
   });
-  return { ...graph, nodes };
+  const minX = Math.min(...placed.map(n => n.x!));
+  const minY = Math.min(...placed.map(n => n.y!));
+  return { ...graph, nodes: placed.map(n => ({ ...n, x: n.x! - minX + 80, y: n.y! - minY + 80 })) };
+}
+
+// Export one understanding network to the Second Brain as a doc cluster:
+// part 1 = overview neuron, parts 2..N = one neuron per topic (carrying its
+// subtopics, insights, and sources as markdown). All parts share a
+// memoryDocId, so the brain's existing cluster switch collapses them to a
+// single node or expands them to one neuron per topic.
+async function exportUnderstandingToBrain(level: UnderstandingLevel, path: string[]): Promise<void> {
+  const { nodes, links } = level.graph;
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const root = nodes.find(n => n.group === 'root');
+  const topics = nodes.filter(n => n.group === 'topic');
+  if (!root && !topics.length) throw new Error('Nothing to export yet.');
+
+  const childrenOf = (id: string, kinds: UnderstandingLink['kind'][]) =>
+    links
+      .filter(l => l.source === id && kinds.includes(l.kind))
+      .map(l => byId.get(l.target))
+      .filter(Boolean) as UnderstandingNode[];
+
+  const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  const networkSlug = slug(level.title) || 'understanding';
+
+  const sourceLine = (s: UnderstandingNode) =>
+    `- ${s.label}${s.data?.url ? ` — ${s.data.url}` : s.detail ? ` — ${s.detail}` : ''}`;
+  const insightLines = (ownerId: string) =>
+    childrenOf(ownerId, ['insight']).map(i => `- **${i.label}**${i.detail ? ` — ${i.detail}` : ''}`);
+
+  const topicMarkdown = (topic: UnderstandingNode) => {
+    const md: string[] = [`# ${topic.label}`, ''];
+    if (topic.detail) md.push(topic.detail, '');
+    const insights = insightLines(topic.id);
+    if (insights.length) md.push('## Key insights', ...insights, '');
+    for (const sub of childrenOf(topic.id, ['contains']).filter(n => n.group === 'subtopic')) {
+      md.push(`## ${sub.label}`, '');
+      if (sub.detail) md.push(sub.detail, '');
+      const subInsights = insightLines(sub.id);
+      if (subInsights.length) md.push(...subInsights, '');
+    }
+    const topicSources = [
+      ...childrenOf(topic.id, ['source']),
+      ...childrenOf(topic.id, ['contains']).flatMap(sub => childrenOf(sub.id, ['source'])),
+    ];
+    if (topicSources.length) md.push('## Sources', ...topicSources.map(sourceLine), '');
+    return md.join('\n').trim();
+  };
+
+  const overviewMd: string[] = [`# ${level.title} — Understanding Map`, ''];
+  if (root?.detail) overviewMd.push(root.detail, '');
+  if (path.length > 1) overviewMd.push(`Drill path: ${path.join(' → ')}`, '');
+  if (topics.length) {
+    overviewMd.push('## Topics');
+    for (const t of topics) overviewMd.push(`- **${t.label}**${t.detail ? ` — ${t.detail}` : ''}`);
+    overviewMd.push('');
+  }
+  const relates = links
+    .filter(l => l.kind === 'relates')
+    .map(l => `- ${byId.get(l.source)?.label ?? l.source} — ${l.label || 'relates to'} → ${byId.get(l.target)?.label ?? l.target}`);
+  if (relates.length) overviewMd.push('## How the topics relate', ...relates, '');
+
+  const parts = [
+    {
+      title: `${level.title} — Understanding Map`,
+      summary: root?.detail || `Understanding map of ${level.title}.`,
+      text: overviewMd.join('\n').trim(),
+      extraTags: [] as string[],
+    },
+    ...topics.map(t => ({
+      title: t.label,
+      summary: t.detail || '',
+      text: topicMarkdown(t),
+      extraTags: [slug(t.label)].filter(Boolean),
+    })),
+  ];
+
+  const exportId = `und-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const total = parts.length;
+  for (let i = 0; i < total; i++) {
+    const p = parts[i];
+    const tags = Array.from(new Set(['understanding', networkSlug, ...p.extraTags]));
+    const item: any = {
+      id: i === 0 ? exportId : `${exportId}-c${i}`,
+      image: '',
+      subImages: [],
+      timestamp: Date.now(),
+      title: p.title,
+      summary: p.summary,
+      category: 'Understanding',
+      source: 'DeepDive Understanding',
+      tags,
+      entities: [],
+      extractedText: p.text,
+      status: 'ready',
+      ...(total > 1 ? { memoryDocId: exportId, memoryPart: i + 1, memoryParts: total } : {}),
+    };
+    const embedding = await embedText(buildEmbedSource(item));
+    await db.putSnippet({ ...item, embedding });
+  }
+  emitSnippetsChange();
 }
 
 function UnderstandingMap({
-  graph, layout, selectedId, onSelect, onMoveNode,
+  graph, selectedId, childNodeIds, drillingNodeId, onSelect, onMoveNode, onNodeContextMenu, onNodeDoubleClick,
 }: {
   graph: UnderstandingGraph;
-  layout: UnderstandingLayout;
   selectedId: string | null;
+  /** Nodes that own a drill-down sub-network (rendered with an outline + badge). */
+  childNodeIds: Set<string>;
+  drillingNodeId: string | null;
   onSelect: (node: UnderstandingNode) => void;
   onMoveNode: (id: string, x: number, y: number) => void;
+  onNodeContextMenu: (node: UnderstandingNode, x: number, y: number) => void;
+  onNodeDoubleClick: (node: UnderstandingNode) => void;
 }) {
   const width = Math.max(1900, ...graph.nodes.map(n => (n.x || 0) + cardSize(n).w + 120));
-  const height = Math.max(900, ...graph.nodes.map(n => (n.y || 0) + cardSize(n).h + 120));
+  const height = Math.max(1100, ...graph.nodes.map(n => (n.y || 0) + cardSize(n).h + 120));
   const byId = new Map(graph.nodes.map(n => [n.id, n]));
-  const columns = [
-    { id: 'root', label: 'Overview', x: 80 },
-    { id: 'main', label: 'Main Chat', x: 420 },
-    { id: 'thread', label: 'Context Threads', x: 760 },
-    { id: 'concept', label: 'Concepts', x: 1120 },
-    { id: 'source', label: 'Sources', x: 1480 },
-  ];
-  const [dragging, setDragging] = useState<{ id: string; dx: number; dy: number } | null>(null);
 
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const sizeRef = useRef({ width, height });
+  sizeRef.current = { width, height };
+
+  const [dragging, setDragging] = useState<{ id: string; startMx: number; startMy: number; nodeX: number; nodeY: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+  const panStart = useRef({ mx: 0, my: 0, vx: 0, vy: 0 });
+
+  // Start fitted so the entire network is visible.
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const { width: w, height: h } = sizeRef.current;
+    const s = Math.max(0.1, Math.min(1, (el.clientWidth - 60) / w, (el.clientHeight - 60) / h));
+    setView({ x: (el.clientWidth - w * s) / 2, y: (el.clientHeight - h * s) / 2, scale: s });
+  }, []);
+
+  // Scroll-wheel zoom toward the cursor. Attached manually so the listener is
+  // non-passive — preventDefault keeps the panel from scrolling instead.
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const { width: w, height: h } = sizeRef.current;
+      // Min zoom: just past "the whole network fits"; max: 2.5x.
+      const fit = Math.min((rect.width - 60) / w, (rect.height - 60) / h);
+      const minScale = Math.min(1, fit) * 0.7;
+      setView(v => {
+        const next = Math.min(2.5, Math.max(minScale, v.scale * Math.exp(-e.deltaY * 0.0012)));
+        if (next === v.scale) return v;
+        const wx = (mx - v.x) / v.scale;
+        const wy = (my - v.y) / v.scale;
+        return { x: mx - wx * next, y: my - wy * next, scale: next };
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // Middle-mouse panning.
+  useEffect(() => {
+    if (!panning) return;
+    const onMove = (e: MouseEvent) => {
+      setView(v => ({
+        ...v,
+        x: panStart.current.vx + (e.clientX - panStart.current.mx),
+        y: panStart.current.vy + (e.clientY - panStart.current.my),
+      }));
+    };
+    const onUp = () => setPanning(false);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [panning]);
+
+  // Left-mouse card dragging, corrected for the current zoom level.
   useEffect(() => {
     if (!dragging) return;
     const onMove = (e: MouseEvent) => {
-      onMoveNode(dragging.id, Math.max(20, e.clientX + dragging.dx), Math.max(45, e.clientY + dragging.dy));
+      const scale = viewRef.current.scale || 1;
+      onMoveNode(
+        dragging.id,
+        Math.max(10, dragging.nodeX + (e.clientX - dragging.startMx) / scale),
+        Math.max(10, dragging.nodeY + (e.clientY - dragging.startMy) / scale),
+      );
     };
     const onUp = () => setDragging(null);
     window.addEventListener('mousemove', onMove);
@@ -816,18 +1389,27 @@ function UnderstandingMap({
   }, [dragging, onMoveNode]);
 
   return (
-    <div className="relative" style={{ width, height }}>
+    <div
+      ref={viewportRef}
+      className="absolute inset-0 overflow-hidden"
+      style={{ cursor: panning ? 'grabbing' : undefined }}
+      onMouseDown={(e) => {
+        if (e.button !== 1) return;
+        e.preventDefault(); // suppress the browser's middle-click autoscroll
+        panStart.current = { mx: e.clientX, my: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
+        setPanning(true);
+      }}
+    >
+      <div
+        className="absolute left-0 top-0"
+        style={{ width, height, transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`, transformOrigin: '0 0' }}
+      >
       <svg className="absolute inset-0 pointer-events-none" width={width} height={height}>
         <defs>
           <marker id="arrow-understand" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
             <path d="M0,0 L0,6 L7,3 z" fill="rgba(161,161,170,0.65)" />
           </marker>
         </defs>
-        {columns.map((col, idx) => layout === 'horizontal' ? (
-          <line key={col.id} x1={80 + idx * 340 - 24} y1={0} x2={80 + idx * 340 - 24} y2={height} stroke="rgba(39,39,42,0.55)" strokeDasharray="6 8" />
-        ) : (
-          <line key={col.id} x1={0} y1={80 + idx * 260 - 30} x2={width} y2={80 + idx * 260 - 30} stroke="rgba(39,39,42,0.55)" strokeDasharray="6 8" />
-        ))}
         {graph.links.map((link, idx) => {
           const sourceId = typeof link.source === 'string' ? link.source : (link.source as any).id;
           const targetId = typeof link.target === 'string' ? link.target : (link.target as any).id;
@@ -836,56 +1418,81 @@ function UnderstandingMap({
           if (!source || !target) return null;
           const sSize = cardSize(source);
           const tSize = cardSize(target);
-          const x1 = (source.x || 0) + sSize.w;
+          const x1 = (source.x || 0) + sSize.w / 2;
           const y1 = (source.y || 0) + sSize.h / 2;
-          const x2 = target.x || 0;
+          const x2 = (target.x || 0) + tSize.w / 2;
           const y2 = (target.y || 0) + tSize.h / 2;
-          const mid = layout === 'horizontal'
-            ? Math.max(60, Math.abs(x2 - x1) / 2)
-            : Math.max(60, Math.abs(y2 - y1) / 2);
-          const color = link.kind === 'parent' ? 'rgba(129,140,248,0.7)' : link.kind === 'mentions' ? 'rgba(34,197,94,0.45)' : 'rgba(113,113,122,0.42)';
+          const mx = (x1 + x2) / 2;
+          const my = (y1 + y2) / 2;
+          const isRelates = link.kind === 'relates';
+          // Cross-links bow outward so they read differently from tree edges.
+          const dx = x2 - x1, dy = y2 - y1;
+          const dist = Math.max(1, Math.hypot(dx, dy));
+          const bow = isRelates ? Math.min(120, dist * 0.18) : 0;
+          const cx = mx - (dy / dist) * bow;
+          const cy = my + (dx / dist) * bow;
+          const color = isRelates
+            ? 'rgba(129,140,248,0.75)'
+            : link.kind === 'insight'
+              ? 'rgba(34,197,94,0.45)'
+              : link.kind === 'source'
+                ? 'rgba(245,158,11,0.4)'
+                : 'rgba(113,113,122,0.4)';
           return (
-            <path
-              key={`${sourceId}-${targetId}-${idx}`}
-              d={layout === 'horizontal'
-                ? `M ${x1} ${y1} C ${x1 + mid} ${y1}, ${x2 - mid} ${y2}, ${x2} ${y2}`
-                : `M ${x1} ${y1} C ${x1} ${y1 + mid}, ${x2} ${y2 - mid}, ${x2} ${y2}`}
-              fill="none"
-              stroke={color}
-              strokeWidth={Math.max(1, Math.min(3, link.value || 1))}
-              markerEnd="url(#arrow-understand)"
-            />
+            <g key={`${sourceId}-${targetId}-${idx}`}>
+              <path
+                d={`M ${x1} ${y1} Q ${cx} ${cy} ${x2} ${y2}`}
+                fill="none"
+                stroke={color}
+                strokeWidth={Math.max(1, Math.min(3, link.value || 1))}
+                strokeDasharray={isRelates ? '7 5' : undefined}
+                markerEnd="url(#arrow-understand)"
+              />
+              {isRelates && link.label && (
+                <text
+                  x={(x1 + 2 * cx + x2) / 4}
+                  y={(y1 + 2 * cy + y2) / 4}
+                  textAnchor="middle"
+                  fontSize="11"
+                  fontWeight="600"
+                  fill="rgb(165,180,252)"
+                  style={{ paintOrder: 'stroke', stroke: 'rgba(9,9,11,0.92)', strokeWidth: 5 }}
+                >
+                  {link.label}
+                </text>
+              )}
+            </g>
           );
         })}
       </svg>
 
-      {columns.map((col, idx) => (
-        <div
-          key={col.id}
-          className="absolute text-[10px] uppercase tracking-widest text-zinc-600 font-bold"
-          style={layout === 'horizontal' ? { left: 80 + idx * 340, top: 20 } : { left: 24, top: 80 + idx * 260 - 22 }}
-        >
-          {col.label}
-        </div>
-      ))}
-
       {graph.nodes.map(node => {
         const size = cardSize(node);
+        const hasChild = childNodeIds.has(node.id);
+        const isDrilling = drillingNodeId === node.id;
         return (
           <button
             key={node.id}
             onClick={() => onSelect(node)}
+            onDoubleClick={() => onNodeDoubleClick(node)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onNodeContextMenu(node, e.clientX, e.clientY);
+            }}
             onMouseDown={(e) => {
+              if (e.button !== 0) return; // middle button falls through to canvas panning
               if ((e.target as HTMLElement).closest('[data-no-drag]')) return;
               onSelect(node);
-              setDragging({ id: node.id, dx: (node.x || 0) - e.clientX, dy: (node.y || 0) - e.clientY });
+              setDragging({ id: node.id, startMx: e.clientX, startMy: e.clientY, nodeX: node.x || 0, nodeY: node.y || 0 });
             }}
             className={`absolute text-left rounded-xl border bg-zinc-900/95 shadow-xl transition-all hover:-translate-y-0.5 hover:border-indigo-500/50 ${
               selectedId === node.id ? 'border-indigo-400 ring-2 ring-indigo-500/20' : 'border-zinc-800'
-            }`}
+            } ${hasChild ? 'outline outline-2 outline-offset-4 outline-indigo-400/60' : ''}`}
             style={{ left: node.x, top: node.y, width: size.w, minHeight: size.h }}
+            title={hasChild ? 'Double-click to open this node\'s sub-network' : undefined}
           >
-            <div className={`h-1.5 rounded-t-xl ${node.group === 'thread' ? 'bg-indigo-500' : node.group === 'concept' ? 'bg-emerald-500' : node.group === 'source' ? 'bg-amber-500' : node.group === 'main' ? 'bg-sky-500' : 'bg-zinc-500'}`} />
+            <div className={`h-1.5 rounded-t-xl ${node.group === 'topic' ? 'bg-indigo-500' : node.group === 'subtopic' ? 'bg-sky-500' : node.group === 'insight' ? 'bg-emerald-500' : node.group === 'source' ? 'bg-amber-500' : 'bg-zinc-400'}`} />
             <div className="p-4">
               <div className="flex items-start justify-between gap-3 mb-2">
                 <h3 className="text-sm font-bold text-zinc-100 leading-snug">{node.label}</h3>
@@ -893,78 +1500,36 @@ function UnderstandingMap({
               </div>
               {node.detail && <p className="text-xs text-zinc-400 leading-relaxed line-clamp-5 whitespace-pre-wrap">{node.detail}</p>}
             </div>
+            {hasChild && (
+              <span className="absolute -top-2.5 -right-2.5 p-1 bg-indigo-600 rounded-full border border-indigo-300/40 shadow-lg" title="Has a sub-network">
+                <Layers className="w-3 h-3 text-white" />
+              </span>
+            )}
+            {isDrilling && (
+              <span className="absolute inset-0 rounded-xl bg-zinc-950/70 flex items-center justify-center">
+                <Loader2 className="w-5 h-5 text-indigo-400 animate-spin" />
+              </span>
+            )}
           </button>
         );
       })}
+      </div>
+
+      <div className="absolute top-3 left-3 z-10 flex items-center gap-3 px-3 py-1.5 bg-zinc-950/85 border border-zinc-800 rounded-lg text-[10px] uppercase tracking-widest text-zinc-500 pointer-events-none">
+        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-indigo-500" />Topic</span>
+        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-sky-500" />Subtopic</span>
+        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" />Insight</span>
+        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-500" />Source</span>
+        <span className="text-zinc-600 normal-case tracking-normal">Middle-drag to pan · Scroll to zoom</span>
+      </div>
     </div>
   );
 }
 
 function cardSize(node: UnderstandingNode) {
-  if (node.group === 'thread') return { w: 290, h: 170 };
-  if (node.group === 'concept') return { w: 230, h: 115 };
-  if (node.group === 'source') return { w: 270, h: 120 };
-  return { w: 270, h: 135 };
-}
-
-function actionLabel(action?: string) {
-  switch (action) {
-    case 'details': return 'Details';
-    case 'simplify': return 'Simplify';
-    case 'examples': return 'Examples';
-    case 'links': return 'Links';
-    case 'videos': return 'Videos';
-    case 'deep': return 'Deep Dive';
-    default: return 'Ask';
-  }
-}
-
-const STOP_WORDS = new Set([
-  'about', 'after', 'again', 'also', 'because', 'being', 'between', 'could', 'every', 'first', 'from', 'have', 'into',
-  'just', 'like', 'more', 'most', 'other', 'should', 'some', 'than', 'that', 'their', 'there', 'these', 'thing', 'this',
-  'those', 'through', 'under', 'using', 'very', 'what', 'when', 'where', 'which', 'while', 'with', 'would', 'your',
-  'please', 'provide', 'related', 'context', 'thread', 'response', 'example', 'examples',
-]);
-
-function extractConcepts(text: string): string[] {
-  const cleaned = (text || '')
-    .replace(/https?:\/\/\S+/g, ' ')
-    .replace(/[`*_#>()[\]{}]/g, ' ')
-    .replace(/[^\w\s.-]/g, ' ');
-  const phrases = new Map<string, number>();
-  const add = (value: string) => {
-    const words = value.split(/\s+/).map(w => w.trim()).filter(Boolean);
-    if (!words.length || words.length > 4) return;
-    const normalized = words.join(' ');
-    const key = normalized.toLowerCase();
-    if (key.length < 4 || STOP_WORDS.has(key)) return;
-    phrases.set(titleCase(normalized), (phrases.get(titleCase(normalized)) || 0) + 1);
-  };
-
-  for (const match of cleaned.matchAll(/\b[A-Z][A-Za-z0-9.-]*(?:\s+[A-Z][A-Za-z0-9.-]*){0,3}\b/g)) {
-    add(match[0]);
-  }
-
-  const words = cleaned.toLowerCase().split(/\s+/).filter(w => w.length > 4 && !STOP_WORDS.has(w));
-  const freq = new Map<string, number>();
-  for (const word of words) freq.set(word, (freq.get(word) || 0) + 1);
-  for (const [word, count] of freq) {
-    if (count >= 2) add(word);
-  }
-
-  return Array.from(phrases.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 12)
-    .map(([value]) => value);
-}
-
-function summarizeText(text: string) {
-  const compact = (text || '').replace(/\s+/g, ' ').trim();
-  if (!compact) return '';
-  const sentences = compact.split(/(?<=[.!?])\s+/).filter(Boolean);
-  return sentences.slice(0, 3).join(' ').slice(0, 900);
-}
-
-function titleCase(value: string) {
-  return value.replace(/\b\w/g, ch => ch.toUpperCase());
+  if (node.group === 'root') return { w: 300, h: 150 };
+  if (node.group === 'topic') return { w: 260, h: 140 };
+  if (node.group === 'subtopic') return { w: 240, h: 125 };
+  if (node.group === 'insight') return { w: 250, h: 130 };
+  return { w: 250, h: 110 };
 }

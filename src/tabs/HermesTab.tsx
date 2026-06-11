@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Bot, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, Clock,
   Code2, Folder, Hash, Info, Loader2, Mail, Pause, Play, Plus, RefreshCw,
@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { apiUrl, initApiBase } from '../lib/apiBase';
 import { getAnthropicAuthMode } from '../lib/authMode';
+import { useExternalInputSync } from '../lib/useExternalInputSync';
 
 type StatusKind = 'idle' | 'ok' | 'err';
 
@@ -281,6 +282,10 @@ export default function HermesTab() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sending, setSending] = useState(false);
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+  // Adopt text injected by dictation tools (e.g. Wispr Flow) that write the
+  // DOM value directly and bypass React's onChange.
+  useExternalInputSync(chatInputRef, input, setInput);
   const [cronCollapsed, setCronCollapsed] = useState(false);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -520,12 +525,18 @@ export default function HermesTab() {
   };
 
   const sendMessage = async () => {
-    const text = input.trim();
+    // Read the live DOM value, not just state — a dictation tool may have
+    // injected text moments ago that the sync hook hasn't adopted yet.
+    const text = (chatInputRef.current?.value ?? input).trim();
     if (!text || sending) return;
     const nextMessages: ChatMessage[] = [...messages, { role: 'user', content: text }];
     setMessages(nextMessages);
     setInput('');
+    if (chatInputRef.current) chatInputRef.current.value = '';
     setSending(true);
+    // Return the cursor to the field right away (clicking Send moves focus to
+    // the button); the field stays enabled while Hermes responds.
+    requestAnimationFrame(() => chatInputRef.current?.focus());
     try {
       await initApiBase();
       const res = await fetch(apiUrl('/api/hermes/chat'), {
@@ -838,6 +849,7 @@ export default function HermesTab() {
           <div className="border-t border-zinc-800 p-4 bg-zinc-950/70">
             <div className="flex gap-2">
               <textarea
+                ref={chatInputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {

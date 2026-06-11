@@ -20,6 +20,7 @@ import { onSnippetsChange, emitSnippetsChange } from '../lib/snippetStore';
 import { enrichPendingMemory } from '../lib/memory';
 import { BrainView3D } from '../components/BrainView3D';
 import { navigateTo } from '../lib/navigate';
+import { useExternalInputSync } from '../lib/useExternalInputSync';
 import SnippetEditor, { type CapturedItem } from '../components/SnippetEditor';
 
 interface ChatMessage extends ChatTurn { citedIds?: string[]; }
@@ -62,6 +63,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [citedIds, setCitedIds] = useState<Set<string>>(new Set());
   const [aiReady, setAiReady] = useState<boolean>(isGeminiReady());
   const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
@@ -460,15 +462,34 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     db.setMeta('second-brain-chat-history', chatHistory).catch(() => {});
   }, [chatHistory, chatBusy]);
 
+  // Keep the cursor in the ask field: on entering the Ask view and whenever a
+  // response finishes (the textarea is disabled while busy, so focus has to be
+  // re-applied once it re-enables).
+  useEffect(() => {
+    if (leftView === 'ask' && !chatBusy) {
+      const id = requestAnimationFrame(() => chatInputRef.current?.focus());
+      return () => cancelAnimationFrame(id);
+    }
+  }, [leftView, chatBusy]);
+
+  // Adopt text injected by dictation tools (e.g. Wispr Flow) that write the
+  // DOM value directly and bypass React's onChange.
+  useExternalInputSync(chatInputRef, chatInput, setChatInput);
+
   const send = async () => {
-    const q = chatInput.trim();
+    // Read the live DOM value, not just state — a dictation tool may have
+    // injected text moments ago that the sync hook hasn't adopted yet.
+    const q = (chatInputRef.current?.value ?? chatInput).trim();
     if (!q || chatBusy) return;
     if (!aiReady) {
       setChatHistory(h => [...h, { role: 'user', text: q }, { role: 'model', text: 'AI is not configured. Add your Gemini key in the Models tab.' }]);
       setChatInput('');
+      if (chatInputRef.current) chatInputRef.current.value = '';
+      requestAnimationFrame(() => chatInputRef.current?.focus());
       return;
     }
     setChatInput('');
+    if (chatInputRef.current) chatInputRef.current.value = '';
     setChatBusy(true);
     const prior: ChatTurn[] = chatHistory.map(({ role, text }) => ({ role, text }));
     setChatHistory(h => [...h, { role: 'user', text: q }, { role: 'model', text: '' }]);
@@ -827,6 +848,12 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const askAboutFocused = () => {
     if (!focusedNode) return;
     setChatInput(`Tell me about "${focusedNode.label}"`);
+    // Cursor into the field with the prefilled text highlighted, ready to
+    // send as-is or overtype.
+    requestAnimationFrame(() => {
+      chatInputRef.current?.focus();
+      chatInputRef.current?.select();
+    });
   };
 
   // Quick lookups for the hierarchy tree. react-force-graph mutates link
@@ -1102,6 +1129,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               <div className="border-t border-zinc-800 p-3">
                 <div className="flex gap-1.5 items-end">
                   <textarea
+                    ref={chatInputRef}
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}

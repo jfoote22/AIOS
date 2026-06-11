@@ -16,6 +16,7 @@ import SnippetEditor, {
   type CapturedItem, type Entity, type ExtractedChunk,
 } from '../components/SnippetEditor';
 import { emitSnippetsChange, onSnippetsChange } from '../lib/snippetStore';
+import { useExternalInputSync } from '../lib/useExternalInputSync';
 
 interface Region { startX: number; startY: number; width: number; height: number; }
 export type { CapturedItem };
@@ -31,6 +32,20 @@ export default function SnippingTab() {
   const extractedTextRef = useRef<HTMLPreElement | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Return the cursor to the chat field whenever a response finishes (the
+  // textarea is disabled while busy, so focus must be re-applied on enable).
+  useEffect(() => {
+    if (!chatBusy) {
+      const id = requestAnimationFrame(() => chatInputRef.current?.focus());
+      return () => cancelAnimationFrame(id);
+    }
+  }, [chatBusy]);
+
+  // Adopt text injected by dictation tools (e.g. Wispr Flow) that write the
+  // DOM value directly and bypass React's onChange.
+  useExternalInputSync(chatInputRef, chatInput, setChatInput);
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [selectedItem, setSelectedItem] = useState<CapturedItem | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
@@ -331,14 +346,18 @@ export default function SnippingTab() {
   };
 
   const sendChat = async () => {
-    const q = chatInput.trim();
+    // Read the live DOM value, not just state — a dictation tool may have
+    // injected text moments ago that the sync hook hasn't adopted yet.
+    const q = (chatInputRef.current?.value ?? chatInput).trim();
     if (!q || chatBusy) return;
     if (!aiReady) {
       setChatHistory(h => [...h, { role: 'user', text: q }, { role: 'model', text: 'AI is not configured. Open the Models tab and add your Gemini key.' }]);
       setChatInput('');
+      if (chatInputRef.current) chatInputRef.current.value = '';
       return;
     }
     setChatInput('');
+    if (chatInputRef.current) chatInputRef.current.value = '';
     setChatBusy(true);
     const priorTurns: ChatTurn[] = chatHistory.map(({ role, text }) => ({ role, text }));
     setChatHistory(h => [...h, { role: 'user', text: q }, { role: 'model', text: '' }]);
@@ -768,7 +787,7 @@ export default function SnippingTab() {
 
               <div className="border-t border-zinc-800 pt-4">
                 <div className="flex gap-2 items-end">
-                  <textarea value={chatInput} onChange={(e) => setChatInput(e.target.value)}
+                  <textarea ref={chatInputRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
                     rows={1} placeholder={aiReady ? 'Ask a question about your vault…' : 'AI not configured — add your Gemini key in Models tab'}
                     disabled={!aiReady || chatBusy}

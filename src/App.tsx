@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import Sidebar, { type TabId } from './components/Sidebar';
+import DashboardTab from './features/dashboard/DashboardTab';
 import SnippingTab from './tabs/SnippingTab';
 import DeepDivesTab from './tabs/DeepDivesTab';
 import SecondBrainTab from './tabs/SecondBrainTab';
@@ -23,7 +24,7 @@ function TabPanel({ active, label, children }: { active: boolean; label: string;
 }
 
 export default function App() {
-  const [active, setActive] = useState<TabId>('deepdives');
+  const [active, setActive] = useState<TabId>('home');
   const [collapsed, setCollapsed] = useState(false);
   const [apiReady, setApiReady] = useState(false);
 
@@ -62,6 +63,7 @@ export default function App() {
         {/* All tabs stay mounted so in-progress state (e.g. an active DeepDive
             chat) survives sidebar navigation. Inactive tabs are hidden, not
             unmounted. */}
+        <TabPanel active={active === 'home'} label="Home"><DashboardTab active={active === 'home'} /></TabPanel>
         <TabPanel active={active === 'deepdives'} label="DeepDives"><DeepDivesTab /></TabPanel>
         <TabPanel active={active === 'snipping'} label="Snipping"><SnippingTab /></TabPanel>
         <TabPanel active={active === 'secondbrain'} label="Second Brain"><SecondBrainTab active={active === 'secondbrain'} /></TabPanel>

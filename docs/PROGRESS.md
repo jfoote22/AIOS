@@ -151,3 +151,48 @@ A Three.js volumetric brain behind a **2D ⇄ 3D toggle** in `src/tabs/SecondBra
   brightness/size, cloud density, shell tint, fog) toward "9–10".
 - Optional: Git LFS or gitignore `public/brain/` (the 17 MB textures are duplicated
   between `assets/` and `public/brain/`, ~34 MB redundant).
+
+---
+
+## Feature 3 — 3D brain as the mobile landing page
+
+The mobile app's Brain tab (the landing tab) now opens straight into the SAME
+Three.js 3D Second Brain the desktop renders, with a "☰ List" toggle back to
+the original browse/search list (mirrors the desktop's 2D ⇄ 3D switch).
+
+### How it works
+The 3D view cannot run natively in React Native (it's DOM Three.js +
+react-force-graph-3d), so the desktop serves it as a web page and the phone
+renders it in a WebView:
+
+- **`brain-mobile.html` + `src/brain-mobile/main.tsx`** — a second Vite entry
+  (see `vite.config.ts` `build.rollupOptions.input`) that reuses `BrainView3D`
+  and `lib/graph` 1:1. It reads the bearer token from its URL query, fetches
+  `/api/mobile/brain-graph`, runs the same `buildGraph` + collapsed-cluster +
+  groupColors pipeline as `SecondBrainTab`, and posts neuron taps to the app
+  via `window.ReactNativeWebView.postMessage`.
+- **Gateway (`electron/mobile-gateway.cjs`)**:
+  - Serves `dist/` at **`/brain3d/`** (index = `brain-mobile.html`) —
+    intentionally **unauthenticated** (code + cosmetic mesh/texture/point
+    assets only, no user data); relative `./brain/*` asset URLs resolve to
+    `dist/brain/*`.
+  - **`/api/mobile/brain-graph`** (token-gated): snippets WITH embeddings
+    (images stripped), slim DeepDives (`msgCount` + `threadIds`, no message
+    bodies), imports with per-conversation chunk-centroid embeddings, plus the
+    saved `second-brain-physics` and `second-brain-expanded-docs` metas so the
+    mobile graph's links match the desktop exactly.
+- **Mobile**: `react-native-webview@13.12.5` (SDK-52 pinned);
+  `src/components/Brain3DView.tsx` (WebView → `{url}/brain3d/?token=…`, error
+  + retry via remount); `BrainScreen` defaults to immersive 3D
+  (`headerShown:false` for the tab, safe-area-padded) and navigates natively on
+  taps: snippet → SnippetDetail, deepdive → DiveChat.
+
+### Gotchas
+- **The mobile brain page is served from `dist/`** — after changing the 3D
+  view or the page, run `npm run build` in `app/` or the phone keeps seeing the
+  old page (or a 503 hint page if never built). `electron:dev`'s Vite server is
+  localhost-only, so the phone can't use it.
+- The page's own controls (rotate/shell) are top-RIGHT; the native "☰ List"
+  overlay deliberately sits top-LEFT.
+- The viewport meta pins page zoom (`user-scalable=no`) so pinch gestures go to
+  OrbitControls, not the page.

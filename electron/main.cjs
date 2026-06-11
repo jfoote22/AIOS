@@ -126,6 +126,20 @@ function createWindow() {
   mainWindow.setMenuBarVisibility(false);
   wireContextMenu(mainWindow.webContents);
 
+  // Dictation diagnostics: mirror the renderer's [dictation] console lines and
+  // OS-level window focus events to a file so insertion failures (Wispr Flow
+  // et al.) can be traced after the fact. Remove once dictation is solid.
+  const dictationLog = path.join(app.getPath('userData'), 'dictation-debug.log');
+  const logDictation = (line) => {
+    try { fs.appendFileSync(dictationLog, `${new Date().toISOString()} ${line}\n`); } catch { /* best-effort */ }
+  };
+  mainWindow.webContents.on('console-message', (_e, _level, message) => {
+    if (typeof message === 'string' && message.includes('[dictation]')) logDictation(message);
+  });
+  mainWindow.on('focus', () => logDictation('[main] window FOCUS (OS)'));
+  mainWindow.on('blur', () => logDictation('[main] window BLUR (OS)'));
+  logDictation(`[main] window created; accessibility=${app.isAccessibilitySupportEnabled()}`);
+
   if (isDev) {
     mainWindow.loadURL('http://localhost:3000');
   } else {
@@ -276,6 +290,14 @@ app.whenReady().then(async () => {
   // (and groups windows) instead of the generic Electron one, and so toast
   // notifications are attributed to AIOS. Must match the build appId.
   if (process.platform === 'win32') app.setAppUserModelId('com.aios.app');
+
+  // Chromium builds its accessibility tree lazily — only after an assistive
+  // tool first queries it. Dictation tools (e.g. Wispr Flow) target text
+  // fields through that tree, so the FIRST focus of a field after launch (or
+  // after a long idle) has no tree to target and the transcript is dropped;
+  // the second focus works because the first one triggered tree construction.
+  // Force accessibility on from the start so dictation lands on first focus.
+  app.setAccessibilitySupportEnabled(true);
 
   migrateLegacyKey();
 

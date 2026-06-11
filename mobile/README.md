@@ -2,7 +2,7 @@
 
 A React Native / Expo app that taps into everything your AIOS desktop is connected to:
 
-- **Second Brain** — browse & search neurons (snippets), open detail with image + OCR text
+- **Second Brain** — lands on the desktop's **3D brain visualization** (Three.js, streamed from the gateway into a WebView; tap a neuron to open it natively), with a "☰ List" toggle to browse & search neurons and open detail with image + OCR text. Requires a built desktop app (`npm run build` in `app/`) so the gateway can serve the page from `dist/`
 - **DeepDives** — browse/continue saved threads or start a new chat (Claude / GPT / Grok), streamed live. **Long-press any AI response** for the full context menu (Ask, Get more details, Examples, Simplify, Get links, Get videos, Deep Dive (autonomous research), Save to Brain) — branching actions open as **tabs** across the top so you can keep multiple threads in one screen
 - **Build** — list, create, and delete Agents & Skills, with AI-assisted drafting
 - **Terminal** — open a real, live shell **on your desktop** (SSE-streamed), optional start folder, with Ctrl-C / Tab / arrows — run git, npm, claude, anything

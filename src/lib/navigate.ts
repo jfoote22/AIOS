@@ -1,7 +1,7 @@
 // Programmatic tab switching. Lets non-sibling components (e.g. SecondBrain
 // asking to jump into DeepDives) trigger navigation without prop-drilling.
 
-export type NavTarget = 'deepdives' | 'snipping' | 'secondbrain' | 'terminal' | 'kanban' | 'hermes' | 'settings';
+export type NavTarget = 'home' | 'deepdives' | 'snipping' | 'secondbrain' | 'terminal' | 'kanban' | 'hermes' | 'settings';
 
 type Listener = (target: NavTarget) => void;
 const listeners = new Set<Listener>();

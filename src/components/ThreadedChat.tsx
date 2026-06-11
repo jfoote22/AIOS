@@ -17,6 +17,7 @@ import {
   runDeepResearch, cancelDeepResearch, verifyDeepReport,
 } from '../lib/research';
 import { exportReport } from '../lib/exportReport';
+import { useExternalInputSync } from '../lib/useExternalInputSync';
 
 // Verified results attached to a "Get Links" / "Get Videos" / "Deep Dive" thread.
 interface ThreadResearch {
@@ -689,6 +690,19 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     }
   });
 
+  // Stable ref to the main chat input element. Lives at this level (not inside
+  // ChatInput) because ChatInput is re-declared per render and remounts — a
+  // parent-level ref always points at the latest mounted input, so focus
+  // survives remounts. Focus returns to the field on mount and whenever a
+  // response finishes streaming (the input is disabled while loading).
+  const mainInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!mainChat.isLoading) {
+      const id = requestAnimationFrame(() => mainInputRef.current?.focus());
+      return () => cancelAnimationFrame(id);
+    }
+  }, [mainChat.isLoading]);
+
   // Detect mobile device
   useEffect(() => {
     const checkMobile = () => {
@@ -1278,7 +1292,44 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     getCurrentState,
     loadState,
     forceUpdateThreadMessages, // New: ensure all messages are captured before save
-    setMainInput: (text: string) => mainChat.setInput(text),
+    setMainInput: (text: string) => {
+      mainChat.setInput(text);
+      // Put the cursor in the field with the seeded text highlighted, ready
+      // to be overtyped or sent. Delay so ChatInput has mirrored the new
+      // value into its local state before we select it.
+      setTimeout(() => {
+        mainInputRef.current?.focus();
+        mainInputRef.current?.select();
+      }, 100);
+    },
+    sendMainMessage: (text: string) => {
+      submitMainMessage(text);
+      mainChat.setInput?.('');
+      requestAnimationFrame(() => mainInputRef.current?.focus());
+    },
+    focusMainInput: () => mainInputRef.current?.focus(),
+    // Spawn a context thread from outside the chat (e.g. an Understanding graph
+    // node), exactly as if the text had been selected and the matching context
+    // button pressed. Always branches from the main chat.
+    spawnThreadFromContext: (text: string, action: 'ask' | 'details' | 'simplify' | 'examples' | 'links' | 'videos' | 'deep') => {
+      const origin = { isFromThread: false };
+      switch (action) {
+        case 'details':
+          createNewThread(text, true, false, 'details', origin); break;
+        case 'links':
+          createNewThread(text, false, false, 'links', origin); break;
+        case 'videos':
+          createNewThread(text, false, false, 'videos', origin); break;
+        case 'deep':
+          createNewThread(text, false, false, 'deep', origin); break;
+        case 'examples':
+          createNewThread(`Please provide 3-5 concrete, practical examples that illustrate or relate to: "${text}". Make the examples diverse and easy to understand.`, false, true, 'examples', origin); break;
+        case 'simplify':
+          createNewThread(`Please explain this in the simplest terms possible, as if you're teaching it to someone who is completely new to the topic: "${text}"`, false, true, 'simplify', origin); break;
+        default:
+          createNewThread(text, false, true, 'ask', origin); break;
+      }
+    },
   }));
 
   const handleTextSelection = React.useCallback((messageId: string, isFromThread: boolean = false, threadId?: string) => {
@@ -1430,7 +1481,17 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     }
   };
 
-  const createNewThread = (context: string, autoExpand: boolean = false, autoSend: boolean = false, actionType: 'ask' | 'details' | 'simplify' | 'examples' | 'links' | 'videos' | 'deep' = 'ask') => {
+  const createNewThread = (
+    context: string,
+    autoExpand: boolean = false,
+    autoSend: boolean = false,
+    actionType: 'ask' | 'details' | 'simplify' | 'examples' | 'links' | 'videos' | 'deep' = 'ask',
+    // Where the thread is branching from. Defaults to the live text-selection
+    // context menu; external callers (e.g. the Understanding graph) pass their
+    // own origin so they don't depend on stale selection state.
+    origin?: { isFromThread: boolean; threadId?: string },
+  ) => {
+    const threadOrigin = origin ?? contextMenuSource;
     // Auto-exit fullscreen mode when creating new thread to ensure proper functionality
     const wasInFullscreen = !!fullscreenThread;
     if (fullscreenThread) {
@@ -1474,9 +1535,9 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     let rowId = 0;
     let sourceType: 'main' | 'thread' = 'main';
     
-    if (contextMenuSource.isFromThread && contextMenuSource.threadId) {
+    if (threadOrigin.isFromThread && threadOrigin.threadId) {
       // Thread created from another thread - stays in same row
-      const parentThread = threads.find(t => t.id === contextMenuSource.threadId);
+      const parentThread = threads.find(t => t.id === threadOrigin.threadId);
       rowId = parentThread?.rowId || 0;
       sourceType = 'thread';
     } else {
@@ -1503,7 +1564,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       rowId: rowId,
       sourceType: sourceType,
       actionType: actionType,
-      parentThreadId: (contextMenuSource.isFromThread && contextMenuSource.threadId) ? contextMenuSource.threadId : undefined
+      parentThreadId: (threadOrigin.isFromThread && threadOrigin.threadId) ? threadOrigin.threadId : undefined
     };
 
     // Add thread to the list - each thread is completely independent
@@ -1796,8 +1857,22 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     mainChat.setInput('');
   };
 
-  const ChatInput = ({ isThread = false, onSubmit, input, handleInputChange, isLoading, threadChat, showReasoning, setShowReasoning }: any) => {
+  const ChatInput = ({ isThread = false, onSubmit, input, handleInputChange, isLoading, threadChat, showReasoning, setShowReasoning, inputRef }: any) => {
     const [localInput, setLocalInput] = useState('');
+
+    // Main chat gets the stable parent-level ref; thread inputs get their own.
+    const localRef = useRef<HTMLInputElement | null>(null);
+    const elRef = inputRef ?? localRef;
+
+    // Thread inputs: return the cursor to the field when a response finishes.
+    // (The main input is handled at the ThreadedChat level so it survives
+    // remounts of this inner component.)
+    const wasLoading = useRef(isLoading);
+    useEffect(() => {
+      if (isThread && wasLoading.current && !isLoading) elRef.current?.focus();
+      wasLoading.current = isLoading;
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isLoading]);
 
     // Accept externally-driven input (e.g. a seed prompt pushed in from Second
     // Brain via mainChat.setInput). Only mirror when the incoming value is
@@ -1809,23 +1884,34 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [input]);
 
+    // Adopt text injected by dictation tools (e.g. Wispr Flow) that write the
+    // DOM value directly and bypass React's onChange.
+    useExternalInputSync(elRef, localInput, setLocalInput);
+
     const handleSubmit = (e: any) => {
       e.preventDefault();
-      if (!localInput.trim()) return;
-      
+      // Read the live DOM value, not just state — a dictation tool may have
+      // injected text moments ago that the sync hook hasn't adopted yet.
+      const text = (elRef.current?.value ?? localInput).trim();
+      if (!text) return;
+
       if (!isThread && mainChat) {
         // Main chat submission — inject any attached research sources as context.
-        submitMainMessage(localInput.trim());
+        submitMainMessage(text);
         mainChat.setInput?.('');
       } else if (isThread && threadChat) {
         // Thread chat submission - use the thread's chat instance
         threadChat.append({
           role: 'user',
-          content: localInput.trim()
+          content: text
         });
         threadChat.setInput?.('');
       }
       setLocalInput('');
+      if (elRef.current) elRef.current.value = '';
+      // Keep the cursor in the field after sending (clicking the send button
+      // would otherwise leave focus on the button).
+      requestAnimationFrame(() => elRef.current?.focus());
     };
 
     const handleStopGeneration = () => {
@@ -1867,8 +1953,9 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
         {/* Input Form */}
         <form onSubmit={handleSubmit} className="w-full flex gap-3">
-          <input 
+          <input
             type="text"
+            ref={elRef}
             value={localInput}
             onChange={(e) => setLocalInput(e.target.value)}
             className="flex-1 px-4 py-3 bg-white text-black border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 transition-all duration-200"
@@ -2964,6 +3051,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                 threadChat={mainChat}
                 showReasoning={mainShowReasoning}
                 setShowReasoning={setMainShowReasoning}
+                inputRef={mainInputRef}
               />
             </div>
           </div>
