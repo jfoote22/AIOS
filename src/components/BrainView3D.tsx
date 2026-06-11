@@ -66,11 +66,14 @@ const CLOUD_FRAG = `
   }`;
 
 export function BrainView3D({
-  graph, focusedId, highlightIds, onNodeClick, onBackground,
+  graph, focusedId, highlightIds, showConnections, onNodeClick, onBackground,
 }: {
   graph: GraphData;
   focusedId?: string | null;
   highlightIds?: Set<string>;
+  /** Connection mesh visibility. Controlled when provided; when omitted the
+   *  view manages its own toggle (a "Links" button), defaulting to hidden. */
+  showConnections?: boolean;
   onNodeClick?: (id: string) => void;
   onBackground?: () => void;
 }) {
@@ -80,6 +83,10 @@ export function BrainView3D({
   const [shell, setShell] = useState<ShellMode>('translucent');
   const [autoRotate, setAutoRotate] = useState(true);
   const autoRotateRef = useRef(autoRotate); autoRotateRef.current = autoRotate;
+  // Connections default OFF; the internal state only drives the view when the
+  // parent doesn't pass showConnections.
+  const [linksOn, setLinksOn] = useState(false);
+  const connectionsOn = showConnections ?? linksOn;
 
   const cloudRef = useRef<THREE.Points | null>(null);
   const cloudPosRef = useRef<Float32Array | null>(null);   // subsampled positions
@@ -488,7 +495,8 @@ export function BrainView3D({
   // is why pulses vanished on toggle). Falls back to all links for small graphs.
   useEffect(() => {
     const links = stableGraph.links;
-    if (!links.length) { pulseLinksRef.current = []; return; }
+    // Connections hidden → no pulse sparks either (they'd glide along invisible wires).
+    if (!links.length || !connectionsOn) { pulseLinksRef.current = []; return; }
     const deg = new Map<string, number>();
     for (const l of links) for (const id of [l.source, l.target]) deg.set(id, (deg.get(id) || 0) + 1);
     const ranked = [...deg.entries()].sort((a, b) => b[1] - a[1]);
@@ -497,7 +505,7 @@ export function BrainView3D({
     let chosen = links.filter((l) => hubs.has(l.source) || hubs.has(l.target));
     if (!chosen.length) chosen = links;
     pulseLinksRef.current = chosen.map((l) => ({ s: l.source, t: l.target }));
-  }, [stableGraph]);
+  }, [stableGraph, connectionsOn]);
 
   // ── neuron objects ────────────────────────────────────────────────────────
   // Each neuron is a clone of the loaded glTF mesh (shared geometry + one of three
@@ -540,6 +548,7 @@ export function BrainView3D({
         controlType="orbit"
         nodeThreeObject={nodeObject as any}
         nodeLabel={(n: any) => (n.label || '') as string}
+        linkVisibility={connectionsOn}
         linkColor={() => 'rgba(150,185,255,0.45)'}
         linkOpacity={0.45}
         linkWidth={0}
@@ -549,6 +558,9 @@ export function BrainView3D({
         cooldownTime={Infinity}
       />
       <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 5, display: 'flex', gap: 8 }}>
+        {showConnections === undefined && (
+          <Ctl onClick={() => setLinksOn((v) => !v)} title="Toggle the connection mesh">{connectionsOn ? '⌁ Links on' : '⌁ Links off'}</Ctl>
+        )}
         <Ctl onClick={() => setAutoRotate((v) => !v)} title="Toggle slow auto-rotate">{autoRotate ? '◐ Rotating' : '◯ Static'}</Ctl>
         <Ctl onClick={() => setShell((s) => SHELL_CYCLE[(SHELL_CYCLE.indexOf(s) + 1) % SHELL_CYCLE.length])} title="Cycle shell">Shell: {shell}</Ctl>
       </div>

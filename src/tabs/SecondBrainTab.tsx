@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject, type LinkObject } from 'react-force-graph-2d';
-import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle, Search, Plus } from 'lucide-react';
+import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle, Search, Plus, Share2 } from 'lucide-react';
 import * as db from '../lib/db';
 import {
   embedText, cosineSimilarity, chatWithVault, isGeminiReady, onGeminiReadyChange, buildEmbedSource,
@@ -38,6 +38,10 @@ function providerLabel(p: string): string {
 // outward from the hubs. The next wave only starts once the current one has
 // fully cleared the wire (+ a short rest) so pulses never overlap — but no
 // sooner than the 5s cadence.
+// Session-only memory for the connections toggle: connections always start
+// hidden on app launch, but a mid-session choice survives tab switches.
+let showConnectionsSession = false;
+
 const PULSE_WAVE_INTERVAL_MS = 5000; // minimum spacing between waves
 const PULSE_GAP_MS = 500;            // quiet rest after a wave fully arrives
 const PULSE_SPEED = 0.02;            // wave photon speed (fraction/frame ≈ 0.83s per hop)
@@ -91,6 +95,15 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       .catch(() => {});
   }, []);
   useEffect(() => { db.setMeta('second-brain-reveal-depth', revealDepth).catch(() => {}); }, [revealDepth]);
+
+  // Connection meshes (the wires between neurons) are OFF by default — the
+  // brain opens as free-floating neurons. Toggling on lasts for the session
+  // (survives tab switches via the module flag) but resets on app launch so
+  // the default state is always clean.
+  const [showConnections, setShowConnections] = useState(showConnectionsSession);
+  useEffect(() => { showConnectionsSession = showConnections; }, [showConnections]);
+  const showConnectionsRef = useRef(showConnections);
+  showConnectionsRef.current = showConnections;
 
   // Live editable copy of the focused snippet. Kept as a synchronous mirror so
   // typing in the editor reflects instantly (the graph reload is debounced).
@@ -362,7 +375,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       const fg = fgRef.current as any;
       const rings = pulseRef.current.rings;
       let waveDurationMs = 0;
-      if (fg?.emitParticle && rings.length) {
+      if (fg?.emitParticle && rings.length && showConnectionsRef.current) {
         rings.forEach((ring, i) => {
           waveTimers.current.push(setTimeout(() => {
             for (const link of ring) {
@@ -1241,6 +1254,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               graph={graph3d}
               focusedId={focusedNode?.id ?? null}
               highlightIds={highlight3d}
+              showConnections={showConnections}
               onNodeClick={onNode3DClick}
               onBackground={() => { setFocusedNode(null); setNodeMenu(null); setBgMenu(null); }}
             />
@@ -1276,6 +1290,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               // animation OR the focused-neuron selection pulse needs to run;
               // otherwise keep the default power-saving pause when idle.
               autoPauseRedraw={collapsedSet.size === 0 && !focusedNode}
+              linkVisibility={showConnections}
               linkColor={linkColor as any}
               linkWidth={(l) => Math.min(2.5, ((l as any).value ?? 1) * 0.4)}
               // No continuous emission — dots exist only as the BFS pulse wave
@@ -1399,21 +1414,37 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
             </div>
           )}
 
-          {/* Collapse-all / expand-all clusters toggle (top-center) */}
-          {clusterDefs.length > 0 && (
-            <button
-              onClick={toggleAllClusters}
-              title={allClustersCollapsed ? 'Expand all clusters' : 'Collapse all clusters'}
-              className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-2.5 px-3 py-2 bg-zinc-900/80 backdrop-blur-md border border-zinc-800 rounded-lg text-[10px] uppercase tracking-widest text-zinc-300 hover:border-zinc-700 transition-colors z-20"
-            >
-              <Network className="w-3.5 h-3.5 text-indigo-400" />
-              <span>{allClustersCollapsed ? 'Clusters collapsed' : 'Clusters expanded'}</span>
-              {/* Switch — "on" = collapsed */}
-              <span className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${allClustersCollapsed ? 'bg-indigo-600' : 'bg-zinc-700'}`}>
-                <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${allClustersCollapsed ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-              </span>
-            </button>
-          )}
+          {/* Top-center toggles: connections + clusters */}
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-2 z-20">
+            {graph.nodes.length > 0 && (
+              <button
+                onClick={() => setShowConnections(v => !v)}
+                title={showConnections ? 'Hide the connection mesh between neurons' : 'Show the connection mesh between neurons'}
+                className="flex items-center gap-2.5 px-3 py-2 bg-zinc-900/80 backdrop-blur-md border border-zinc-800 rounded-lg text-[10px] uppercase tracking-widest text-zinc-300 hover:border-zinc-700 transition-colors"
+              >
+                <Share2 className={`w-3.5 h-3.5 ${showConnections ? 'text-emerald-400' : 'text-zinc-500'}`} />
+                <span>{showConnections ? 'Connections on' : 'Connections off'}</span>
+                {/* Switch — "on" = connections visible */}
+                <span className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${showConnections ? 'bg-emerald-600' : 'bg-zinc-700'}`}>
+                  <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${showConnections ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+                </span>
+              </button>
+            )}
+            {clusterDefs.length > 0 && (
+              <button
+                onClick={toggleAllClusters}
+                title={allClustersCollapsed ? 'Expand all clusters' : 'Collapse all clusters'}
+                className="flex items-center gap-2.5 px-3 py-2 bg-zinc-900/80 backdrop-blur-md border border-zinc-800 rounded-lg text-[10px] uppercase tracking-widest text-zinc-300 hover:border-zinc-700 transition-colors"
+              >
+                <Network className="w-3.5 h-3.5 text-indigo-400" />
+                <span>{allClustersCollapsed ? 'Clusters collapsed' : 'Clusters expanded'}</span>
+                {/* Switch — "on" = collapsed */}
+                <span className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${allClustersCollapsed ? 'bg-indigo-600' : 'bg-zinc-700'}`}>
+                  <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${allClustersCollapsed ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+                </span>
+              </button>
+            )}
+          </div>
 
           {/* Physics controls */}
           {graph.nodes.length > 0 && (
