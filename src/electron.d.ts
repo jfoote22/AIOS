@@ -75,7 +75,12 @@ declare global {
         write: (id: string, data: string) => Promise<void>;
         resize: (id: string, cols: number, rows: number) => Promise<void>;
         kill: (id: string) => Promise<void>;
-        onData: (cb: (p: { id: string; data: string }) => void) => () => void;
+        /** Tear a session off into its own window. */
+        openWindow: (payload: { id: string; label?: string }) => Promise<boolean>;
+        /** From inside a popout window: take over a session's output stream.
+         *  Returns the scrollback so far; live chunks with seq > lastSeq follow. */
+        adopt: (id: string) => Promise<{ id: string; shell: string; cwd: string; buffer: string; lastSeq: number }>;
+        onData: (cb: (p: { id: string; data: string; seq?: number }) => void) => () => void;
         onExit: (cb: (p: { id: string; exitCode: number; signal?: number }) => void) => () => void;
       };
     };

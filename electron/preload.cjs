@@ -64,6 +64,10 @@ contextBridge.exposeInMainWorld('aios', {
     write: (id, data) => ipcRenderer.invoke('term:write', id, data),
     resize: (id, cols, rows) => ipcRenderer.invoke('term:resize', id, cols, rows),
     kill: (id) => ipcRenderer.invoke('term:kill', id),
+    // Tear-off support: open a popout window for a session, and (from inside
+    // that window) adopt the session's output stream + scrollback.
+    openWindow: (payload) => ipcRenderer.invoke('term:open-window', payload),
+    adopt: (id) => ipcRenderer.invoke('term:adopt', id),
     onData: (cb) => {
       const listener = (_e, payload) => cb(payload);
       ipcRenderer.on('term:data', listener);

@@ -154,6 +154,47 @@ function createWindow() {
   });
 }
 
+// Torn-off terminal windows. Each hosts a single pty session that previously
+// lived in the main window's Terminal tab; the renderer adopts the session by
+// id (see terminal.cjs "term:adopt"). Closing a popout kills its session,
+// same as closing the slot would.
+const termPopouts = new Set();
+
+function createTerminalPopout({ id, label } = {}) {
+  if (!id || typeof id !== 'string') throw new Error('A terminal session id is required.');
+  const winIcon = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
+  const win = new BrowserWindow({
+    width: 920,
+    height: 560,
+    minWidth: 420,
+    minHeight: 280,
+    backgroundColor: '#09090b',
+    title: label ? `${label} — Terminal` : 'Terminal',
+    icon: winIcon.isEmpty() ? undefined : winIcon,
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+      additionalArguments: [`--api-port=${apiPort}`],
+    },
+  });
+  win.setMenuBarVisibility(false);
+  wireContextMenu(win.webContents);
+  termPopouts.add(win);
+  win.on('closed', () => termPopouts.delete(win));
+
+  const query = { termPopout: id, label: label || '' };
+  if (isDev) {
+    win.loadURL(`http://localhost:3000/?${new URLSearchParams(query).toString()}`);
+  } else {
+    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query });
+  }
+  return true;
+}
+
 function createTray() {
   const iconPath = path.join(__dirname, 'tray-icon.png');
   let icon;
@@ -361,6 +402,10 @@ app.on('will-quit', () => {
 
 ipcMain.handle('app:get-version', () => app.getVersion());
 ipcMain.handle('app:get-api-port', () => apiPort);
+
+// Tear a terminal session off into its own window. The renderer detaches its
+// local xterm; the new window adopts the pty by id once it loads.
+ipcMain.handle('term:open-window', (_e, payload) => createTerminalPopout(payload || {}));
 
 // --- Memory ingest (LAN webhook) config ---
 ipcMain.handle('memory:get-config', () => memoryIngest.status());

@@ -3,7 +3,10 @@
 //
 // Lifetimes:
 //   - one IPty per terminal pane in the UI
-//   - all ptys are killed when the BrowserWindow they belong to closes
+//   - each pty is killed when the BrowserWindow that currently owns it closes
+//   - ownership can move between windows ("term:adopt") — that's how a
+//     terminal is torn off into its own popout window. The pty itself never
+//     restarts; only which webContents receives its output changes.
 //   - if pty exits on its own, the renderer is notified so it can show a
 //     dimmed "session ended" state and offer to respawn.
 
@@ -21,10 +24,32 @@ try {
 
 const isWindows = process.platform === 'win32';
 
-// id -> { pty, cwd, shell }
+// id -> { pty, cwd, shell, buf: [{seq, data}], bufLen, seq }
 const sessions = new Map();
 // id -> webContents that owns the session (so we can route output back)
 const ownership = new Map();
+
+// Scrollback kept per session so a window that adopts an existing pty (popout)
+// can replay what it missed. Chunks carry a sequence number; "term:data" sends
+// the same number, so the adopting renderer can stitch buffer + live stream
+// together without gaps or duplicates.
+const MAX_BUFFER_BYTES = 512 * 1024;
+
+function pushBuffer(s, seq, data) {
+  s.buf.push({ seq, data });
+  s.bufLen += data.length;
+  while (s.bufLen > MAX_BUFFER_BYTES && s.buf.length > 1) {
+    s.bufLen -= s.buf.shift().data.length;
+  }
+}
+
+// Kill the session when its owning webContents goes away — but only if it
+// still owns it (it may have been adopted by a popout window since).
+function attachOwnerCleanup(id, sender) {
+  sender.on('destroyed', () => {
+    if (ownership.get(id) === sender) killSession(id);
+  });
+}
 
 function defaultShell() {
   if (isWindows) return process.env.COMSPEC || 'powershell.exe';
@@ -64,12 +89,15 @@ function registerTerminalIpc() {
       console.error('[terminal] failed to spawn pty:', e);
       throw new Error(`Failed to start terminal: ${e?.message ?? String(e)}`);
     }
-    sessions.set(id, { pty: p, cwd, shell });
+    const session = { pty: p, cwd, shell, buf: [], bufLen: 0, seq: 0 };
+    sessions.set(id, session);
     ownership.set(id, event.sender);
 
     p.onData((data) => {
+      const seq = ++session.seq;
+      pushBuffer(session, seq, data);
       const sender = ownership.get(id);
-      if (sender && !sender.isDestroyed()) sender.send('term:data', { id, data });
+      if (sender && !sender.isDestroyed()) sender.send('term:data', { id, data, seq });
     });
     p.onExit(({ exitCode, signal }) => {
       const sender = ownership.get(id);
@@ -78,10 +106,28 @@ function registerTerminalIpc() {
       ownership.delete(id);
     });
 
-    // Clean up if the owning window goes away
-    event.sender.on('destroyed', () => killSession(id));
+    attachOwnerCleanup(id, event.sender);
 
     return { id, shell, cwd };
+  });
+
+  // Transfer a live session to the calling webContents (popout window).
+  // Atomically reassigns ownership and snapshots the scrollback, so every
+  // chunk is either in the returned buffer (seq <= lastSeq) or delivered as a
+  // "term:data" event to the new owner (seq > lastSeq) — never both, never
+  // neither.
+  ipcMain.handle('term:adopt', (event, id) => {
+    const s = sessions.get(id);
+    if (!s) throw new Error('Terminal session not found — it may have already ended.');
+    ownership.set(id, event.sender);
+    attachOwnerCleanup(id, event.sender);
+    return {
+      id,
+      shell: s.shell,
+      cwd: s.cwd,
+      buffer: s.buf.map(c => c.data).join(''),
+      lastSeq: s.seq,
+    };
   });
 
   ipcMain.handle('term:write', (_e, id, data) => {

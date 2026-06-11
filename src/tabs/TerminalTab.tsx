@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Terminal as TerminalIcon, Plus, X, Bot, Sparkles, Zap, Gem, AlertCircle, ShieldOff,
-  Square, Columns2, Columns3, Rows2, Grid2x2, FolderOpen, CornerDownLeft,
+  Square, Columns2, Columns3, Rows2, Grid2x2, ExternalLink,
 } from 'lucide-react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import { WebLinksAddon } from '@xterm/addon-web-links';
-import '@xterm/xterm/css/xterm.css';
+import type { Terminal } from '@xterm/xterm';
+import type { FitAddon } from '@xterm/addon-fit';
+import { createXterm, FolderBar, cdCommand, labelFromShell, shortCwd } from '@/terminal/term-shared';
 
 // Layout slots: each visible slot hosts at most one terminal session. The
 // session ↔ slot binding is stable across layout changes, so a session in
@@ -36,19 +35,6 @@ interface Session {
   unsubs: Array<() => void>;
   ended: boolean;
 }
-
-const THEME = {
-  background: '#09090b',
-  foreground: '#e4e4e7',
-  cursor: '#a5b4fc',
-  cursorAccent: '#09090b',
-  selectionBackground: '#3730a3aa',
-  black: '#27272a', red: '#f87171', green: '#86efac', yellow: '#fcd34d',
-  blue: '#93c5fd', magenta: '#f0abfc', cyan: '#67e8f9', white: '#e4e4e7',
-  brightBlack: '#52525b', brightRed: '#fca5a5', brightGreen: '#bbf7d0',
-  brightYellow: '#fde68a', brightBlue: '#bfdbfe', brightMagenta: '#f5d0fe',
-  brightCyan: '#a5f3fc', brightWhite: '#fafafa',
-};
 
 export default function TerminalTab({ active }: { active: boolean }) {
   const [layout, setLayout] = useState<LayoutId>('single');
@@ -110,38 +96,7 @@ export default function TerminalTab({ active }: { active: boolean }) {
     setError(null);
 
     try {
-      const term = new Terminal({
-        fontFamily: 'JetBrains Mono, Menlo, Consolas, monospace',
-        fontSize: 12,
-        cursorBlink: true,
-        scrollback: 5000,
-        theme: THEME,
-        allowProposedApi: true,
-      });
-      const fit = new FitAddon();
-      term.loadAddon(fit);
-      term.loadAddon(new WebLinksAddon());
-
-      // Clipboard wiring. xterm has no built-in paste binding, so Ctrl+V (and
-      // clipboard-injecting dictation like Wispr Flow) would otherwise emit a
-      // literal ^V control char. Intercept here and paste real clipboard text.
-      // Leave bare Ctrl+C alone so it still sends SIGINT; use Ctrl+Shift+C to copy.
-      term.attachCustomKeyEventHandler((e) => {
-        if (e.type !== 'keydown') return true;
-        const mod = e.ctrlKey || e.metaKey;
-        if (mod && (e.key === 'v' || e.key === 'V')) {
-          e.preventDefault();
-          navigator.clipboard.readText().then(text => { if (text) term.paste(text); }).catch(() => {});
-          return false;
-        }
-        if (mod && e.shiftKey && (e.key === 'c' || e.key === 'C')) {
-          const sel = term.getSelection();
-          if (sel) navigator.clipboard.writeText(sel).catch(() => {});
-          e.preventDefault();
-          return false;
-        }
-        return true;
-      });
+      const { term, fit } = createXterm();
 
       const chosenDir = slotDirsRef.current[slotIndex]?.trim() || undefined;
       const { id, shell, cwd } = await window.aios.term.spawn({ cols: 80, rows: 24, cwd: chosenDir });
@@ -234,6 +189,26 @@ export default function TerminalTab({ active }: { active: boolean }) {
     if (containers.current[idx]) containers.current[idx]!.innerHTML = '';
   };
 
+  // Tear a session off into its own window. The pty keeps running untouched;
+  // we open a popout window for it, then drop our local xterm + listeners. The
+  // popout adopts the session (output ownership + scrollback replay) when it
+  // loads, and the slot frees up for a new terminal. Closing the popout window
+  // ends the session, exactly like closing the slot would have.
+  const popoutSlot = async (idx: number) => {
+    const s = slotsRef.current[idx];
+    if (!s || s.ended) return;
+    try {
+      await window.aios?.term.openWindow({ id: s.id, label: s.label });
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+      return;
+    }
+    for (const off of s.unsubs) off();
+    try { s.term.dispose(); } catch {}
+    setSlots(prev => { const n = prev.slice(); n[idx] = null; return n; });
+    if (containers.current[idx]) containers.current[idx]!.innerHTML = '';
+  };
+
   // Find the first empty visible slot for "+ new" quick-launch buttons
   const firstEmptyVisibleSlot = useMemo(() => {
     const count = LAYOUTS[layout].slots;
@@ -311,6 +286,7 @@ export default function TerminalTab({ active }: { active: boolean }) {
             containerRef={(el) => { containers.current[idx] = el; }}
             onSpawn={(initialCommand, labelHint) => spawnInSlot(idx, initialCommand, labelHint)}
             onClose={() => closeSlot(idx)}
+            onPopout={() => popoutSlot(idx)}
           />
         ))}
       </div>
@@ -397,7 +373,7 @@ function NewButton({ icon, label, onClick, disabled, danger, title }: { icon: Re
 }
 
 function Slot({
-  slotIndex, session, dir, onDirChange, onApplyDir, onBrowse, containerRef, onSpawn, onClose,
+  slotIndex, session, dir, onDirChange, onApplyDir, onBrowse, containerRef, onSpawn, onClose, onPopout,
 }: {
   slotIndex: number;
   session: Session | null;
@@ -408,6 +384,7 @@ function Slot({
   containerRef: (el: HTMLDivElement | null) => void;
   onSpawn: (initialCommand?: string, labelHint?: string) => void;
   onClose: () => void;
+  onPopout: () => void;
 }) {
   if (!session) {
     return (
@@ -439,10 +416,19 @@ function Slot({
         {session.ended && (
           <span className="text-[9px] text-amber-400 uppercase tracking-wider">ended</span>
         )}
+        {!session.ended && (
+          <button
+            onClick={onPopout}
+            title="Tear off into its own window"
+            className="ml-auto p-0.5 rounded text-zinc-600 hover:text-indigo-300 hover:bg-indigo-500/10"
+          >
+            <ExternalLink className="w-2.5 h-2.5" />
+          </button>
+        )}
         <button
           onClick={onClose}
           title="Close session"
-          className="ml-auto p-0.5 rounded text-zinc-600 hover:text-red-300 hover:bg-red-500/10"
+          className={`${session.ended ? 'ml-auto ' : ''}p-0.5 rounded text-zinc-600 hover:text-red-300 hover:bg-red-500/10`}
         >
           <X className="w-2.5 h-2.5" />
         </button>
@@ -451,56 +437,6 @@ function Slot({
       <div ref={containerRef} className="flex-1 min-h-0 px-1.5 py-1" />
     </div>
   );
-}
-
-// Per-terminal folder bar: type/paste a path (Enter applies) or click the
-// folder icon for the native picker. On a live session, applying issues a `cd`;
-// on an empty slot it just sets the working dir for the next spawn.
-function FolderBar({
-  dir, onDirChange, onApply, onBrowse, hasSession,
-}: {
-  dir: string;
-  onDirChange: (dir: string) => void;
-  onApply: (dir: string) => void;
-  onBrowse: () => void;
-  hasSession: boolean;
-}) {
-  return (
-    <div className="h-7 px-1.5 flex items-center gap-1 border-b border-zinc-800/60 bg-zinc-900/30 shrink-0">
-      <button
-        onClick={onBrowse}
-        title="Browse for a folder"
-        className="p-1 rounded text-zinc-400 hover:text-indigo-300 hover:bg-zinc-800 shrink-0"
-      >
-        <FolderOpen className="w-3 h-3" />
-      </button>
-      <input
-        value={dir}
-        onChange={(e) => onDirChange(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onApply(dir); } }}
-        placeholder={hasSession ? 'Folder to cd into…' : 'Folder to start in…'}
-        spellCheck={false}
-        className="flex-1 min-w-0 bg-zinc-950/60 border border-zinc-800 rounded px-1.5 py-0.5 text-[10px] text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/50"
-      />
-      <button
-        onClick={() => onApply(dir)}
-        disabled={!dir.trim()}
-        title={hasSession ? 'cd into this folder' : 'Use this folder on next launch'}
-        className="p-1 rounded text-zinc-400 hover:text-indigo-300 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-      >
-        <CornerDownLeft className="w-3 h-3" />
-      </button>
-    </div>
-  );
-}
-
-// Build a shell-appropriate "change directory" command. cmd.exe needs `/d` to
-// cross drives; PowerShell and POSIX shells take a quoted path directly.
-function cdCommand(shell: string, dir: string): string {
-  const s = shell.toLowerCase();
-  const quoted = `"${dir.replace(/"/g, '\\"')}"`;
-  if (s.includes('cmd')) return `cd /d ${quoted}`;
-  return `cd ${quoted}`;
 }
 
 function SmallButton({ icon, onClick, children, danger, title }: { icon: React.ReactNode; onClick: () => void; children: React.ReactNode; danger?: boolean; title?: string }) {
@@ -518,14 +454,4 @@ function SmallButton({ icon, onClick, children, danger, title }: { icon: React.R
       {children}
     </button>
   );
-}
-
-function labelFromShell(shell: string): string {
-  const base = shell.split(/[\\/]/).pop() || 'shell';
-  return base.replace(/\.exe$/i, '');
-}
-
-function shortCwd(cwd: string): string {
-  const norm = cwd.replace(/\\/g, '/');
-  return norm.length > 32 ? '…' + norm.slice(-30) : norm;
 }
