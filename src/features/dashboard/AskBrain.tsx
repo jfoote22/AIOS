@@ -198,7 +198,7 @@ export default function AskBrain() {
               <div className="mt-2 flex items-center justify-between gap-2">
                 <Badge tone="neutral" variant="soft">{r.category || "Uncategorized"}</Badge>
                 <div className="flex items-center gap-1.5">
-                  <Button size="xs" variant="ghost" leftIcon={<ArrowUpRight className="w-3.5 h-3.5" />} onClick={() => navigateTo("secondbrain")}>
+                  <Button size="xs" variant="ghost" leftIcon={<ArrowUpRight className="w-3.5 h-3.5" />} onClick={() => navigateTo("secondbrain", { focusId: `snip:${r.id}` })}>
                     In brain
                   </Button>
                   <Button size="xs" variant="secondary" leftIcon={<Telescope className="w-3.5 h-3.5" />} onClick={() => drill(r)}>

@@ -199,3 +199,23 @@ export async function deleteChunksForConversation(conversationId: string): Promi
 export async function clearImports(provider?: string): Promise<void> {
   await call('clearImports', [provider]);
 }
+
+// --- Bulk load (merge a backup payload in a single transaction) ---
+// Mirrors the one-shot loader the IndexedDB→SQLite migration uses. Any omitted
+// table is simply skipped; rows are upserted (INSERT OR REPLACE), so importing
+// a backup merges with existing data rather than wiping it.
+export interface BulkLoadPayload {
+  snippets?: unknown[];
+  meta?: { key: string; value: unknown }[];
+  threads?: unknown[];
+  messages?: unknown[];
+  imports?: unknown[];
+  importChunks?: unknown[];
+  agents?: unknown[];
+  skills?: unknown[];
+  runs?: unknown[];
+}
+
+export async function bulkLoad(payload: BulkLoadPayload): Promise<void> {
+  await call('bulkLoad', [payload]);
+}

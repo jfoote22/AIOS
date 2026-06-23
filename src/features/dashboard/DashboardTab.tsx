@@ -140,7 +140,7 @@ export default function DashboardTab({ active }: { active: boolean }) {
             <ul className="space-y-1 -mx-1">
               {data.recent.map((r: RecentItem) => (
                 <li key={`${r.kind}:${r.id}`}>
-                  <button onClick={() => navigateTo(r.kind === "deepdive" ? "deepdives" : "secondbrain")} className="focus-ring w-full flex items-center gap-2.5 px-2 py-1.5 rounded-[var(--radius-md)] hover:bg-surface-2 text-left transition-colors">
+                  <button onClick={() => r.kind === "deepdive" ? navigateTo("deepdives") : navigateTo("secondbrain", { focusId: `snip:${r.id}` })} className="focus-ring w-full flex items-center gap-2.5 px-2 py-1.5 rounded-[var(--radius-md)] hover:bg-surface-2 text-left transition-colors">
                     <span className="shrink-0 text-ink-3">{r.kind === "deepdive" ? <MessageSquare className="w-3.5 h-3.5" /> : <FileText className="w-3.5 h-3.5" />}</span>
                     <span className="flex-1 min-w-0 truncate text-sm text-ink-2">{r.title}</span>
                     <Badge tone={r.kind === "deepdive" ? "accent" : "neutral"} variant="soft">{r.category}</Badge>

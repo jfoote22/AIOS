@@ -19,7 +19,7 @@ import { onDeepDivesChange } from '../lib/deepdiveStore';
 import { onSnippetsChange, emitSnippetsChange } from '../lib/snippetStore';
 import { enrichPendingMemory } from '../lib/memory';
 import { BrainView3D } from '../components/BrainView3D';
-import { navigateTo } from '../lib/navigate';
+import { navigateTo, onNavigate } from '../lib/navigate';
 import { useExternalInputSync } from '../lib/useExternalInputSync';
 import SnippetEditor, { type CapturedItem } from '../components/SnippetEditor';
 
@@ -55,6 +55,17 @@ const PULSE_STEP_MS = photonTravelMs(PULSE_SPEED) * 0.85;
 // cluster — on the collapsed cluster node and (when expanded) around each of
 // its chunk members. Assigned per-cluster by discovery order.
 const CLUSTER_RING_PALETTE = ['#f0abfc', '#fca5a5', '#fcd34d', '#86efac', '#7dd3fc', '#c4b5fd', '#fdba74', '#5eead4', '#fb7185', '#a3e635'];
+
+// Fade a #rrggbb color to a translucent rgba(). Used to dim non-selected
+// neurons so the focused one stands out. Passes through anything that isn't a
+// 6-digit hex (already-rgba dim colors, etc.).
+function fadeColor(hex: string, alpha: number): string {
+  if (!hex.startsWith('#') || hex.length < 7) return hex;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
 
 export default function SecondBrainTab({ active = true }: { active?: boolean }) {
   const [snippets, setSnippets] = useState<any[]>([]);
@@ -174,6 +185,12 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
 
   const fgRef = useRef<ForceGraphMethods | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Distinguish a plain click on empty canvas (→ deselect) from a click that
+  // merely ends a camera pan/orbit drag (→ keep the selection). The graph
+  // libraries fire their background-click handler in both cases, so we track
+  // pointer travel ourselves and swallow the deselect when the user dragged.
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+  const didDragRef = useRef(false);
   // Graph coords for freshly created neurons, keyed by node id, so the next
   // graph rebuild drops them where the user asked (right-click position) rather
   // than at the d3 origin.
@@ -670,7 +687,11 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       if (reveal.anchorIds.has(node.id)) return '#fde047'; // the search matches
       if (!reveal.ids.has(node.id)) return 'rgba(110,114,128,0.18)';
     }
-    return groupColors[node.group] || '#9ca3af';
+    const base = groupColors[node.group] || '#9ca3af';
+    // A neuron is selected → fade every other neuron so the selection (drawn
+    // white with a pulsing glow) is unmistakable.
+    if (focusedNode) return fadeColor(base, 0.4);
+    return base;
   }, [citedIds, focusedNode, groupColors, reveal]);
 
   // A stable ring color per doc cluster, and a lookup of which chunk neurons
@@ -752,6 +773,16 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       const t = (1 - Math.cos(phase * Math.PI * 2)) / 2; // eased 0 → 1 → 0
       const alpha = 0.4 + 0.55 * t;
       const ringR = baseR + 5 + 2 * t;
+      // Pulsing glow disc — the selected neuron "breathes" light so it reads as
+      // energized, not just ringed.
+      const glowR = baseR + 9 + 4 * t;
+      const grad = ctx.createRadialGradient(x, y, baseR * 0.3, x, y, glowR);
+      grad.addColorStop(0, `rgba(165,180,252,${0.3 + 0.35 * t})`); // indigo-300
+      grad.addColorStop(1, 'rgba(165,180,252,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(x, y, glowR, 0, Math.PI * 2);
+      ctx.fill();
       ctx.beginPath();
       ctx.arc(x, y, ringR, 0, Math.PI * 2);
       ctx.strokeStyle = `rgba(129,140,248,${alpha})`; // indigo-400
@@ -877,6 +908,51 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     return m;
   }, [graph]);
 
+  // Focus whatever id is parked in pendingFocusRef (set by a freshly captured
+  // snippet OR an external navigation, e.g. "In brain" / a Recent Activity on
+  // Home). If the neuron is currently folded into a collapsed doc cluster, we
+  // expand that cluster first; the post-rebuild effect re-runs this and lands
+  // the focus once the node becomes visible.
+  const applyPendingFocus = useCallback(() => {
+    const pid = pendingFocusRef.current;
+    if (!pid) return;
+    const node = nodeById.get(pid);
+    if (node) {
+      pendingFocusRef.current = null;
+      onNodeClick(node as any);
+      return;
+    }
+    const cluster = clusterDefs.find(c => c.memberIds.includes(pid));
+    if (cluster && !expandedDocs.has(cluster.docId)) expandCluster(cluster.docId);
+  }, [nodeById, onNodeClick, clusterDefs, expandedDocs, expandCluster]);
+
+  // External navigation asking us to select a neuron (Home → "In brain" / a
+  // Recent Activity). Park the id and try immediately; if the tab/graph isn't
+  // ready yet, the active-flip and post-rebuild effects below retry.
+  useEffect(() => onNavigate((target, opts) => {
+    if (target === 'secondbrain' && opts?.focusId) {
+      pendingFocusRef.current = opts.focusId;
+      applyPendingFocus();
+    }
+  }), [applyPendingFocus]);
+
+  // Retry a parked focus when this tab becomes active (the navigation handler
+  // runs before `active` flips, so the node may not be centerable yet).
+  useEffect(() => { if (active) applyPendingFocus(); }, [active, applyPendingFocus]);
+
+  // Re-fit the 2D graph camera when this tab becomes visible. All tabs stay
+  // mounted (display:none when inactive), so the force graph mounts while the
+  // home dashboard is the default tab — its viewport is 0/mis-sized at mount,
+  // d3 lays out + cools down hidden, and on reveal the camera is left framing
+  // an empty region with every neuron parked off-screen (the "empty brain"
+  // bug). Once the panel is shown the ResizeObserver pushes the real size in;
+  // we wait a beat for that, then zoom-to-fit so the whole brain is in view.
+  useEffect(() => {
+    if (!active || viewMode !== '2d' || graph.nodes.length === 0) return;
+    const id = setTimeout(() => fgRef.current?.zoomToFit(400, 60), 250);
+    return () => clearTimeout(id);
+  }, [active, viewMode, graph.nodes.length]);
+
   // Debounced query embedding for semantic search (mirrors the Snippit tab).
   useEffect(() => {
     const q = searchQuery.trim();
@@ -897,12 +973,8 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   // pending auto-focus for a freshly captured snippet.
   useEffect(() => {
     setFocusedNode(prev => (prev ? (nodeById.get(prev.id) ?? null) : prev));
-    const pid = pendingFocusRef.current;
-    if (pid && activeRef.current) {
-      const node = nodeById.get(pid);
-      if (node) { pendingFocusRef.current = null; onNodeClick(node as any); }
-    }
-  }, [nodeById, onNodeClick]);
+    applyPendingFocus();
+  }, [nodeById, applyPendingFocus]);
 
   // Keep the editable snippet draft in sync with the focused node — including
   // when its underlying data changes out from under us (e.g. an "Add Shot"
@@ -1223,7 +1295,16 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
         </aside>
 
         {/* Right 2/3 — force-directed graph */}
-        <div ref={containerRef} onContextMenu={(e) => e.preventDefault()} className="flex-1 relative bg-gradient-to-br from-zinc-950 via-zinc-950 to-zinc-900 overflow-hidden">
+        <div
+          ref={containerRef}
+          onContextMenu={(e) => e.preventDefault()}
+          onMouseDown={(e) => { dragStartRef.current = { x: e.clientX, y: e.clientY }; didDragRef.current = false; }}
+          onMouseMove={(e) => {
+            const s = dragStartRef.current;
+            if (s && (Math.abs(e.clientX - s.x) > 4 || Math.abs(e.clientY - s.y) > 4)) didDragRef.current = true;
+          }}
+          className="flex-1 relative bg-gradient-to-br from-zinc-950 via-zinc-950 to-zinc-900 overflow-hidden"
+        >
           {/* 2D ⇄ 3D view toggle */}
           {graph.nodes.length > 0 && (
             <div className="absolute top-3 left-3 z-20 flex rounded-lg overflow-hidden border border-zinc-700 bg-zinc-900/85 backdrop-blur">
@@ -1256,7 +1337,11 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               highlightIds={highlight3d}
               showConnections={showConnections}
               onNodeClick={onNode3DClick}
-              onBackground={() => { setFocusedNode(null); setNodeMenu(null); setBgMenu(null); }}
+              onBackground={() => {
+                // A click that merely ended a camera orbit/drag must not deselect.
+                if (didDragRef.current) { didDragRef.current = false; return; }
+                setFocusedNode(null); setNodeMenu(null); setBgMenu(null);
+              }}
             />
           ) : (
             <ForceGraph2D
@@ -1313,7 +1398,11 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
                 if (node.kind !== 'cluster') setFocusedNode(node);
                 setNodeMenu({ node, x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY });
               }}
-              onBackgroundClick={() => { setFocusedNode(null); setNodeMenu(null); setBgMenu(null); }}
+              onBackgroundClick={() => {
+                // A click that merely ended a camera pan/drag must not deselect.
+                if (didDragRef.current) { didDragRef.current = false; return; }
+                setFocusedNode(null); setNodeMenu(null); setBgMenu(null);
+              }}
               onBackgroundRightClick={(e) => {
                 const ev = e as MouseEvent;
                 ev.preventDefault?.();
