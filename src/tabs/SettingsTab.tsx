@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { Settings as SettingsIcon, Sliders, CreditCard, Download, Server } from 'lucide-react';
+import { Settings as SettingsIcon, Sliders, CreditCard, Download, Server, Brain } from 'lucide-react';
 import ModelsTab from './ModelsTab';
 import SubscriptionsTab from './SubscriptionsTab';
 import ImportsTab from './ImportsTab';
 import HermesSettingsTab from './HermesSettingsTab';
+import SecondBrainDataTab from './SecondBrainDataTab';
 
-type SettingsSection = 'models' | 'hermes' | 'subscriptions' | 'imports';
+type SettingsSection = 'models' | 'hermes' | 'subscriptions' | 'imports' | 'secondbrain';
 
 interface SectionDef {
   id: SettingsSection;
@@ -18,6 +19,7 @@ const SECTIONS: SectionDef[] = [
   { id: 'hermes',        label: 'Hermes',        icon: Server },
   { id: 'subscriptions', label: 'Subscriptions', icon: CreditCard },
   { id: 'imports',       label: 'Imports',       icon: Download },
+  { id: 'secondbrain',   label: 'Second Brain',  icon: Brain },
 ];
 
 function Panel({ active, children }: { active: boolean; children: React.ReactNode }) {
@@ -66,6 +68,7 @@ export default function SettingsTab() {
         <Panel active={section === 'hermes'}><HermesSettingsTab /></Panel>
         <Panel active={section === 'subscriptions'}><SubscriptionsTab /></Panel>
         <Panel active={section === 'imports'}><ImportsTab /></Panel>
+        <Panel active={section === 'secondbrain'}><SecondBrainDataTab /></Panel>
       </div>
     </div>
   );
