@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject, type LinkObject } from 'react-force-graph-2d';
-import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Bot, User as UserIcon, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle, Search, Plus, Share2 } from 'lucide-react';
+import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Upload as UploadIcon, Bot, User as UserIcon, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle, Search, Plus, Share2 } from 'lucide-react';
 import * as db from '../lib/db';
 import {
   embedText, cosineSimilarity, chatWithVault, isGeminiReady, onGeminiReadyChange, buildEmbedSource,
@@ -22,6 +22,7 @@ import { BrainView3D } from '../components/BrainView3D';
 import { navigateTo } from '../lib/navigate';
 import { useExternalInputSync } from '../lib/useExternalInputSync';
 import SnippetEditor, { type CapturedItem } from '../components/SnippetEditor';
+import { useToast } from '../ui';
 
 interface ChatMessage extends ChatTurn { citedIds?: string[]; }
 
@@ -205,6 +206,43 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
 
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => onImportsChange(() => { loadData(); }), [loadData]);
+
+  // ── Export / import the whole brain ────────────────────────────────────────
+  // Export dumps every store (snippets, deepdives, imports + chunks, agents,
+  // skills, runs, meta) to one JSON file; import merges such a file back in so a
+  // brain can move onto a fresh install. The native dialog + file I/O live in
+  // the main process (window.aios.brain); here we just trigger and report.
+  const toast = useToast();
+  const [transferBusy, setTransferBusy] = useState<null | 'export' | 'import'>(null);
+
+  const sumCounts = (counts: Record<string, number>) =>
+    Object.values(counts).reduce((a, b) => a + b, 0);
+
+  const exportBrain = useCallback(async () => {
+    if (!window.aios?.brain || transferBusy) return;
+    setTransferBusy('export');
+    try {
+      const res = await window.aios.brain.export();
+      if ('canceled' in res) return;
+      toast.success('Second Brain exported', { description: `${sumCounts(res.counts)} records saved to ${res.path}` });
+    } catch (e: any) {
+      toast.error('Export failed', { description: e?.message ?? String(e) });
+    } finally { setTransferBusy(null); }
+  }, [transferBusy, toast]);
+
+  const importBrain = useCallback(async () => {
+    if (!window.aios?.brain || transferBusy) return;
+    setTransferBusy('import');
+    try {
+      const res = await window.aios.brain.import();
+      if ('canceled' in res) return;
+      toast.success('Second Brain imported', { description: `${sumCounts(res.counts)} records merged` });
+      await loadData();
+      emitSnippetsChange(); // refresh the Snippit tab too
+    } catch (e: any) {
+      toast.error('Import failed', { description: e?.message ?? String(e) });
+    } finally { setTransferBusy(null); }
+  }, [transferBusy, toast, loadData]);
 
   // Reactively pick up DeepDive saves/deletes without a manual refresh.
   // If this tab is visible, reload (debounced to coalesce rapid saves); if it's
@@ -1037,6 +1075,26 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
           >
             <Plus className="w-3.5 h-3.5" />New Neuron
           </button>
+          {isElectron && (
+            <>
+              <button
+                onClick={exportBrain}
+                disabled={!!transferBusy}
+                title="Save the entire Second Brain (snippets, deepdives, imports, agents, skills, runs) to a JSON file"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-zinc-800/60 hover:bg-zinc-700/60 border border-zinc-700 text-zinc-300 text-[10px] font-bold uppercase tracking-widest transition-colors disabled:opacity-50"
+              >
+                <DownloadIcon className="w-3.5 h-3.5" />{transferBusy === 'export' ? 'Exporting…' : 'Export'}
+              </button>
+              <button
+                onClick={importBrain}
+                disabled={!!transferBusy}
+                title="Load a Second Brain export JSON into this install (merges by id)"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-zinc-800/60 hover:bg-zinc-700/60 border border-zinc-700 text-zinc-300 text-[10px] font-bold uppercase tracking-widest transition-colors disabled:opacity-50"
+              >
+                <UploadIcon className="w-3.5 h-3.5" />{transferBusy === 'import' ? 'Importing…' : 'Import'}
+              </button>
+            </>
+          )}
           <button onClick={loadData} className="text-[10px] text-zinc-500 hover:text-indigo-400 uppercase tracking-widest">Refresh</button>
         </div>
       </header>

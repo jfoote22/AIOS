@@ -366,7 +366,39 @@ function putRun(item) {
     .run(item.id, item.cardId ?? null, item.agentId ?? null, num(item.startedAt), JSON.stringify(item));
 }
 
-// ── one-shot bulk loader (used by the one-time IndexedDB→SQLite migration) ────
+// ── full-database export (Second Brain backup / move to a fresh install) ──────
+// Reads every table into a single plain-JSON object whose shape is exactly what
+// bulkLoad() consumes — so an export from one install round-trips into a fresh
+// one via bulkLoad. import_chunk embeddings are materialized back into number[]
+// (getAllImportChunks already does this), and meta is emitted as {key,value}
+// pairs (bulkLoad re-stringifies each value through setMeta).
+
+function getAllMessages() {
+  return parseAll(ensure().prepare('SELECT data FROM messages ORDER BY id ASC').all());
+}
+function getAllMeta() {
+  return ensure()
+    .prepare('SELECT key, value FROM meta')
+    .all()
+    .map((r) => ({ key: r.key, value: r.value == null ? null : JSON.parse(r.value) }));
+}
+
+function dumpAll() {
+  return {
+    snippets: getAllSnippets(),
+    meta: getAllMeta(),
+    threads: getAllThreads(),
+    messages: getAllMessages(),
+    imports: getAllImports(),
+    importChunks: getAllImportChunks(),
+    agents: getAllAgents(),
+    skills: getAllSkills(),
+    runs: getAllRuns(),
+  };
+}
+
+// ── one-shot bulk loader (used by the one-time IndexedDB→SQLite migration and
+// by Second Brain import) ─────────────────────────────────────────────────────
 // Accepts the full dump and writes it in a single transaction.
 
 function bulkLoad(payload) {
@@ -395,7 +427,7 @@ const ops = {
   getAllAgents, putAgent, removeAgent,
   getAllSkills, putSkill, removeSkill,
   getAllRuns, getRunsForCard, putRun,
-  bulkLoad,
+  dumpAll, bulkLoad,
 };
 
 /** Invoke a whitelisted op by name. Throws on unknown ops. */

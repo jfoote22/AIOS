@@ -38,6 +38,13 @@ contextBridge.exposeInMainWorld('aios', {
     call: (op, args) => ipcRenderer.invoke('aios:db', op, args || []),
   },
 
+  // Second Brain backup: dump the whole store to a JSON file / ingest one back.
+  // Both open a native dialog and resolve with a small status object.
+  brain: {
+    export: () => ipcRenderer.invoke('brain:export'),
+    import: () => ipcRenderer.invoke('brain:import'),
+  },
+
   // Memory ingest (LAN webhook that feeds external markdown into Second Brain).
   memory: {
     getConfig: () => ipcRenderer.invoke('memory:get-config'),

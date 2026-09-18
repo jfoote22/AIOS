@@ -222,28 +222,39 @@ function resolveGrokBin() {
   return _grokBinCache;
 }
 
-// Resolve the `gemini` CLI binary (Google's open-source Gemini CLI, installed
-// via `npm i -g @google/gemini-cli`). Same stale-PATH problem as grok: the npm
-// global bin dir may not be on the Electron process PATH. Check an explicit
-// override, then the canonical npm global location, then fall back to the bare
-// command for the OS to resolve. On Windows the npm shim is a `.cmd`, so the
-// agent route spawns it with shell:true.
+// Resolve the Antigravity CLI binary (`agy`), Google's replacement for the old
+// `gemini` CLI. Google decommissioned the Gemini CLI for Pro/Ultra/free
+// (subscription) users on 2026-06-18; Antigravity CLI is the successor. It is a
+// native binary (NOT an npm package) installed by
+//   irm https://antigravity.google/cli/install.ps1 | iex   (Windows)
+//   curl -fsSL https://antigravity.google/cli/install.sh | bash   (Unix)
+// and dropped at %LOCALAPPDATA%\agy\bin\agy.exe (Windows) or ~/.local/bin/agy.
+// Same stale-PATH problem as the others: that dir may not be on the Electron
+// process PATH, so check an explicit override, then the canonical install
+// location, then fall back to the bare command for the OS to resolve. Because
+// it's a real .exe (not a .cmd shim), the agent route can spawn it with
+// shell:false and pass argv directly — no shell-quoting needed.
+// AIOS_AGY_BIN is the preferred override; AIOS_GEMINI_BIN is honored for
+// back-compat with older configs.
 let _geminiBinCache;
 function resolveGeminiBin() {
   if (_geminiBinCache !== undefined) return _geminiBinCache;
-  const override = (process.env.AIOS_GEMINI_BIN || '').trim();
+  const override = (process.env.AIOS_AGY_BIN || process.env.AIOS_GEMINI_BIN || '').trim();
   const isWin = process.platform === 'win32';
-  const exe = isWin ? 'gemini.cmd' : 'gemini';
+  const exe = isWin ? 'agy.exe' : 'agy';
   const candidates = [];
   if (override) candidates.push(override);
   const home = os.homedir();
-  if (home && isWin) {
-    candidates.push(path.join(home, 'AppData', 'Roaming', 'npm', exe));
+  if (isWin) {
+    const localAppData = process.env.LOCALAPPDATA || (home && path.join(home, 'AppData', 'Local'));
+    if (localAppData) candidates.push(path.join(localAppData, 'agy', 'bin', 'agy.exe'));
+  } else if (home) {
+    candidates.push(path.join(home, '.local', 'bin', 'agy'));
   }
   for (const c of candidates) {
     try { if (fsSync.existsSync(c)) { _geminiBinCache = c; return c; } } catch {}
   }
-  // Last resort: let the OS PATH-resolve it (works if gemini is on PATH).
+  // Last resort: let the OS PATH-resolve it (works if agy is on PATH).
   _geminiBinCache = exe;
   return _geminiBinCache;
 }
@@ -1894,29 +1905,31 @@ function start() {
     }
   });
 
-  // --- Gemini CLI agent chat (uses local `gemini` CLI Google-account auth, not API key) ---
-  // Requires the Gemini CLI installed and signed in: `npm i -g @google/gemini-cli`
-  // then run `gemini` once to complete the Google OAuth login (free tier, or a
-  // paid Gemini Code Assist / AI plan for higher limits).
-  // The renderer routes here when the user picks "subscription" auth for Gemini.
+  // --- Antigravity CLI agent chat (uses local `agy` CLI Google-account auth, not API key) ---
+  // Requires the Antigravity CLI installed and signed in: install via
+  //   irm https://antigravity.google/cli/install.ps1 | iex   (Windows)
+  // then run `agy` once interactively to complete the browser OAuth login (creds
+  // are cached in the Windows Credential Manager). This replaces the retired
+  // Gemini CLI (`@google/gemini-cli`), which stopped serving subscription users
+  // on 2026-06-18. The renderer routes here when the user picks "subscription"
+  // auth for Gemini.
   //
-  // Interface (per docs/cli/headless.md + cli-reference.md, verified against the
-  // installed CLI):
-  //   - `-p/--prompt` FORCES non-interactive mode (without it, piped stdin can
-  //     fall back to interactive and hang). The -p text is appended to stdin.
-  //   - `-o/--output-format stream-json` emits newline-delimited events:
-  //       {type:"init",...} {type:"message",role:"user"|"assistant",content,delta}
-  //       {type:"result",status,stats} {type:"error",...}
-  //     We relay assistant message content as text deltas (like the grok path).
-  //   - `--approval-mode yolo` + `--skip-trust` so a stray tool call / untrusted
-  //     cwd never downgrades approval and blocks headless.
-  //   - `-m/--model` only when AIOS_GEMINI_MODEL is set; otherwise the plan picks
-  //     (the OAuth tier auto-routes to current Gemini 3.x flash). NOTE the OAuth
-  //     tier rejects AI-Studio-only names like `gemini-flash-latest` (404), so we
-  //     never pass the Models-tab id here — that id drives the API-key path only.
-  // The conversation (arbitrary user content) rides on STDIN, never argv, so the
-  // only argv tokens are fixed flags + a constant directive — safe to quote for
-  // the Windows `gemini.cmd` shell shim.
+  // Interface (verified against `agy --help`, v1.0.13):
+  //   - `--print`/`-p` runs a single prompt non-interactively and prints the
+  //     response. Unlike the old Gemini CLI there is NO `--output-format`/
+  //     stream-json mode — `agy` emits PLAIN TEXT on stdout, so we relay stdout
+  //     chunks directly as text deltas rather than parsing JSON events.
+  //   - `--dangerously-skip-permissions` auto-approves any tool request so a
+  //     stray tool call never blocks headless (replaces gemini's yolo/skip-trust).
+  //   - `--model` selects the model, only when AIOS_GEMINI_MODEL is set; otherwise
+  //     `agy` auto-selects (defaults to current Gemini 3.x flash).
+  //   - `--print-timeout` bounds how long print mode waits for a response.
+  // The conversation rides as the trailing positional prompt argument (the
+  // documented `agy -p "<prompt>"` form). `agy` is a real .exe (not a .cmd shim),
+  // so we spawn it with shell:false and pass argv as an array — no shell quoting,
+  // no injection surface. NOTE: Windows caps a command line at ~32K chars, so a
+  // very long conversation could overflow argv; if that becomes an issue, switch
+  // to feeding the prompt via stdin.
   app.post('/api/gemini-agent/chat', async (req, res) => {
     let child = null;
     try {
@@ -1936,30 +1949,23 @@ function start() {
       const convo = history
         ? `${preamble}\n\n${history}\n\nUser: ${last.content}`
         : `${preamble}\n\nUser: ${last.content}`;
-      // Fixed directive carried in -p (forces non-interactive). The actual
-      // conversation is appended via stdin, so no user content enters argv.
-      const DIRECTIVE = 'Respond as the assistant to the conversation provided.';
-
       const geminiModelOverride = (process.env.AIOS_GEMINI_MODEL || '').trim();
-      const flags = ['-o', 'stream-json', '--approval-mode', 'yolo', '--skip-trust', '-p', DIRECTIVE];
-      if (geminiModelOverride) flags.push('-m', geminiModelOverride);
+      // `--print` forces non-interactive single-shot mode; the conversation is
+      // the trailing positional prompt. Keep the prompt LAST so the boolean flags
+      // parse before agy reads the positional argument.
+      const flags = ['--print', '--dangerously-skip-permissions'];
+      if (geminiModelOverride) flags.push('--model', geminiModelOverride);
+      flags.push(convo);
 
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.setHeader('x-vercel-ai-data-stream', 'v1');
       res.setHeader('Cache-Control', 'no-cache');
 
       const bin = resolveGeminiBin();
-      const baseOpts = { cwd: os.tmpdir(), windowsHide: true, env: process.env };
-      if (process.platform === 'win32') {
-        // shell:true is needed to run the gemini.cmd npm shim, but Node does NOT
-        // quote args under shell:true — it just space-joins them. So build one
-        // pre-quoted command line ourselves (only fixed tokens are present).
-        const q = (s) => (/[\s"]/.test(String(s)) ? `"${String(s).replace(/"/g, '""')}"` : String(s));
-        const cmdline = [q(bin), ...flags.map(q)].join(' ');
-        child = spawn(cmdline, { ...baseOpts, shell: true });
-      } else {
-        child = spawn(bin, flags, { ...baseOpts, shell: false });
-      }
+      // `agy` is a native executable, so spawn it directly (no shell) with argv
+      // as an array — Node handles arg quoting and no user content is interpreted
+      // by a shell.
+      child = spawn(bin, flags, { cwd: os.tmpdir(), windowsHide: true, env: process.env, shell: false });
 
       // Abort the CLI ONLY on a genuine client disconnect. `req.on('close')`
       // fires as soon as the request body is fully read (Node behavior), even
@@ -1969,57 +1975,37 @@ function start() {
       req.on('close', () => killChildIfDisconnected(res, child));
       res.on('close', () => killChildIfDisconnected(res, child));
 
-      let buf = '';
       let sawAnswer = false;
       let stderr = '';
-      let resultError = '';
 
-      const handleEvent = (evt) => {
-        if (!evt || typeof evt !== 'object') return;
-        if (evt.type === 'message' && evt.role === 'assistant' && typeof evt.content === 'string') {
-          sawAnswer = true;
-          res.write(streamPart('text', evt.content));
-        } else if (evt.type === 'result' && evt.status && evt.status !== 'success') {
-          resultError = (evt.error && (evt.error.message || evt.error)) || String(evt.status);
-        } else if (evt.type === 'error') {
-          resultError = evt.message || (evt.error && (evt.error.message || evt.error)) || 'Gemini stream error.';
-        }
-      };
-
+      // `agy --print` emits the assistant response as plain text on stdout (no
+      // JSON envelope), so relay each chunk straight through as a text delta.
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk) => {
-        buf += chunk;
-        let nl;
-        while ((nl = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (!line) continue;
-          let evt;
-          try { evt = JSON.parse(line); } catch { continue; }
-          try { handleEvent(evt); } catch {}
-        }
+        if (!chunk) return;
+        sawAnswer = true;
+        res.write(streamPart('text', chunk));
       });
       child.stderr.setEncoding('utf8');
       child.stderr.on('data', (chunk) => { stderr += chunk; });
 
       child.on('error', (err) => {
         const message = /ENOENT/.test(err?.code || err?.message || '')
-          ? 'Gemini CLI not found. Install it with `npm i -g @google/gemini-cli`, run `gemini` once to sign in (or set AIOS_GEMINI_BIN).'
-          : (err?.message || 'Failed to launch Gemini CLI.');
+          ? 'Antigravity CLI (`agy`) not found. Install it (`irm https://antigravity.google/cli/install.ps1 | iex`), run `agy` once to sign in, or set AIOS_AGY_BIN.'
+          : (err?.message || 'Failed to launch Antigravity CLI.');
         if (!res.headersSent) res.status(500).json({ error: message });
         else { try { res.write(streamPart('error', message)); } catch {} res.end(); }
       });
 
       child.on('close', (code, signal) => {
-        // Flush any trailing buffered line (no newline at EOF).
-        const tail = buf.trim();
-        if (tail) { try { handleEvent(JSON.parse(tail)); } catch {} }
         if (!sawAnswer) {
           const errJson = extractJsonObject(stderr);
-          const msg = resultError
-            || (errJson && errJson.error && (errJson.error.message || errJson.error))
+          const msg = (errJson && errJson.error && (errJson.error.message || errJson.error))
             || stderr.trim()
-            || `Gemini CLI exited with code ${code}${signal ? ` (signal ${signal})` : ''}.`;
+            || (code === 0
+                // Exit 0 with no output usually means `agy` isn't signed in yet.
+                ? 'Antigravity CLI returned no output. Run `agy` once in a terminal to complete the browser sign-in, then retry.'
+                : `Antigravity CLI exited with code ${code}${signal ? ` (signal ${signal})` : ''}.`);
           try { res.write(streamPart('error', msg)); } catch {}
         }
         res.write(streamPart('finish_message', {
@@ -2029,12 +2015,12 @@ function start() {
         res.end();
       });
 
-      // Feed the conversation via stdin, then close it so the CLI starts generating.
-      try { child.stdin.setDefaultEncoding('utf8'); child.stdin.write(convo); child.stdin.end(); } catch {}
+      // No stdin: the prompt is passed as the trailing positional argv token.
+      try { child.stdin.end(); } catch {}
     } catch (err) {
-      console.error('Gemini CLI error:', err);
+      console.error('Antigravity CLI error:', err);
       if (child && !child.killed) try { child.kill(); } catch {}
-      const message = err?.message || 'Gemini CLI request failed.';
+      const message = err?.message || 'Antigravity CLI request failed.';
       if (!res.headersSent) res.status(500).json({ error: message });
       else { try { res.write(streamPart('error', message)); } catch {} res.end(); }
     }

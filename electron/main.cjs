@@ -514,6 +514,68 @@ ipcMain.handle('research:export', async (_e, { format, title, markdown } = {}) =
   return { ok: true, path: result.filePath };
 });
 
+// ── Second Brain export / import ──────────────────────────────────────────────
+// Export dumps the entire local store (snippets, threads, messages, imports +
+// chunks, agents, skills, runs, meta) to a single JSON file. Import reads such a
+// file back and merges it into the store (upsert by id) — so a brain can move
+// onto a fresh install. Both show a native dialog and return a small status.
+const BRAIN_EXPORT_FORMAT = 'aios-second-brain';
+const BRAIN_EXPORT_VERSION = 1;
+
+ipcMain.handle('brain:export', async () => {
+  const data = sqliteStore.call('dumpAll');
+  const payload = {
+    format: BRAIN_EXPORT_FORMAT,
+    version: BRAIN_EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    appVersion: app.getVersion(),
+    data,
+  };
+  const counts = Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [k, Array.isArray(v) ? v.length : 0]),
+  );
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  const stamp = new Date().toISOString().slice(0, 10);
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Export Second Brain',
+    defaultPath: path.join(app.getPath('downloads'), `aios-second-brain-${stamp}.json`),
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (result.canceled || !result.filePath) return { canceled: true };
+  fs.writeFileSync(result.filePath, JSON.stringify(payload), 'utf8');
+  return { ok: true, path: result.filePath, counts };
+});
+
+ipcMain.handle('brain:import', async () => {
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Import Second Brain',
+    properties: ['openFile'],
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(result.filePaths[0], 'utf8'));
+  } catch (e) {
+    throw new Error(`Could not read export file: ${e?.message || e}`);
+  }
+  // Accept both the wrapped export ({ format, data }) and a bare data object.
+  const data = parsed && parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed;
+  if (!data || typeof data !== 'object') throw new Error('File is not a valid Second Brain export.');
+  if (parsed.format && parsed.format !== BRAIN_EXPORT_FORMAT) {
+    throw new Error(`Unrecognized export format "${parsed.format}".`);
+  }
+
+  sqliteStore.call('bulkLoad', [data]);
+  const counts = Object.fromEntries(
+    ['snippets', 'meta', 'threads', 'messages', 'imports', 'importChunks', 'agents', 'skills', 'runs']
+      .map((k) => [k, Array.isArray(data[k]) ? data[k].length : 0]),
+  );
+  return { ok: true, path: result.filePaths[0], counts };
+});
+
 // Multi-provider key handlers
 ipcMain.handle('keys:get', (_e, providerId) => {
   if (typeof providerId !== 'string') throw new Error('providerId must be a string');

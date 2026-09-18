@@ -21,6 +21,10 @@ export interface MobileGatewayStatus {
   error?: string;
 }
 
+export type BrainTransferResult =
+  | { canceled: true }
+  | { ok: true; path: string; counts: Record<string, number> };
+
 declare global {
   interface Window {
     aios?: {
@@ -48,6 +52,14 @@ declare global {
       db: {
         /** Invoke a whitelisted SQLite op by name with a positional args array. */
         call: <T = unknown>(op: string, args?: unknown[]) => Promise<T>;
+      };
+      /** Second Brain backup: export the whole local store to JSON / import one
+       *  back. Each opens a native dialog; resolves with { canceled } if the
+       *  dialog is dismissed, otherwise { ok, path, counts } where counts maps
+       *  each store name to the number of records written/read. */
+      brain: {
+        export: () => Promise<BrainTransferResult>;
+        import: () => Promise<BrainTransferResult>;
       };
       /** LAN memory-ingest webhook config (feeds external markdown into Second Brain). */
       memory: {

@@ -83,7 +83,11 @@ function registerTerminalIpc() {
         rows,
         cwd,
         env,
-        ...(isWindows ? { useConptyDll: true } : {}),
+        // Do NOT pass useConptyDll:true. It makes node-pty look for conpty.dll
+        // beside the loaded binary (build/Release/conpty/conpty.dll) — a path the
+        // native build never produces, so packaged builds throw "Cannot find
+        // conpty.dll" on spawn even though the module loads (terminal "won't
+        // start"). The default uses the OS ConPTY on Win10/11, winpty as fallback.
       });
     } catch (e) {
       console.error('[terminal] failed to spawn pty:', e);
