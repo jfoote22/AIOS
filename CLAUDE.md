@@ -103,27 +103,46 @@ re-entered per machine. The SQLite brain is local too — move it with the Secon
 Brain tab's Export/Import buttons (`brain:export` / `brain:import` in
 `main.cjs`, which dumps all 9 tables).
 
-### Known broken on Hyprland/Wayland — not regressions
+### Linux/Wayland status — deferred work, not regressions
 
-The Snipping Vault is built on Electron APIs that Wayland does not grant to
-clients. **Snipping Vault is non-functional on Linux by design**; do not "fix"
-these on the Linux box without porting the capture path deliberately.
+Snipping Vault does not work on Hyprland out of the box. This is a known,
+deliberate gap with a planned fix, **not** something to patch ad hoc. Split the
+symptoms into two groups before touching anything:
 
-| Symptom | Where | Why |
-|---|---|---|
-| `Ctrl+Shift+S` does nothing | `electron/main.cjs` `globalShortcut.register` | Wayland compositors own key grabs; Chromium cannot register global shortcuts. Bind it in `hyprland.conf` instead. |
-| Overlay opens on the wrong display | `electron/main.cjs` `triggerCapture` | `screen.getCursorScreenPoint()` is unreliable and Wayland clients cannot set their own window position. |
-| Capture shows a permission picker | `electron/main.cjs` `overlay:get-source` | `desktopCapturer` routes through `xdg-desktop-portal-hyprland` + PipeWire rather than grabbing silently. |
-| No tray icon | `electron/main.cjs` `createTray` | Needs a StatusNotifierItem host (Waybar's `tray` module). `window-all-closed` is a deliberate no-op, so with no tray, closing the window strands a headless process — quit from the app menu. |
-| Keys "encrypt" but aren't protected | `electron/keystore.cjs` | Without a Secret Service provider (gnome-keyring, KeePassXC) Electron falls back to `basic` encryption while `isEncryptionAvailable()` still returns `true`. |
+**Group 1 — environment setup. No code change; these genuinely make the feature
+work.** Omarchy likely ships most of it already; verify before installing.
 
-Everything else — DeepDives, Second Brain, Kanban/Orchestra, terminal, mobile
-gateway — works on Linux. The terminal is *better*: Linux `node-pty` uses
-`forkpty` and sidesteps the ConPTY problems documented in `electron/terminal.cjs`.
+| Symptom | Fix |
+|---|---|
+| No tray icon (`createTray`) | Enable Waybar's `tray` module, or any StatusNotifierItem host. Electron's `Tray` then behaves as on Windows. Until then `window-all-closed` is a deliberate no-op, so closing the window strands a headless process — quit from the app menu. |
+| Keys "encrypt" but aren't protected (`electron/keystore.cjs`) | Install and unlock a Secret Service provider — `gnome-keyring` or KeePassXC. Without one, Electron silently falls back to `basic` encryption while `isEncryptionAvailable()` still returns `true`. |
+| Screen capture asks permission (`overlay:get-source`) | `xdg-desktop-portal-hyprland` + `pipewire` are required for `desktopCapturer` to function at all. **Necessary but probably not sufficient** — the code reads `match.thumbnail.toDataURL()`, and on Wayland a populated thumbnail needs per-stream portal consent, so expect it to come back empty. Untested; if it does work, the only cost is a consent dialog per snip. |
 
-The eventual Linux capture port is `slurp | grim -g - -` behind a
-`process.platform` branch, plus a Hyprland keybind hitting a trigger route on the
-local Express server. That is less code than the Windows path.
+**Group 2 — needs the capture port. Code required.**
+
+| Symptom | Why no environment fix exists |
+|---|---|
+| `Ctrl+Shift+S` does nothing (`globalShortcut.register`) | Wayland compositors own key grabs; Chromium cannot register global shortcuts from inside the app. |
+| Overlay opens on the wrong display (`triggerCapture`) | `screen.getCursorScreenPoint()` is unreliable and Wayland clients cannot set their own window position. |
+
+**The planned port** (do this deliberately, as its own change — not as a
+drive-by while debugging something else):
+
+1. Add a Linux branch to `triggerCapture` that shells out to `slurp | grim -g - -`
+   and returns a PNG on stdout as a data URL, feeding the existing analysis path.
+   This replaces the transparent overlay window entirely on Linux — Hyprland
+   supplies the region-selection UI, so it is *less* code than the Windows path,
+   and it sidesteps both Group 2 rows plus the portal problem above.
+2. Expose a capture trigger route on the local Express server and bind
+   `Ctrl+Shift+S` in `hyprland.conf` to hit it. The server binds a random port, so
+   write the port somewhere the bind can read it.
+
+Keep the Windows path untouched — it works and is the one most users run.
+
+Everything outside Snipping Vault — DeepDives, Second Brain, Kanban/Orchestra,
+terminal, mobile gateway — works on Linux today. The terminal is *better*: Linux
+`node-pty` uses `forkpty` and sidesteps the ConPTY problems documented in
+`electron/terminal.cjs`.
 
 ### Line endings
 
