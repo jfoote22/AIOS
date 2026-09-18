@@ -1,0 +1,9 @@
+# Normalize line endings across Windows and Linux checkouts.
+# The repo is LF throughout; without this, core.autocrlf=true on Windows
+# rewrites every file to CRLF and two machines fight over whitespace.
+* text=auto eol=lf
+
+# Binary assets — never touch.
+*.png binary
+*.ico binary
+*.icns binary

@@ -85,3 +85,47 @@ When adding a provider/feature, follow an existing route in `api-server.cjs`: pu
 - Encrypted provider keys: `%APPDATA%/AIOS/provider-keys.json`
 - Model-ID slots: `%APPDATA%/AIOS/provider-models.json`
 - SQLite DB: `%APPDATA%/AIOS/aios.db`
+
+## Cross-platform development (Windows primary, Linux secondary)
+
+AIOS is **Windows-first**. It is also developed on an Omarchy (Arch + Hyprland)
+laptop, and the two machines share one repo. Releases are unaffected by which
+machine you work on: tagging `vX.Y.Z` makes CI build Windows, macOS (arm64) and
+Linux on their own runners.
+
+Runtime paths differ by OS. On Linux, `%APPDATA%/AIOS/` in the section above is
+`~/.config/AIOS/` — so `provider-keys.json`, `provider-models.json` and
+`aios.db` all live there instead.
+
+**Neither keys nor data travel between machines.** `safeStorage` uses DPAPI on
+Windows and libsecret on Linux, and both are machine-bound, so API keys must be
+re-entered per machine. The SQLite brain is local too — move it with the Second
+Brain tab's Export/Import buttons (`brain:export` / `brain:import` in
+`main.cjs`, which dumps all 9 tables).
+
+### Known broken on Hyprland/Wayland — not regressions
+
+The Snipping Vault is built on Electron APIs that Wayland does not grant to
+clients. **Snipping Vault is non-functional on Linux by design**; do not "fix"
+these on the Linux box without porting the capture path deliberately.
+
+| Symptom | Where | Why |
+|---|---|---|
+| `Ctrl+Shift+S` does nothing | `electron/main.cjs` `globalShortcut.register` | Wayland compositors own key grabs; Chromium cannot register global shortcuts. Bind it in `hyprland.conf` instead. |
+| Overlay opens on the wrong display | `electron/main.cjs` `triggerCapture` | `screen.getCursorScreenPoint()` is unreliable and Wayland clients cannot set their own window position. |
+| Capture shows a permission picker | `electron/main.cjs` `overlay:get-source` | `desktopCapturer` routes through `xdg-desktop-portal-hyprland` + PipeWire rather than grabbing silently. |
+| No tray icon | `electron/main.cjs` `createTray` | Needs a StatusNotifierItem host (Waybar's `tray` module). `window-all-closed` is a deliberate no-op, so with no tray, closing the window strands a headless process — quit from the app menu. |
+| Keys "encrypt" but aren't protected | `electron/keystore.cjs` | Without a Secret Service provider (gnome-keyring, KeePassXC) Electron falls back to `basic` encryption while `isEncryptionAvailable()` still returns `true`. |
+
+Everything else — DeepDives, Second Brain, Kanban/Orchestra, terminal, mobile
+gateway — works on Linux. The terminal is *better*: Linux `node-pty` uses
+`forkpty` and sidesteps the ConPTY problems documented in `electron/terminal.cjs`.
+
+The eventual Linux capture port is `slurp | grim -g - -` behind a
+`process.platform` branch, plus a Hyprland keybind hitting a trigger route on the
+local Express server. That is less code than the Windows path.
+
+### Line endings
+
+`.gitattributes` pins the repo to `eol=lf`. Do not commit CRLF; `core.autocrlf`
+on Windows is overridden by it deliberately, so both machines see identical bytes.
