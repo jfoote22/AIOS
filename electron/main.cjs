@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, globalShortcut, nativeImage, desktopCapturer, ipcMain, screen, safeStorage, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, globalShortcut, nativeImage, desktopCapturer, ipcMain, screen, safeStorage, dialog, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { getProviderKey, setProviderKey, listConfiguredProviders } = require('./keystore.cjs');
@@ -20,6 +20,27 @@ const mobileGateway = require('./mobile-gateway.cjs');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
+
+// --- Single instance ---------------------------------------------------------
+// Two AIOS processes on one machine share ONE userData dir, so they open the
+// same SQLite file and race on writes, and only the first can bind the fixed
+// memory-ingest port (8765) — the loser fails silently and external notes stop
+// arriving with no visible symptom. The window hides to the tray rather than
+// quitting, which makes a lingering first instance easy to miss.
+//
+// Set AIOS_ALLOW_MULTI=1 to opt out when deliberately running a dev build
+// alongside the installed app (accepting the shared-database risk).
+if (!process.env.AIOS_ALLOW_MULTI && !app.requestSingleInstanceLock()) {
+  console.log('[aios] another instance is already running — focusing it and exiting.');
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
 
 // --- Legacy single-key compatibility (Gemini) ---
 function migrateLegacyKey() {
@@ -362,7 +383,19 @@ app.whenReady().then(async () => {
     try {
       await memoryIngest.start({ getWebContents: () => mainWindow?.webContents });
     } catch (e) {
+      // A packaged build has no console anyone reads, so a failed bind used to
+      // be completely invisible: AIOS looked fine while external notes stopped
+      // arriving. Tell the user, since only they can free the port.
       console.error('Failed to start memory ingest server:', e);
+      const detail = memoryIngest.status().lastError || e?.message || String(e);
+      try {
+        if (Notification.isSupported()) {
+          new Notification({
+            title: 'AIOS: memory ingest is not running',
+            body: `${detail} Incoming notes will not be received. Settings → Hermes to retry.`,
+          }).show();
+        }
+      } catch { /* notifications are best-effort */ }
     }
   }
 

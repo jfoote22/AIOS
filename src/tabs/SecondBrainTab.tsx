@@ -302,6 +302,14 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     return off;
   }, []);
   useEffect(() => onGeminiReadyChange((ready) => { if (ready) enrichPendingMemory(); }), []);
+  // Transient Gemini failures (503/429) park a note behind an exponential
+  // backoff instead of failing it permanently. Nothing else would come back to
+  // it — a delivery only fires onIngested once — so sweep on a timer. The call
+  // returns immediately when nothing is due, so this is cheap.
+  useEffect(() => {
+    const t = setInterval(() => { enrichPendingMemory(); }, 60_000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     if (active && dirtyRef.current) {

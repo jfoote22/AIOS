@@ -8,6 +8,8 @@ export interface MemoryIngestStatus {
   hasToken: boolean;
   token: string;
   error?: string;
+  /** Why the listener is not running (e.g. the port is held by another app). */
+  lastError?: string | null;
 }
 
 export interface MobileGatewayStatus {

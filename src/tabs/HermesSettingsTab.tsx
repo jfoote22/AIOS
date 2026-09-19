@@ -259,6 +259,18 @@ export default function HermesSettingsTab() {
             </button>
           </div>
 
+          {/* Enabled but not listening means nothing is arriving — say why, since
+              the usual cause (another AIOS holding the port) is invisible otherwise. */}
+          {mem?.enabled && !mem?.running && (mem?.lastError || mem?.error) && (
+            <div className="mb-4 flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
+              <XCircle className="w-4 h-4 text-red-400 shrink-0 mt-px" />
+              <div className="min-w-0">
+                <p className="text-[11px] font-bold text-red-300">Not listening — incoming notes are being refused</p>
+                <p className="text-[11px] text-red-200/80 leading-relaxed break-words">{mem.lastError || mem.error}</p>
+              </div>
+            </div>
+          )}
+
           {!window.aios?.memory ? (
             <p className="text-[11px] text-amber-400">Memory ingest requires running inside the AIOS desktop app.</p>
           ) : (

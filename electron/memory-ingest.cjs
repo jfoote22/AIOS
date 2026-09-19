@@ -22,6 +22,10 @@ const DEFAULT_PORT = 8765;
 let server = null;
 let currentPort = null;
 let notify = () => {};
+// Why the last start() failed, surfaced through status() so the Hermes settings
+// tab can show it. Without this a failed bind was invisible: the app looked
+// healthy while silently serving nothing.
+let lastError = null;
 
 // ── token + config (persisted in the encrypted key store) ────────────────────
 
@@ -156,19 +160,40 @@ function start({ getWebContents } = {}) {
     } catch {}
   };
   const port = configuredPort();
-  return new Promise((resolve, reject) => {
-    const app = buildApp();
-    const srv = app.listen(port, '0.0.0.0', () => {
+
+  // A previous AIOS process that hasn't fully exited still owns the port for a
+  // few seconds (and Windows leaves it in TIME_WAIT), so a single attempt at
+  // startup loses a race it would win a moment later. Retry with backoff before
+  // giving up — EADDRINUSE here means external notes silently stop arriving.
+  const RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
+
+  const attempt = (tryIndex) => new Promise((resolve, reject) => {
+    const srv = buildApp().listen(port, '0.0.0.0', () => {
+      srv.removeAllListeners('error');
       server = srv;
       currentPort = port;
+      lastError = null;
       console.log(`[memory-ingest] listening on http://0.0.0.0:${port} (LAN ${lanAddress()}:${port})`);
       resolve({ port, token: getToken(), address: lanAddress() });
     });
-    srv.on('error', (err) => {
-      console.error('[memory-ingest] failed to bind:', err?.message || err);
+    srv.once('error', (err) => {
+      const retriable = err && (err.code === 'EADDRINUSE' || err.code === 'EACCES');
+      const delay = RETRY_DELAYS_MS[tryIndex];
+      if (retriable && delay != null) {
+        console.warn(`[memory-ingest] port ${port} busy (${err.code}); retrying in ${delay}ms`);
+        setTimeout(() => attempt(tryIndex + 1).then(resolve, reject), delay);
+        return;
+      }
+      lastError =
+        err?.code === 'EADDRINUSE'
+          ? `Port ${port} is already in use — another AIOS instance or app is holding it.`
+          : `Could not start the ingest listener: ${err?.message || err}`;
+      console.error('[memory-ingest] failed to bind:', lastError);
       reject(err);
     });
   });
+
+  return attempt(0);
 }
 
 function stop() {
@@ -187,6 +212,7 @@ function status() {
     address: lanAddress(),
     hasToken: !!getToken(),
     token: getToken(),
+    lastError: !server ? lastError : null,
   };
 }
 

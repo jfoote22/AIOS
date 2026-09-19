@@ -46,6 +46,10 @@ export interface CapturedItem {
   /** 1-based part index / total parts for a chunked ingested doc. */
   memoryPart?: number;
   memoryParts?: number;
+  /** How many times enrichment has failed with a RETRYABLE error (429/503/network). */
+  memoryRetryCount?: number;
+  /** Epoch ms before which enrichment should not retry this item (backoff). */
+  memoryRetryAt?: number;
 }
 
 // Shared pointer sensor: a small drag threshold so clicks on the remove/copy
