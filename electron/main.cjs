@@ -1,7 +1,8 @@
-const { app, BrowserWindow, Tray, Menu, globalShortcut, nativeImage, desktopCapturer, ipcMain, screen, safeStorage, dialog, Notification } = require('electron');
+const { app, BrowserWindow, Tray, Menu, globalShortcut, nativeImage, desktopCapturer, screen, safeStorage, dialog, Notification } = require('electron');
+const { ipcMain, protectWindow, installApiTransport } = require('./renderer-security.cjs');
 const path = require('path');
 const fs = require('fs');
-const { getProviderKey, setProviderKey, listConfiguredProviders } = require('./keystore.cjs');
+const { getProviderKey, setProviderKey, listConfiguredProviders, isSecureStorageAvailable } = require('./keystore.cjs');
 const modelstore = require('./modelstore.cjs');
 const apiServer = require('./api-server.cjs');
 const terminal = require('./terminal.cjs');
@@ -133,7 +134,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       // Add Shot minimizes/restores this window during capture; without this,
       // Chromium throttles background timers + promise microtasks, so an
       // in-flight OCR (and its timeout) can stall and never settle.
@@ -144,6 +145,7 @@ function createWindow() {
 
   // Keep the menu bar hidden (clean custom UI) but the clipboard accelerators
   // from the application menu still fire — Ctrl+V, Ctrl+C, etc.
+  protectWindow(mainWindow, { development: isDev });
   mainWindow.setMenuBarVisibility(false);
   wireContextMenu(mainWindow.webContents);
 
@@ -152,6 +154,7 @@ function createWindow() {
   // et al.) can be traced after the fact. Remove once dictation is solid.
   const dictationLog = path.join(app.getPath('userData'), 'dictation-debug.log');
   const logDictation = (line) => {
+    if (process.env.AIOS_DICTATION_DEBUG !== '1') return;
     try { fs.appendFileSync(dictationLog, `${new Date().toISOString()} ${line}\n`); } catch { /* best-effort */ }
   };
   mainWindow.webContents.on('console-message', (_e, _level, message) => {
@@ -197,11 +200,12 @@ function createTerminalPopout({ id, label } = {}) {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       backgroundThrottling: false,
       additionalArguments: [`--api-port=${apiPort}`],
     },
   });
+  protectWindow(win, { development: isDev });
   win.setMenuBarVisibility(false);
   wireContextMenu(win.webContents);
   termPopouts.add(win);
@@ -264,10 +268,11 @@ function triggerCapture() {
     alwaysOnTop: true, hasShadow: false, backgroundColor: '#00000000', show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload-overlay.cjs'),
-      contextIsolation: true, nodeIntegration: false, sandbox: false,
+      contextIsolation: true, nodeIntegration: false, sandbox: true,
     },
   });
 
+  protectWindow(overlayWindow, { role: 'overlay' });
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.setVisibleOnAllWorkspaces(true);
   overlayWindow.overlayDisplayId = display.id;
@@ -370,8 +375,23 @@ app.whenReady().then(async () => {
   }
 
   try {
-    const { port } = await apiServer.start();
+    const { port } = await apiServer.start({ development: isDev, approveAgentTool: async ({ agentName, cwd, tool, input, signal }) => {
+      if (!mainWindow || mainWindow.isDestroyed() || signal.aborted) return false;
+      const detail = JSON.stringify(input, null, 2);
+      // Never truncate away the part of a command the user would be approving.
+      if (!detail || detail.length > 12000) return false;
+      mainWindow.show();
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'warning', title: 'AIOS agent permission',
+        message: `${agentName || 'Agent'} requests ${tool}`,
+        detail: `Working directory: ${cwd || '(default)'}\n\n${detail}\n\nApprove only if you trust this exact action. Shell commands can access your files and network.`,
+        buttons: ['Deny', 'Allow once'], defaultId: 0, cancelId: 0, noLink: true,
+        signal,
+      });
+      return response === 1 && !signal.aborted;
+    } });
     apiPort = port;
+    installApiTransport(port);
     mobileGateway.setApiPort(port);
   } catch (e) {
     console.error('Failed to start API server:', e);
@@ -470,6 +490,18 @@ ipcMain.handle('memory:regenerate-token', () => {
 ipcMain.handle('mobile:get-config', () => mobileGateway.status());
 ipcMain.handle('mobile:set-config', async (_e, cfg = {}) => {
   const { enabled, port } = cfg;
+  if (typeof cfg.terminalEnabled === 'boolean') {
+    if (cfg.terminalEnabled) {
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'warning', title: 'Allow remote terminal access?',
+        message: 'Paired devices will be able to run commands as your desktop user.',
+        detail: 'Only enable this on a trusted encrypted network. Anyone with your pairing token will have shell access. This is separate from browsing or capturing notes.',
+        buttons: ['Cancel', 'Enable remote terminal'], defaultId: 0, cancelId: 0,
+      });
+      if (response !== 1) return mobileGateway.status();
+    }
+    setProviderKey('mobile_terminal_enabled', cfg.terminalEnabled ? '1' : '');
+  }
   if (typeof port === 'number' && Number.isFinite(port) && port > 0 && port < 65536) {
     setProviderKey('mobile_gateway_port', String(Math.floor(port)));
   }
@@ -609,26 +641,32 @@ ipcMain.handle('brain:import', async () => {
   return { ok: true, path: result.filePaths[0], counts };
 });
 
-// Multi-provider key handlers
-ipcMain.handle('keys:get', (_e, providerId) => {
-  if (typeof providerId !== 'string') throw new Error('providerId must be a string');
-  return getProviderKey(providerId);
+// Provider-only capability: never allow these handlers to read/write gateway
+// configuration or authentication tokens in the shared keystore.
+const providerIds = new Set(['gemini', 'openai', 'anthropic', 'grok', 'deepgram', 'replicate', 'ollama', 'youtube']);
+function validateProviderId(id) {
+  if (!providerIds.has(id)) throw new Error('Unknown provider.');
+}
+ipcMain.handle('keys:preview', (_e, providerId) => {
+  validateProviderId(providerId);
+  return getProviderKey(providerId) ? '•••••••• (configured)' : '';
 });
 
 ipcMain.handle('keys:set', (_e, providerId, key) => {
-  if (typeof providerId !== 'string') throw new Error('providerId must be a string');
+  validateProviderId(providerId);
   if (typeof key !== 'string') throw new Error('key must be a string');
   setProviderKey(providerId, key.trim());
   return true;
 });
 
 ipcMain.handle('keys:clear', (_e, providerId) => {
+  validateProviderId(providerId);
   setProviderKey(providerId, '');
   return true;
 });
 
-ipcMain.handle('keys:list', () => listConfiguredProviders());
-ipcMain.handle('keys:available', () => safeStorage.isEncryptionAvailable());
+ipcMain.handle('keys:list', () => listConfiguredProviders().filter(id => providerIds.has(id)));
+ipcMain.handle('keys:available', () => isSecureStorageAvailable());
 
 // Model-ID slot handlers
 ipcMain.handle('models:get-all', () => modelstore.getAllModels());

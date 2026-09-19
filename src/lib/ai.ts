@@ -1,7 +1,8 @@
 // AI layer. Phase 1: Gemini for snippet analysis + embeddings + Ask the Vault chat.
 // Phase 2 will add OpenAI/Anthropic/Grok routing for DeepDive chat.
 
-import { GoogleGenAI, Type } from '@google/genai';
+import { Type } from '@google/genai';
+import { geminiClient } from './geminiClient';
 import { apiUrl } from './apiBase';
 
 export type OcrProvider = 'openai' | 'gemini' | 'anthropic' | 'grok';
@@ -30,16 +31,13 @@ export interface MarkdownAnalysis {
   entities: AnalyzedEntity[];
 }
 
-let runtimeKey: string = '';
-let client: GoogleGenAI | null = null;
+let geminiReady = false;
 const listeners = new Set<(ready: boolean) => void>();
 
-export function setGeminiKey(key: string): void {
-  const trimmed = (key || '').trim();
-  if (trimmed === runtimeKey) return;
-  runtimeKey = trimmed;
-  client = null;
-  for (const fn of listeners) fn(!!runtimeKey);
+export function setGeminiReady(ready: boolean): void {
+  if (ready === geminiReady) return;
+  geminiReady = ready;
+  for (const fn of listeners) fn(ready);
 }
 
 export function onGeminiReadyChange(fn: (ready: boolean) => void): () => void {
@@ -47,16 +45,15 @@ export function onGeminiReadyChange(fn: (ready: boolean) => void): () => void {
   return () => { listeners.delete(fn); };
 }
 
-function getClient(): GoogleGenAI {
-  if (!runtimeKey) {
+function getClient() {
+  if (!geminiReady) {
     throw new Error('Gemini API key is not configured. Open Models to add your key.');
   }
-  if (!client) client = new GoogleGenAI({ apiKey: runtimeKey });
-  return client;
+  return geminiClient;
 }
 
 export function isGeminiReady(): boolean {
-  return !!runtimeKey;
+  return geminiReady;
 }
 
 const responseSchema = {
@@ -150,7 +147,7 @@ export async function analyzeSnipScaled(dataUrl: string): Promise<SnipAnalysis> 
 }
 
 // Dispatches snippet analysis to the chosen vision provider.
-// - 'gemini' uses the direct GoogleGenAI SDK from the renderer.
+// - 'gemini' uses the authenticated main-process generation service.
 // - 'openai' goes through the local Electron API server (which holds the encrypted key
 //   in main and pulls the user-configured model ID from provider-models.json).
 // - 'anthropic' / 'grok' are not yet wired.

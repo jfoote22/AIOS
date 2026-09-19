@@ -15,6 +15,10 @@
     "electron:build": "vite build && electron-builder",
     "dist": "vite build && electron-builder --publish never",
     "lint": "tsc --noEmit",
+    "test": "node --test scripts/security.test.cjs && node --experimental-strip-types --test scripts/mobile-credentials.test.ts && node scripts/test-sqlite.cjs",
+    "test:electron": "electron scripts/security-smoke.cjs",
+    "check:electron": "node scripts/check-electron.cjs",
+    "check": "npm run lint && npm run check:electron && npm test && npm run build",
     "prep:brain": "node scripts/prep-brain-assets.cjs",
     "rebuild:native": "electron-rebuild -f --only better-sqlite3,node-pty",
     "postinstall": "electron-rebuild -f --only better-sqlite3,node-pty"

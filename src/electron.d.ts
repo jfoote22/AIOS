@@ -20,6 +20,7 @@ export interface MobileGatewayStatus {
   hasToken: boolean;
   token: string;
   hasTerminal: boolean;
+  terminalEnabled: boolean;
   error?: string;
 }
 
@@ -42,7 +43,7 @@ declare global {
       getApiPort: () => Promise<number>;
       pickFolder: (opts?: { title?: string; defaultPath?: string }) => Promise<string | null>;
       pickFiles: (opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }) => Promise<string[]>;
-      getProviderKey: (providerId: string) => Promise<string>;
+      getProviderKeyPreview: (providerId: string) => Promise<string>;
       setProviderKey: (providerId: string, key: string) => Promise<true>;
       clearProviderKey: (providerId: string) => Promise<true>;
       listProviders: () => Promise<string[]>;
@@ -73,7 +74,7 @@ declare global {
       /** LAN/remote gateway for the Android companion app. */
       mobile: {
         getConfig: () => Promise<MobileGatewayStatus>;
-        setConfig: (cfg: { enabled?: boolean; port?: number }) => Promise<MobileGatewayStatus>;
+        setConfig: (cfg: { enabled?: boolean; port?: number; terminalEnabled?: boolean }) => Promise<MobileGatewayStatus>;
         regenerateToken: () => Promise<MobileGatewayStatus>;
       };
       term: {

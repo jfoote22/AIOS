@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('aios', {
   // Deep Research report export (md/pdf/docx) — save dialog handled in main.
   exportReport: (payload) => ipcRenderer.invoke('research:export', payload),
   // Multi-provider keys
-  getProviderKey: (providerId) => ipcRenderer.invoke('keys:get', providerId),
+  getProviderKeyPreview: (providerId) => ipcRenderer.invoke('keys:preview', providerId),
   setProviderKey: (providerId, key) => ipcRenderer.invoke('keys:set', providerId, key),
   clearProviderKey: (providerId) => ipcRenderer.invoke('keys:clear', providerId),
   listProviders: () => ipcRenderer.invoke('keys:list'),

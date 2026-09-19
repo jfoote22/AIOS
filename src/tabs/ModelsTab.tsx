@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Sliders, KeyRound, Check, Trash2, ExternalLink, Lock, Cpu, RotateCcw, ShieldCheck, Terminal } from 'lucide-react';
 import { PROVIDERS, type ProviderId, refreshConfigured, getConfigured, onConfiguredChange } from '../lib/providers';
-import { setGeminiKey } from '../lib/ai';
+import { setGeminiReady } from '../lib/ai';
 import { type ModelSlot, SLOT_LABELS, getCachedModels, getDefaults, onModelsChange, refreshModels, saveModel, resetModel } from '../lib/models';
 import {
   getAnthropicAuthMode, setAnthropicAuthMode, onAnthropicAuthModeChange,
@@ -44,13 +44,13 @@ export default function ModelsTab() {
   // Hydrate masked previews for configured providers.
   useEffect(() => {
     (async () => {
-      if (!window.aios?.getProviderKey) return;
+      if (!window.aios?.getProviderKeyPreview) return;
       const updates: Record<string, RowState> = {};
       for (const p of PROVIDERS) {
         if (!configured.has(p.id)) continue;
         try {
-          const k = await window.aios.getProviderKey(p.id);
-          updates[p.id] = { draft: '', saving: false, masked: maskKey(k) };
+          const masked = await window.aios.getProviderKeyPreview(p.id);
+          updates[p.id] = { draft: '', saving: false, masked };
         } catch {}
       }
       setRows(prev => ({ ...prev, ...updates }));
@@ -74,7 +74,7 @@ export default function ModelsTab() {
     updateRow(id, { saving: true, message: undefined });
     try {
       await window.aios.setProviderKey(id, draft);
-      if (id === 'gemini') setGeminiKey(draft);
+      if (id === 'gemini') setGeminiReady(true);
       await refreshConfigured();
       updateRow(id, { saving: false, draft: '', masked: maskKey(draft), message: { kind: 'ok', text: 'Saved.' } });
     } catch (e: any) {
@@ -86,7 +86,7 @@ export default function ModelsTab() {
     if (!confirm(`Remove the stored ${id} credential from this machine?`)) return;
     try {
       await window.aios?.clearProviderKey(id);
-      if (id === 'gemini') setGeminiKey('');
+      if (id === 'gemini') setGeminiReady(false);
       await refreshConfigured();
       updateRow(id, { masked: '', message: { kind: 'ok', text: 'Removed.' } });
     } catch (e: any) {
@@ -101,7 +101,7 @@ export default function ModelsTab() {
           <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-2xl"><Sliders className="w-6 h-6 text-indigo-500" /></div>
           <div>
             <h2 className="text-3xl font-bold">Models</h2>
-            <p className="text-xs text-zinc-500">Add a credential to activate a model across AIOS. Keys are encrypted with the OS keychain (DPAPI on Windows) and never leave this machine.</p>
+            <p className="text-xs text-zinc-500">Add a credential to activate a model across AIOS. Keys are stored using the OS keychain and used by the desktop service to authenticate with your chosen provider. Cloud processing sends the selected content to that provider.</p>
           </div>
         </div>
 

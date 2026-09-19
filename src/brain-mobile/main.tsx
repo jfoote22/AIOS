@@ -2,7 +2,7 @@
 // Brain the desktop renders (BrainView3D), served by the mobile gateway at
 // /brain3d/ and loaded in a React Native WebView. Unlike the desktop renderer
 // there is no IPC here — data comes from the token-gated
-// /api/mobile/brain-graph endpoint (token passed in the page URL by the app).
+// /api/mobile/brain-graph endpoint (token injected by the native app).
 //
 // Node taps are forwarded to the native app via window.ReactNativeWebView
 // .postMessage so the phone can open its native detail screens.
@@ -15,8 +15,24 @@ import {
   type BrainGraph,
 } from '../lib/graph';
 
-const params = new URLSearchParams(window.location.search);
-const TOKEN = params.get('token') || '';
+async function mobileToken(): Promise<string> {
+  const read = () => (window as Window & { __AIOS_MOBILE_TOKEN?: string }).__AIOS_MOBILE_TOKEN;
+  if (read()) return read()!;
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      if (!read()) return;
+      clearTimeout(timer);
+      window.removeEventListener('aios-mobile-auth', finish);
+      resolve(read()!);
+    };
+    const timer = setTimeout(() => {
+      window.removeEventListener('aios-mobile-auth', finish);
+      reject(new Error('Open this page from the paired AIOS mobile app.'));
+    }, 10000);
+    window.addEventListener('aios-mobile-auth', finish);
+    finish();
+  });
+}
 
 interface BrainData {
   snippets: any[];
@@ -33,7 +49,7 @@ function postToApp(msg: Record<string, unknown>) {
 
 async function fetchBrainData(): Promise<BrainData> {
   const res = await fetch('/api/mobile/brain-graph', {
-    headers: { Authorization: `Bearer ${TOKEN}` },
+    headers: { Authorization: `Bearer ${await mobileToken()}` },
   });
   if (!res.ok) {
     let detail = '';

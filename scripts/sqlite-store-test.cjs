@@ -13,6 +13,11 @@ store.init(dbPath);
 const c = store.call.bind(store);
 
 console.log('snippets:');
+for (const name of ['constructor', 'toString', '__proto__', 'unknown']) {
+  let rejected = false;
+  try { c(name, []); } catch { rejected = true; }
+  ok(rejected, `dispatch rejects ${name}`);
+}
 c('putSnippet', [{ id: 's1', timestamp: 100, category: 'a', text: 'one' }]);
 c('putSnippet', [{ id: 's2', timestamp: 300, category: 'b', text: 'two' }]);
 c('putSnippet', [{ id: 's3', timestamp: 200, category: 'a', text: 'three' }]);

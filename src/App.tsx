@@ -9,7 +9,7 @@ import KanbanTab from './tabs/KanbanTab';
 import TerminalTab from './tabs/TerminalTab';
 import SettingsTab from './tabs/SettingsTab';
 import { refreshConfigured, isConfigured } from './lib/providers';
-import { setGeminiKey } from './lib/ai';
+import { setGeminiReady } from './lib/ai';
 import { initApiBase } from './lib/apiBase';
 import { refreshModels } from './lib/models';
 import { onNavigate } from './lib/navigate';
@@ -28,18 +28,13 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [apiReady, setApiReady] = useState(false);
 
-  // On boot: resolve API base URL, load configured providers, hydrate Gemini key.
+  // On boot: resolve API base URL and load provider availability, never keys.
   useEffect(() => {
     (async () => {
       await initApiBase();
       setApiReady(true);
       await Promise.all([refreshConfigured(), refreshModels()]);
-      if (isConfigured('gemini') && window.aios?.getProviderKey) {
-        try {
-          const k = await window.aios.getProviderKey('gemini');
-          if (k) setGeminiKey(k);
-        } catch (e) { console.error('Failed to hydrate Gemini key:', e); }
-      }
+      setGeminiReady(isConfigured('gemini'));
     })();
   }, []);
 

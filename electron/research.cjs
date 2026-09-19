@@ -5,6 +5,7 @@
 // Runs in the Electron main process.
 
 const { getProviderKey } = require('./keystore.cjs');
+const { publicFetch } = require('./public-fetch.cjs');
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -22,12 +23,12 @@ function parseTag(text, tag) {
 async function verifyUrl(url) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
-  const opts = { redirect: 'follow', signal: controller.signal, headers: { 'User-Agent': UA } };
+  const opts = { signal: controller.signal, timeoutMs: VERIFY_TIMEOUT_MS, headersOnly: true, headers: { 'User-Agent': UA } };
   try {
-    let res = await fetch(url, { ...opts, method: 'HEAD' });
+    let res = await publicFetch(url, { ...opts, method: 'HEAD' });
     // Some servers don't implement HEAD — retry with GET.
     if (res.status === 405 || res.status === 501 || res.status === 400) {
-      res = await fetch(url, { ...opts, method: 'GET' });
+      res = await publicFetch(url, { ...opts, method: 'GET' });
     }
     const live = res.status >= 200 && res.status < 500 && res.status !== 404 && res.status !== 410;
     return { live, finalUrl: res.url || url, status: res.status };

@@ -21,7 +21,7 @@ npm run rebuild:native   # rebuild better-sqlite3 + node-pty against Electron's 
 npm run prep:brain       # regenerate public/brain/* assets from assets/brain_*
 ```
 
-There is **no automated test runner** in `package.json`. `scripts/*.cjs` are ad-hoc smoke/integration scripts run directly with `node` (e.g. `node scripts/sqlite-smoke.cjs`).
+Use `npm run check` for desktop typechecking, Electron CJS syntax validation, security/mobile-migration tests, native SQLite tests, and a production build. Then run `npm run test:electron` for real Chromium/IPC/gateway tests (Linux CI needs `xvfb-run -a`). Mobile: `npm ci --ignore-scripts` and `npm run lint` in `mobile/`. All automated fixtures use temporary data, not the user's vault. See `docs/SHIP-STATUS.md` for verified scope and release blockers.
 
 Hot reload covers the renderer (`src/`). Changes to `electron/*.cjs` require **restarting** `electron:dev`.
 
@@ -58,7 +58,7 @@ When adding a provider/feature, follow an existing route in `api-server.cjs`: pu
 ### Kanban "Orchestra" + Maestro (agent orchestration)
 
 - Cards live on a board (`src/lib/kanban.ts`); each **agent** (`src/lib/agents.ts`) is a Claude Code subagent definition that also gets written to `<workingDir>/.claude/agents/<slug>.md` (and skills to `.claude/skills/<slug>/SKILL.md`) so the same agents work from the bare `claude` CLI.
-- "Play" a card → `POST /api/agents/run` runs it through the **Claude Agent SDK** with `skills: 'all'`, `settingSources: ['user','project']`, `permissionMode: 'bypassPermissions'`, real tool access, and the card's working dir. Output streams back and is saved as a **run** (`src/lib/runs.ts`).
+- "Play" a card → `POST /api/agents/run` uses `electron/agent-policy.cjs`: explicit tool inventory, no automatic installed skills/settings, per-invocation desktop approval, and per-run credentials. Chat/drafting uses no tools. Never restore permission bypasses or mutate `process.env` for a run. Output streams back and is saved as a **run** (`src/lib/runs.ts`).
 - **Maestro** (`src/lib/maestro.ts`) is an autonomous conductor: `tick()` is a pure state machine that scans the board and emits actions (promote/assign/start/review); LLM calls (worker selection heuristic `chooseWorkerForCard`, review via `/api/agents/review`) are separate. Maestro itself is stored as a `role:'maestro'` agent and excluded from worker pools.
 
 ### Other servers (opt-in, off by default)
@@ -115,7 +115,7 @@ work.** Omarchy likely ships most of it already; verify before installing.
 | Symptom | Fix |
 |---|---|
 | No tray icon (`createTray`) | Enable Waybar's `tray` module, or any StatusNotifierItem host. Electron's `Tray` then behaves as on Windows. Until then `window-all-closed` is a deliberate no-op, so closing the window strands a headless process — quit from the app menu. |
-| Keys "encrypt" but aren't protected (`electron/keystore.cjs`) | Install and unlock a Secret Service provider — `gnome-keyring` or KeePassXC. Without one, Electron silently falls back to `basic` encryption while `isEncryptionAvailable()` still returns `true`. |
+| Credential storage unavailable (`electron/keystore.cjs`) | Install and unlock a Secret Service provider — `gnome-keyring` or KeePassXC. AIOS now rejects Electron's insecure `basic_text` fallback, even when `isEncryptionAvailable()` returns `true`. |
 | Screen capture asks permission (`overlay:get-source`) | `xdg-desktop-portal-hyprland` + `pipewire` are required for `desktopCapturer` to function at all. **Necessary but probably not sufficient** — the code reads `match.thumbnail.toDataURL()`, and on Wayland a populated thumbnail needs per-stream portal consent, so expect it to come back empty. Untested; if it does work, the only cost is a consent dialog per snip. |
 
 **Group 2 — needs the capture port. Code required.**

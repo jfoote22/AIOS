@@ -361,5 +361,6 @@ export const Term = {
   input: (id: string, data: string) => post(`/api/mobile/term/${id}/input`, { data }),
   resize: (id: string, cols: number, rows: number) => post(`/api/mobile/term/${id}/resize`, { cols, rows }),
   kill: (id: string) => post(`/api/mobile/term/${id}/kill`),
-  streamUrl: (id: string) => `${creds!.url}/api/mobile/term/${id}/stream?token=${encodeURIComponent(creds!.token)}`,
+  streamUrl: (id: string) => `${creds!.url}/api/mobile/term/${encodeURIComponent(id)}/stream`,
+  streamHeaders: () => authHeaders(),
 };

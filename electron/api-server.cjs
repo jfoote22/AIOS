@@ -1,5 +1,5 @@
 // Local Express server that emulates DeepDive's Next.js API routes.
-// Bound to 127.0.0.1 on a random port; only the main window can reach it.
+// Bound to loopback and authenticated with a main-process-only credential.
 // API keys are pulled per-request from the encrypted key store.
 
 const express = require('express');
@@ -8,13 +8,9 @@ const fsSync = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const cors = (req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-};
+const { localApiGuard } = require('./http-security.cjs');
+const { registerGeminiGeneration } = require('./gemini-generation.cjs');
+const { noToolsPolicy, executionPolicy, assertAgentResult } = require('./agent-policy.cjs');
 
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
 const { getModelId, setModelId } = require('./modelstore.cjs');
@@ -424,10 +420,12 @@ function aiosJobToHermesBody(job) {
   return body;
 }
 
-function start() {
+function start({ development = false, approveAgentTool } = {}) {
   const app = express();
-  app.use(cors);
+  app.disable('x-powered-by');
+  app.use(localApiGuard({ development }));
   app.use(express.json({ limit: '20mb' }));
+  registerGeminiGeneration(app, { getProviderKey });
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
@@ -588,8 +586,7 @@ function start() {
           options: {
             model: modelId,
             systemPrompt: sysParts.join('\n'),
-            allowedTools: [],
-            permissionMode: 'bypassPermissions',
+            ...noToolsPolicy(),
           },
         });
         for await (const msg of stream) {
@@ -597,7 +594,7 @@ function start() {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         const key = getProviderKey('anthropic');
@@ -727,8 +724,7 @@ function start() {
         options: {
           model: modelId,
           systemPrompt: withContext('You are a helpful AI assistant. Respond conversationally and concisely.', context),
-          allowedTools: [],
-          permissionMode: 'bypassPermissions',
+          ...noToolsPolicy(),
         },
       });
 
@@ -748,6 +744,7 @@ function start() {
             prevLen = full.length;
           }
         } else if (msg.type === 'result') {
+          assertAgentResult(msg);
           break;
         }
       }
@@ -814,8 +811,7 @@ function start() {
           options: {
             model: modelId,
             systemPrompt,
-            allowedTools: [],
-            permissionMode: 'bypassPermissions',
+            ...noToolsPolicy(),
           },
         });
         for await (const msg of stream) {
@@ -823,7 +819,7 @@ function start() {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         // API key path via @anthropic-ai/sdk
@@ -903,14 +899,14 @@ function start() {
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
           prompt: userPrompt,
-          options: { model: modelId, systemPrompt, allowedTools: [], permissionMode: 'bypassPermissions' },
+          options: { model: modelId, systemPrompt, ...noToolsPolicy() },
         });
         for await (const msg of stream) {
           if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         const key = getProviderKey('anthropic');
@@ -1085,8 +1081,7 @@ function start() {
           options: {
             model: modelId,
             systemPrompt: sysParts.join('\n'),
-            allowedTools: [],
-            permissionMode: 'bypassPermissions',
+            ...noToolsPolicy(),
           },
         });
         for await (const msg of stream) {
@@ -1094,7 +1089,7 @@ function start() {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         const key = getProviderKey('anthropic');
@@ -1207,8 +1202,7 @@ function start() {
           options: {
             model: modelId,
             systemPrompt: sysParts.join('\n'),
-            allowedTools: [],
-            permissionMode: 'bypassPermissions',
+            ...noToolsPolicy(),
           },
         });
         for await (const msg of stream) {
@@ -1216,7 +1210,7 @@ function start() {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         const key = getProviderKey('anthropic');
@@ -1401,12 +1395,14 @@ function start() {
     if (!runId || !card || !agent) {
       return res.status(400).json({ error: 'Missing runId, card, or agent.' });
     }
+    if (activeRuns.has(runId)) return res.status(409).json({ error: 'This run is already active.' });
     if (!agent.systemPrompt || !agent.systemPrompt.trim()) {
       return res.status(400).json({ error: 'Agent has no system prompt — fill it in the Agent Builder first.' });
     }
 
     const controller = new AbortController();
     activeRuns.set(runId, controller);
+    res.on('close', () => controller.abort());
 
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('x-vercel-ai-data-stream', 'v1');
@@ -1443,7 +1439,7 @@ function start() {
       // Both paths use the Claude Agent SDK so the agent gets real tool access.
       // API-key path also goes through Agent SDK (it picks up ANTHROPIC_API_KEY
       // from process env if no subscription is logged in).
-      const prevEnvKey = process.env.ANTHROPIC_API_KEY;
+      let apiKey;
       if (authMode !== 'subscription') {
         const key = getProviderKey('anthropic');
         if (!key) {
@@ -1453,7 +1449,7 @@ function start() {
           writeFinish('error');
           return res.end();
         }
-        process.env.ANTHROPIC_API_KEY = key;
+        apiKey = key;
       }
 
       const { query } = await import('@anthropic-ai/claude-agent-sdk');
@@ -1461,22 +1457,16 @@ function start() {
       const allowed = Array.isArray(agent.allowedTools) ? agent.allowedTools : [];
       const cwd = (agent.workingDir && typeof agent.workingDir === 'string') ? agent.workingDir : undefined;
 
-      writeText(`• Agent: ${agent.name || agent.slug}\n• Model: ${modelOverride || 'inherit'}\n• Tools: ${allowed.join(', ') || '(none)'}\n• Skills: all installed (~/.claude/skills + project)\n• Cwd: ${cwd || '(default)'}\n\n`);
+      writeText(`• Agent: ${agent.name || agent.slug}\n• Model: ${modelOverride || 'inherit'}\n• Tools: ${allowed.join(', ') || '(none)'} (desktop approval per use)\n• Installed skills/hooks: not loaded automatically\n• Cwd: ${cwd || '(default)'}\n\n`);
 
       const stream = query({
         prompt: taskPrompt,
         options: {
           model: modelOverride,
           systemPrompt: agent.systemPrompt,
-          allowedTools: allowed,
-          // Make every installed skill discoverable + invocable by any board
-          // agent. Per the Agent SDK, `skills: 'all'` is the single switch that
-          // turns skills on — it also wires the Skill tool, so we don't add it
-          // to each agent's allowedTools. settingSources loads ~/.claude (user)
-          // and the project's .claude (skills, subagents, CLAUDE.md).
-          skills: 'all',
-          settingSources: ['user', 'project'],
-          permissionMode: 'bypassPermissions',
+          ...executionPolicy({ tools: allowed, apiKey, signal: controller.signal,
+            approve: request => approveAgentTool?.({ ...request, agentName: agent.name || agent.slug, cwd, signal: controller.signal }),
+          }),
           cwd,
           abortController: controller,
         },
@@ -1520,13 +1510,9 @@ function start() {
           // Reset assistant counter so the next assistant message starts fresh
           assistantPrevLen = 0;
         } else if (msg.type === 'result') {
+          assertAgentResult(msg);
           break;
         }
-      }
-
-      if (authMode !== 'subscription') {
-        if (prevEnvKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-        else process.env.ANTHROPIC_API_KEY = prevEnvKey;
       }
 
       writeFinish(controller.signal.aborted ? 'canceled' : 'stop');
@@ -1592,14 +1578,14 @@ function start() {
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
           prompt: userPrompt,
-          options: { model: modelId, systemPrompt, allowedTools: [], permissionMode: 'bypassPermissions' },
+          options: { model: modelId, systemPrompt, ...noToolsPolicy() },
         });
         for await (const msg of stream) {
           if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         const key = getProviderKey('anthropic');
@@ -1919,8 +1905,8 @@ function start() {
   //     response. Unlike the old Gemini CLI there is NO `--output-format`/
   //     stream-json mode — `agy` emits PLAIN TEXT on stdout, so we relay stdout
   //     chunks directly as text deltas rather than parsing JSON events.
-  //   - `--dangerously-skip-permissions` auto-approves any tool request so a
-  //     stray tool call never blocks headless (replaces gemini's yolo/skip-trust).
+  //   - Permission bypass is deliberately not enabled. Tool requests without
+  //     an available approval flow must be denied by the CLI.
   //   - `--model` selects the model, only when AIOS_GEMINI_MODEL is set; otherwise
   //     `agy` auto-selects (defaults to current Gemini 3.x flash).
   //   - `--print-timeout` bounds how long print mode waits for a response.
@@ -1953,7 +1939,7 @@ function start() {
       // `--print` forces non-interactive single-shot mode; the conversation is
       // the trailing positional prompt. Keep the prompt LAST so the boolean flags
       // parse before agy reads the positional argument.
-      const flags = ['--print', '--dangerously-skip-permissions'];
+      const flags = ['--print'];
       if (geminiModelOverride) flags.push('--model', geminiModelOverride);
       flags.push(convo);
 
@@ -2024,11 +2010,6 @@ function start() {
       if (!res.headersSent) res.status(500).json({ error: message });
       else { try { res.write(streamPart('error', message)); } catch {} res.end(); }
     }
-  });
-
-  // --- Deepgram key fetch (renderer needs the key to talk to Deepgram directly) ---
-  app.get('/api/deepgram', (_req, res) => {
-    res.json({ key: getProviderKey('deepgram') || '' });
   });
 
   // --- Vision OCR / snippet analysis (currently OpenAI; matches Gemini analyzeSnip shape) ---

@@ -432,6 +432,8 @@ const ops = {
 
 /** Invoke a whitelisted op by name. Throws on unknown ops. */
 function call(op, args) {
+  if (typeof op !== 'string' || !Object.hasOwn(ops, op)) throw new Error('sqlite-store: unknown operation');
+  if (args !== undefined && !Array.isArray(args)) throw new Error('sqlite-store: args must be an array');
   const fn = ops[op];
   if (typeof fn !== 'function') throw new Error(`sqlite-store: unknown op "${op}"`);
   return fn(...(args || []));

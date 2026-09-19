@@ -13,6 +13,7 @@
 const research = require('./research.cjs');
 const extract = require('./extract.cjs');
 const { getProviderKey } = require('./keystore.cjs');
+const { noToolsPolicy, assertAgentResult } = require('./agent-policy.cjs');
 const { getModelId } = require('./modelstore.cjs');
 
 // --- tuning knobs (overridable per request) ---
@@ -111,7 +112,7 @@ async function claudeStream({ system, user, authMode, onDelta, signal }) {
     const modelId = getModelId('claude') || getModelId('anthropic');
     const stream = query({
       prompt: `${system}\n\n${user}`,
-      options: { model: modelId, systemPrompt: system, allowedTools: [], permissionMode: 'bypassPermissions' },
+      options: { model: modelId, systemPrompt: system, ...noToolsPolicy() },
     });
     let prev = 0;
     for await (const msg of stream) {
@@ -120,7 +121,7 @@ async function claudeStream({ system, user, authMode, onDelta, signal }) {
         let f = '';
         for (const b of msg.message.content) if (b && b.type === 'text' && typeof b.text === 'string') f += b.text;
         if (f.length > prev) { onDelta?.(f.slice(prev)); prev = f.length; full = f; }
-      } else if (msg.type === 'result') break;
+      } else if (msg.type === 'result') { assertAgentResult(msg); break; }
     }
     return full;
   }

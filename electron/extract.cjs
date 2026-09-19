@@ -2,11 +2,10 @@
 // Runs in the Electron main process (no CORS, full filesystem access).
 //
 // Phase A: extractUrl() — static fetch + Readability + Turndown.
-// Phase C will add a Playwright headless fallback when static text is too thin.
+// JS-rendered pages require a future network-isolated rendering worker.
 // File extraction (PDF/Office/images) lives in this module too (Phase B/C).
 
-const dns = require('node:dns').promises;
-const net = require('node:net');
+const { publicFetch, resolvePublicUrl } = require('./public-fetch.cjs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
@@ -23,121 +22,15 @@ function loadWebDeps() {
 // Caps for the inline-context strategy. RAG (Phase D) will retrieve chunks
 // instead of relying on these, but they keep token budgets sane for now.
 const PER_SOURCE_CHAR_CAP = 24000;
-// Below this many chars of extracted body, the static path is considered "thin"
-// and Phase C will escalate to a headless render.
+// Below this many chars of extracted body, the static path is marked "thin".
 const THIN_TEXT_THRESHOLD = 600;
 const FETCH_TIMEOUT_MS = 20000;
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 AIOS-DeepDive/1.0';
 
-function isPrivateIPv4(ip) {
-  const p = ip.split('.').map(Number);
-  if (p.length !== 4 || p.some(n => Number.isNaN(n))) return false;
-  if (p[0] === 10) return true;
-  if (p[0] === 127) return true;
-  if (p[0] === 169 && p[1] === 254) return true; // link-local / cloud metadata
-  if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
-  if (p[0] === 192 && p[1] === 168) return true;
-  if (p[0] === 0) return true;
-  return false;
-}
-
-function isPrivateIPv6(ip) {
-  const lower = ip.toLowerCase();
-  if (lower === '::1' || lower === '::') return true;
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // unique local
-  if (lower.startsWith('fe80')) return true; // link-local
-  // IPv4-mapped (::ffff:a.b.c.d)
-  const mapped = lower.match(/::ffff:(\d+\.\d+\.\d+\.\d+)/);
-  if (mapped) return isPrivateIPv4(mapped[1]);
-  return false;
-}
-
-function isPrivateAddress(ip) {
-  if (net.isIPv4(ip)) return isPrivateIPv4(ip);
-  if (net.isIPv6(ip)) return isPrivateIPv6(ip);
-  return false;
-}
-
-// SSRF guard: reject non-http(s) schemes and any host that resolves to a
-// private/loopback/link-local address (blocks localhost, LANs, and the cloud
-// metadata endpoint at 169.254.169.254). Returns the validated URL or throws.
 async function assertSafeUrl(rawUrl) {
-  let u;
-  try {
-    u = new URL(rawUrl);
-  } catch {
-    throw new Error('Invalid URL.');
-  }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-    throw new Error('Only http(s) URLs are supported.');
-  }
-  const host = u.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
-  if (host === 'localhost' || host.endsWith('.localhost')) {
-    throw new Error('Refusing to fetch a loopback address.');
-  }
-  // If the host is already a literal IP, check it directly.
-  if (net.isIP(host)) {
-    if (isPrivateAddress(host)) throw new Error('Refusing to fetch a private/loopback address.');
-    return u;
-  }
-  // Otherwise resolve and check every answer.
-  let answers = [];
-  try {
-    answers = await dns.lookup(host, { all: true });
-  } catch {
-    throw new Error(`Could not resolve host: ${host}`);
-  }
-  if (answers.some(a => isPrivateAddress(a.address))) {
-    throw new Error('Refusing to fetch a host that resolves to a private/loopback address.');
-  }
-  return u;
-}
-
-// Render a URL with Electron's built-in Chromium (a hidden BrowserWindow) and
-// return the fully-rendered HTML. Used as the headless fallback for JS-heavy
-// pages. Returns null when not running inside Electron (e.g. unit tests).
-const HEADLESS_RENDER_TIMEOUT_MS = 25000;
-const HEADLESS_SETTLE_MS = 1500;
-async function renderUrlHtml(url) {
-  let electron;
-  try {
-    electron = require('electron');
-  } catch {
-    return null;
-  }
-  const { BrowserWindow } = electron;
-  if (!BrowserWindow) return null;
-
-  const win = new BrowserWindow({
-    show: false,
-    width: 1280,
-    height: 1600,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-      // Don't run a preload or expose anything to the loaded page.
-    },
-  });
-
-  try {
-    const load = win.loadURL(url, { userAgent: USER_AGENT });
-    const timeout = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Headless render timed out')), HEADLESS_RENDER_TIMEOUT_MS),
-    );
-    await Promise.race([load, timeout]);
-    // Give client-side frameworks a moment to paint content.
-    await new Promise(r => setTimeout(r, HEADLESS_SETTLE_MS));
-    const html = await win.webContents.executeJavaScript(
-      'document.documentElement.outerHTML',
-      true,
-    );
-    return html || null;
-  } finally {
-    if (!win.isDestroyed()) win.destroy();
-  }
+  return (await resolvePublicUrl(rawUrl)).url;
 }
 
 function htmlToCleanMarkdown(html, baseUrl) {
@@ -176,31 +69,13 @@ function htmlToCleanMarkdown(html, baseUrl) {
 // Fetch a URL and return cleaned, readable markdown of its main content.
 // Returns { ok, title, text, source, kind, charCount, truncated, thin, method }.
 // `thin` flags that the static extraction looked empty (a Phase C escalation hook).
-async function extractUrl(rawUrl, { allowHeadless = true } = {}) {
-  const u = await assertSafeUrl(rawUrl);
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let res;
-  try {
-    res = await fetch(u.href, {
-      redirect: 'follow',
-      signal: controller.signal,
-      headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml' },
-    });
-  } catch (e) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('Timed out fetching the page.');
-    throw new Error(`Failed to fetch page: ${e.message}`);
-  }
-  clearTimeout(timer);
-
+async function extractUrl(rawUrl) {
+  const res = await publicFetch(rawUrl, {
+    timeoutMs: FETCH_TIMEOUT_MS,
+    headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml' },
+  });
+  const u = new URL(res.url);
   if (!res.ok) throw new Error(`Page returned HTTP ${res.status}.`);
-
-  // Re-validate the final URL after redirects (defends against redirect-to-internal).
-  if (res.url && res.url !== u.href) {
-    await assertSafeUrl(res.url);
-  }
 
   const contentType = (res.headers.get('content-type') || '').toLowerCase();
 
@@ -228,26 +103,11 @@ async function extractUrl(rawUrl, { allowHeadless = true } = {}) {
 
   const finalUrl = res.url || u.href;
   const html = await res.text();
-  let { title, markdown } = htmlToCleanMarkdown(html, finalUrl);
-  let method = 'static';
+  const { title, markdown } = htmlToCleanMarkdown(html, finalUrl);
+  const method = 'static';
 
-  // Hybrid fallback: if static extraction looks empty (likely a JS-rendered
-  // SPA), re-render the page with a headless browser and extract again.
-  if (markdown.length < THIN_TEXT_THRESHOLD && allowHeadless) {
-    try {
-      const rendered = await renderUrlHtml(finalUrl);
-      if (rendered) {
-        const re = htmlToCleanMarkdown(rendered, finalUrl);
-        if (re.markdown.length > markdown.length) {
-          markdown = re.markdown;
-          if (re.title) title = re.title;
-          method = 'headless';
-        }
-      }
-    } catch (e) {
-      console.error('Headless fallback failed:', e.message);
-    }
-  }
+  // Scripted pages stay thin until a network-isolated rendering worker exists.
+  // Running arbitrary pages in a BrowserWindow bypasses DNS-pinned egress.
 
   const truncated = markdown.length > PER_SOURCE_CHAR_CAP;
   return {

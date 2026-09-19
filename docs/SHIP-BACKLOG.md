@@ -1,6 +1,6 @@
 # AIOS executable shipping backlog
 
-2026-09-18. Implements [SHIP-PLAN.md](SHIP-PLAN.md); findings refer to [SHIP-AUDIT.md](SHIP-AUDIT.md). There are 44 work packets: B01–B26, five provider packets under B27, and B28–B40. All start as **planned**, not implemented.
+2026-09-18. Implements [SHIP-PLAN.md](SHIP-PLAN.md); findings refer to [SHIP-AUDIT.md](SHIP-AUDIT.md). There are 44 work packets: B01–B26, five provider packets under B27, and B28–B40. See [SHIP-STATUS.md](SHIP-STATUS.md) for actual implementation and verification; a partial packet is not complete.
 
 ## Execution rules
 
@@ -10,7 +10,7 @@ For every packet, deliver the code/configuration, meaningful verification, a mig
 
 Preserve the existing style and useful behavior. Enforce permission boundaries in the service, not just the UI. Feature flags must fail closed for incomplete remote execution and crypto functionality. Never weaken a release gate to make a test green, auto-upgrade all dependencies with force, or call a mock-only adapter production-ready.
 
-Current usable checks are `npm.cmd run lint`, a Vite production build, and `ELECTRON_RUN_AS_NODE=1` with `scripts/sqlite-store-test.cjs`. PowerShell uses `$env:ELECTRON_RUN_AS_NODE = '1'` before invoking Electron. New test commands mentioned below are deliverables, not commands that already exist.
+Current checks: `npm.cmd run check` (desktop types, CJS syntax, security/migration/store tests, production build), `npm.cmd run test:electron` (real Chromium/API/IPC/gateway tests), and `npm.cmd run lint` in `mobile/`. New tests proposed in individual packets remain deliverables unless recorded as verified in the status document.
 
 ## First two implementation weeks
 

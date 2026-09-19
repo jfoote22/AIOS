@@ -25,6 +25,7 @@ const os = require('node:os');
 const path = require('node:path');
 const sqliteStore = require('./sqlite-store.cjs');
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
+const { bearerToken, tokensEqual, localAuthHeaders, mobileProxyAllowed } = require('./http-security.cjs');
 
 const DEFAULT_PORT = 8766;
 
@@ -41,6 +42,7 @@ let server = null;
 let currentPort = null;
 let apiPort = null; // loopback api-server port, for the reverse proxy
 let getWC = null;   // () => renderer webContents, for change notifications
+const authorizedResponses = new Set();
 
 // Tell the renderer a snippet was written so its Second Brain reloads and runs
 // the enrichment pass (embedding / pending-memory). Reuses the 'memory:ingested'
@@ -68,6 +70,12 @@ function ensureToken() {
 function regenerateToken() {
   const token = crypto.randomBytes(24).toString('hex');
   setProviderKey('mobile_gateway_token', token);
+  // Revocation includes already-open streams and terminal sessions, not only
+  // the next request made with the old credential.
+  for (const response of authorizedResponses) response.destroy();
+  authorizedResponses.clear();
+  for (const session of termSessions.values()) { try { session.pty.kill(); } catch {} }
+  termSessions.clear();
   return token;
 }
 function configuredPort() {
@@ -92,17 +100,17 @@ function lanAddress() {
 // ── auth ─────────────────────────────────────────────────────────────────────
 
 function tokenFromReq(req) {
-  const header = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-  if (header) return header;
-  // EventSource (SSE) can't set headers in the browser/RN — allow a query token.
-  if (req.query && typeof req.query.token === 'string') return req.query.token.trim();
-  return '';
+  return bearerToken(req);
 }
 
 function requireToken(req, res, next) {
   const token = getToken();
-  if (!token || tokenFromReq(req) !== token) {
+  if (!tokensEqual(tokenFromReq(req), token)) {
     return res.status(401).json({ error: 'Invalid or missing bearer token.' });
+  }
+  if (!authorizedResponses.has(res)) {
+    authorizedResponses.add(res);
+    res.once('close', () => authorizedResponses.delete(res));
   }
   next();
 }
@@ -165,13 +173,17 @@ function writeSse(res, event, data) {
 // Streams transparently (handles the Vercel AI data-stream / SSE responses).
 
 function proxyToApi(req, res) {
-  if (!apiPort) return res.status(503).json({ error: 'API server not available.' });
   const rest = req.params[0] || '';
+  if (!mobileProxyAllowed(req.method, rest)) {
+    return res.status(403).json({ error: 'This desktop capability is not available to mobile clients.' });
+  }
+  if (!apiPort) return res.status(503).json({ error: 'API server not available.' });
   const upstreamPath = `/api/${rest}`;
-  const headers = { ...req.headers };
-  delete headers.authorization; // don't forward our bearer to the loopback server
-  delete headers.host;
-  delete headers['content-length']; // re-derived from the piped body
+  const payload = JSON.stringify(req.body || {});
+  const headers = {
+    ...localAuthHeaders(), 'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(payload),
+  };
   const upstream = http.request(
     { host: '127.0.0.1', port: apiPort, method: req.method, path: upstreamPath, headers },
     (up) => {
@@ -187,9 +199,8 @@ function proxyToApi(req, res) {
     if (!res.headersSent) res.status(502).json({ error: `Upstream error: ${err?.message || err}` });
     else try { res.end(); } catch {}
   });
-  // Forward the (already-parsed?) body. We mount the proxy BEFORE express.json,
-  // so req is still a raw stream here — just pipe it.
-  req.pipe(upstream);
+  res.on('close', () => upstream.destroy());
+  upstream.end(payload);
 }
 
 // Resolve a provider's auth mode the same way the renderer does (stored in the
@@ -234,7 +245,7 @@ function forwardJson(res, path, bodyObj) {
   const upstream = http.request(
     {
       host: '127.0.0.1', port: apiPort, method: 'POST', path,
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      headers: { ...localAuthHeaders(), 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
     },
     (up) => {
       res.status(up.statusCode || 502);
@@ -249,6 +260,7 @@ function forwardJson(res, path, bodyObj) {
     if (!res.headersSent) res.status(502).json({ error: `Upstream error: ${err?.message || err}` });
     else try { res.end(); } catch {}
   });
+  res.on('close', () => upstream.destroy());
   upstream.end(payload);
 }
 
@@ -286,10 +298,15 @@ function buildApp() {
   const app = express();
 
   app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
+    // Native clients have no Origin; the bundled brain page is same-origin.
+    // Never grant browser sites cross-origin access to the LAN gateway.
+    if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`) {
+      return res.status(403).json({ error: 'Cross-origin gateway access denied.' });
+    }
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
   });
 
@@ -314,9 +331,17 @@ function buildApp() {
     );
   });
 
-  // The reverse proxy must see the RAW request body, so mount it BEFORE the JSON
-  // parser. Auth still applies.
-  app.all('/api/proxy/*', requireToken, proxyToApi);
+  // Authenticate and bound the body before the curated proxy handles it.
+  app.all('/api/proxy/*', requireToken, express.json({ limit: '2mb' }), proxyToApi);
+
+  // Authenticate before parsing potentially large data or invoking any handler.
+  app.use('/api', requireToken);
+  app.use('/api/mobile/term', (_req, res, next) => {
+    if (getProviderKey('mobile_terminal_enabled') !== '1') {
+      return res.status(403).json({ error: 'Remote terminal is disabled. Enable it explicitly in desktop Settings.' });
+    }
+    next();
+  });
 
   // Everything past here is JSON.
   app.use(express.json({ limit: '30mb' }));
@@ -329,7 +354,7 @@ function buildApp() {
       name: 'AIOS',
       version: process.env.AIOS_VERSION || '',
       hasApi: !!apiPort,
-      hasTerminal: !!pty,
+      hasTerminal: !!pty && getProviderKey('mobile_terminal_enabled') === '1',
       platform: process.platform,
     });
   });
@@ -767,6 +792,8 @@ function start(opts = {}) {
 }
 
 function stop() {
+  for (const response of authorizedResponses) response.destroy();
+  authorizedResponses.clear();
   for (const [, s] of termSessions) { try { s.pty.kill(); } catch {} }
   termSessions.clear();
   if (server) {
@@ -788,12 +815,13 @@ function status() {
     address: lanAddress(),
     hasToken: !!getToken(),
     token: getToken(),
-    hasTerminal: !!pty,
+    hasTerminal: !!pty && getProviderKey('mobile_terminal_enabled') === '1',
+    terminalEnabled: getProviderKey('mobile_terminal_enabled') === '1',
   };
 }
 
 module.exports = {
-  start, stop, status, setApiPort,
+  start, stop, status, setApiPort, buildApp,
   ensureToken, regenerateToken,
   isEnabled, configuredPort, lanAddress,
   DEFAULT_PORT,

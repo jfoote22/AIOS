@@ -40,7 +40,7 @@ export default function TerminalScreen() {
 
   const connect = useCallback((id: string) => {
     esRef.current?.close();
-    const es = new EventSource(Term.streamUrl(id), { pollingInterval: 0 }) as any;
+    const es = new EventSource(Term.streamUrl(id), { pollingInterval: 0, headers: Term.streamHeaders() }) as any;
     es.addEventListener('data', (e: any) => { if (e.data != null) append(e.data); });
     es.addEventListener('exit', () => { append('\n[process exited]\n'); setSessionId(null); es.close(); });
     es.addEventListener('error', () => {/* keep-alive ticks land here too; ignore */});

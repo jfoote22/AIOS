@@ -4,7 +4,7 @@ Unified local desktop app merging **DeepDive** (multi-AI research) and **Snippin
 
 ## Status
 
-**Phase 2 (current)** — DeepDives ported, cross-link to Vault wired up.
+**Shipping hardening in progress; not a public-release candidate.** See [implementation status and verification](docs/SHIP-STATUS.md), [shipping plan](docs/SHIP-PLAN.md), and [executable backlog](docs/SHIP-BACKLOG.md). Vault data is not yet encrypted or synchronized across devices. The feature table below is historical and is not a release-readiness checklist.
 
 | Tab            | Status   | Notes |
 |----------------|----------|-------|
@@ -19,10 +19,10 @@ Unified local desktop app merging **DeepDive** (multi-AI research) and **Snippin
 
 - **Electron main** (`electron/main.cjs`) — tray, global hotkey, screenshot overlay window, capture IPC, multi-provider key vault (Electron `safeStorage` → DPAPI on Windows, file at `%APPDATA%/AIOS/provider-keys.json`).
 - **Keystore** (`electron/keystore.cjs`) — shared encrypted key reader/writer used by both main IPC handlers and the API server.
-- **API server** (`electron/api-server.cjs`) — local Express server bound to `127.0.0.1` on a random port. Emulates DeepDive's `/api/openai/chat`, `/api/anthropic/chat`, `/api/grok/chat`, `/api/deepgram` endpoints using the Vercel `ai` SDK. Pulls API keys from the encrypted store per-request — keys never live in renderer memory longer than needed.
+- **API server** (`electron/api-server.cjs`) — authenticated loopback Express server on a random port. Main-process network hooks authorize registered desktop windows; provider keys are not returned to the renderer. Gemini generation also runs in the main process. Raw-key retrieval routes have been removed.
 - **Overlay window** (`electron/overlay.html` + `overlay.js`) — transparent always-on-top BrowserWindow that captures the current display via `desktopCapturer`, marquee-select, returns cropped PNG data URL to renderer.
 - **Renderer** (`src/`) — React 19 with a collapsible left sidebar (`Sidebar.tsx`) that routes between tabs. Each tab is self-contained.
-- **Data** — IndexedDB (`src/lib/db.ts`) holds snippets, DeepDive sessions (the `threads` store), chat history. Phase 3 will migrate to SQLite via `better-sqlite3` for FTS5 search.
+- **Data** — SQLite in Electron main holds snippets, sessions, messages, imports, agents, skills, and runs. `src/lib/db.ts` is the renderer facade. Database encryption, durable background processing, and multi-device sync remain planned.
 - **AI providers** — Gemini for snippet analysis/embeddings; OpenAI / Anthropic / Grok for DeepDive chat via the local API server. Keys configured per-provider in the Models tab. Adding a key automatically activates that model in the relevant tab.
 
 ## Setup

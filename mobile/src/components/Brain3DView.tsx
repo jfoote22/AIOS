@@ -14,7 +14,7 @@ export interface BrainNodeTap {
 
 // The desktop's 3D Second Brain (Three.js), served by the mobile gateway at
 // /brain3d/ and rendered here in a WebView. The page authenticates its data
-// fetch with the token we pass in the URL.
+// fetch with a token injected only into the expected page, never into its URL.
 export function Brain3DView({ url, token, onNodeTap }: {
   url: string;
   token: string;
@@ -27,9 +27,13 @@ export function Brain3DView({ url, token, onNodeTap }: {
   const [attempt, setAttempt] = useState(0);
 
   const src = useMemo(
-    () => `${url.replace(/\/+$/, '')}/brain3d/?token=${encodeURIComponent(token)}`,
-    [url, token],
+    () => `${url.replace(/\/+$/, '')}/brain3d/`,
+    [url],
   );
+  const injectAuth = `if (window.location.href === ${JSON.stringify(src)}) {
+    window.__AIOS_MOBILE_TOKEN = ${JSON.stringify(token)};
+    window.dispatchEvent(new Event('aios-mobile-auth'));
+  } true;`;
 
   const onMessage = useCallback((e: WebViewMessageEvent) => {
     try {
@@ -58,6 +62,10 @@ export function Brain3DView({ url, token, onNodeTap }: {
       key={attempt}
       ref={webRef}
       source={{ uri: src }}
+      injectedJavaScript={injectAuth}
+      originWhitelist={[url.replace(/\/+$/, '')]}
+      onShouldStartLoadWithRequest={request => request.url === src || request.url === 'about:blank'}
+      javaScriptCanOpenWindowsAutomatically={false}
       style={styles.web}
       containerStyle={styles.web}
       onMessage={onMessage}

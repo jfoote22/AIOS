@@ -46,13 +46,29 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       # Installs deps and rebuilds native modules for Electron via the
       # postinstall hook (electron-rebuild better-sqlite3 + node-pty).
       - name: Install dependencies
         run: npm ci
+
+      - name: Verify before packaging
+        run: npm run check
+
+      # Known high-severity dependency findings currently block release. Do
+      # not remove this gate to ship; remediate or replace affected packages.
+      - name: Release dependency gate
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Electron boundary smoke (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:electron
+
+      - name: Electron boundary smoke (Windows/macOS)
+        if: runner.os != 'Linux'
+        run: npm run test:electron
 
       # vite build + electron-builder for the host OS. --publish never so the
       # release is assembled in one place by the `release` job below.
@@ -69,7 +85,7 @@ jobs:
             release/*.zip
             release/*.AppImage
             release/*.deb
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   release:
     name: Publish GitHub Release
