@@ -4,6 +4,8 @@ Decision proposal, 2026-09-18. This document defines the target and delivery seq
 
 ## Start here
 
+Execution update, 2026-09-19: three desktop hardening batches now exist. Read [current status](SHIP-STATUS.md) and [the v1.4 agent handoff](SHIP-HANDOFF.md) before assigning work. The immediate tasks are installer/UI/ingest verification; this architecture remains the target, not shipped encryption/sync.
+
 AIOS should become an encrypted personal knowledge vault with excellent capture and optional agent execution. Keep its current look and the brain/neuron experience. Make reliable capture, retrieval, and portability the product's foundation; connect powerful agents through explicit, configurable adapters.
 
 The recommendation is to retain Electron/React for desktop and React Native/Expo for mobile, extract a shared TypeScript core, add encrypted local storage on every native device, and synchronize encrypted records and attachments through an optional relay. Processing and agent execution belong in separately trusted workers. A cloud sync server should not need the keys to read a user's brain.

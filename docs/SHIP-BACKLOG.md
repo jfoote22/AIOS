@@ -12,7 +12,11 @@ Preserve the existing style and useful behavior. Enforce permission boundaries i
 
 Current checks: `npm.cmd run check` (desktop types, CJS syntax, security/migration/store tests, production build), `npm.cmd run test:electron` (real Chromium/API/IPC/gateway tests), and `npm.cmd run lint` in `mobile/`. New tests proposed in individual packets remain deliverables unless recorded as verified in the status document.
 
-## First two implementation weeks
+## Immediate handoff queue (2026-09-19)
+
+Use [SHIP-HANDOFF.md](SHIP-HANDOFF.md) H01–H06 for bounded next tasks: clean Windows installer, chat/UI regression, ingest regression, cross-platform evidence/release decision, mobile dependencies, then the larger roadmap. B01–B06 are partially implemented; [SHIP-STATUS.md](SHIP-STATUS.md) records actual scope. Do not redo completed work or equate a clean audit with readiness.
+
+## First two implementation weeks (original suggested schedule)
 
 | Order | Concrete work | Evidence before moving on |
 |---|---|---|

@@ -4,6 +4,8 @@ Unified local desktop app merging **DeepDive** (multi-AI research) and **Snippin
 
 ## Status
 
+For the **v1.4.0 testing checkpoint**, read the [agent handoff](docs/SHIP-HANDOFF.md) and [private-build/release instructions](RELEASING.md). The other agent's memory-ingest fixes are included on `feat/shipping-foundation`; package version 1.4.0 does not imply a published release.
+
 **Shipping hardening in progress; not a public-release candidate.** See [implementation status and verification](docs/SHIP-STATUS.md), [shipping plan](docs/SHIP-PLAN.md), and [executable backlog](docs/SHIP-BACKLOG.md). Vault data is not yet encrypted or synchronized across devices. The feature table below is historical and is not a release-readiness checklist.
 
 | Tab            | Status   | Notes |

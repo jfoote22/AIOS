@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
-import { useChat } from 'ai/react';
+import { useChat, useChatSessions, ChatSessionProvider } from '../lib/useChat';
 import React from 'react';
 import {
   Search, Link2, Video, FileText, Target, MessageSquare, Scissors, Brain,
@@ -436,7 +436,7 @@ function useThreadChat(
   })) || [];
 
   // Create a unique chat instance for this specific thread
-  const { messages, input, handleInputChange, handleSubmit, isLoading, append, stop } = useChat({
+  const { messages, input, handleInputChange, handleSubmit, isLoading, append, stop, error } = useChat({
     id: `thread-${threadId}`, // Unique ID ensures complete isolation
     api: getApiEndpoint(selectedModel),
     initialMessages: formattedInitialMessages,
@@ -454,6 +454,7 @@ function useThreadChat(
 
   return {
     messages,
+    error,
     input,
     handleInputChange,
     handleSubmit,
@@ -466,6 +467,7 @@ function useThreadChat(
 }
 
 const ThreadedChat = forwardRef<any, {}>((props, ref) => {
+  const chatSessions = useChatSessions();
   const [selectedModel, setSelectedModel] = useState<ModelProvider>('grok');
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -1206,6 +1208,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
   // Function to clear all threads and main chat for a fresh start
   const clearAllAndStartFresh = () => {
+    chatSessions.clear();
     setThreads([]);
     setActiveThreadId(null);
     pendingExtractions.current.clear();
@@ -1621,6 +1624,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   };
 
   const closeThread = (threadId: string) => {
+    chatSessions.remove(`thread-${threadId}`);
     console.log(`Closing thread: ${threadId}`);
     
     // Remove thread from the list
@@ -2408,6 +2412,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         </div>
 
         {/* Thread Input */}
+        {threadChat.error && <div role="alert" className="mx-3 mb-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-xs">{threadChat.error.message}</div>}
         <div 
           className={`flex-shrink-0 transition-all duration-300 ease-in-out border-t border-zinc-800 ${
             hideInputFields
@@ -3379,4 +3384,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
 ThreadedChat.displayName = 'ThreadedChat';
 
-export default ThreadedChat; 
+const ScopedThreadedChat = forwardRef<any, {}>((props, ref) => (
+  <ChatSessionProvider><ThreadedChat {...props} ref={ref} /></ChatSessionProvider>
+));
+ScopedThreadedChat.displayName = 'ScopedThreadedChat';
+export default ScopedThreadedChat;

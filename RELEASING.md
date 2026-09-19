@@ -1,71 +1,50 @@
-# Releasing AIOS
+# Building and releasing AIOS
 
-AIOS ships as a desktop app for **Windows, macOS (Apple Silicon + Intel), and
-Linux**, built from this single codebase by [electron-builder](https://www.electron.build/).
-Cross-platform builds run in GitHub Actions (`.github/workflows/release.yml`) so
-you don't need a Mac to produce the Mac build.
+Updated 2026-09-19. Package version is **1.4.0**; no v1.4.0 tag or published installer is claimed by this checkpoint. Start with [the agent handoff](docs/SHIP-HANDOFF.md) and [verified implementation status](docs/SHIP-STATUS.md).
 
-## Cut a release
+## Private Windows test build first
 
-1. Bump the version in `package.json` (`"version": "1.0.0"`).
-2. Commit, then tag and push:
-   ```bash
-   git commit -am "Release v1.0.0"
-   git tag v1.0.0
-   git push origin main --tags
-   ```
-3. The **Release** workflow builds every platform and creates a **draft** GitHub
-   Release with the installers attached. Open it under the repo's *Releases* tab,
-   check the files, and click **Publish**.
+Use a separate clean clone of `feat/shipping-foundation`, with Node 22.14 or newer in the Node 22 line. Quit the installed AIOS through its tray: the single-instance lock otherwise focuses that copy instead of starting development.
 
-Artifacts produced:
+```powershell
+npm.cmd ci
+npm.cmd run check
+npm.cmd run test:electron
+npm.cmd audit --audit-level=high
+npm.cmd run dist
+Get-FileHash -Algorithm SHA256 release/AIOS-Setup-1.4.0.exe
+```
 
-| Platform | File |
-|----------|------|
-| Windows  | `AIOS-Setup-<version>.exe` (NSIS installer, x64) |
-| macOS    | `AIOS-<version>-arm64.dmg` (Apple Silicon) + `.zip` |
-| Linux    | `AIOS-<version>-x64.AppImage` + `.deb` |
+Run each command only after the previous command succeeds. Record the source SHA and artifact hash. Test in a disposable Windows profile before using the owner's vault. Back up the existing vault separately; exports and the database remain plaintext, while provider credentials are machine-bound. Do not delete or reset app data during an upgrade test.
 
-> Intel Mac (`macos-13`/x64) builds are disabled for v1 — GitHub's Intel runners
-> are scarce/being retired and queue indefinitely. Re-enable the `macos-13` line
-> in `.github/workflows/release.yml` if you need an Intel `.dmg`.
+Native setup rebuilds SQLite for Electron and uses node-pty's bundled prebuild when available; otherwise it compiles from source. Source builds require platform build tools. The native probe must print PASS **and exit 0**, not time out. See H01–H03 for installer, chat and memory-ingest acceptance checks.
 
-You can also trigger the workflow manually from the **Actions** tab
-(`workflow_dispatch`) to test a build without creating a release.
+Alternatively, in GitHub Actions choose **Release → Run workflow → feat/shipping-foundation**. A manual non-tag run uploads build artifacts without creating a release. This checkpoint has not dispatched that workflow or verified its artifacts.
 
-## Build locally (optional)
+## Platforms and outputs
 
-`npm run dist` builds installers for the **current** OS into `release/`.
-Note: a macOS `.dmg` can only be built on macOS, and Windows `.exe` on Windows —
-native modules (`better-sqlite3`, `node-pty`) are compiled per-OS and can't be
-cross-compiled. That's why CI uses one runner per platform/architecture.
+| Configured target | Output |
+|---|---|
+| Windows x64 | `AIOS-Setup-<version>.exe` |
+| macOS Apple Silicon | `AIOS-<version>-arm64.dmg` and ZIP |
+| Linux x64 | AppImage and DEB |
 
-## App icon
+Build native artifacts on their target OS. Intel Mac is currently disabled in the workflow; do not advertise it as tested. `npm run dist` builds the current host target into `release/`. Large-bundle warnings are not installer validation.
 
-electron-builder reads the icon from `build/icon.png`. Provide a square PNG
-(**1024×1024** recommended); electron-builder converts it to `.ico` (Windows)
-and `.icns` (macOS) automatically. Until `build/icon.png` exists, builds use the
-default Electron icon.
+## Controlled release after testing
 
-## Code signing — currently OFF (v1 ships unsigned)
+1. Complete H01–H04, review platform/UI/ingest evidence, and obtain the owner's approval of the exact source commit and release channel.
+2. Recheck version consistency in package.json/lockfile and confirm the proposed tag does not already exist.
+3. Merge the reviewed branch through the agreed process. Do not assume main already contains feature-branch changes.
+4. Only after approval, create the exact tag on the approved SHA and push **that tag only**. For example, `git tag v1.4.0 <approved-sha>` then `git push origin v1.4.0`. Do not push all local tags.
+5. The tag-triggered Release workflow checks, audits, packages and creates a **draft** GitHub Release after successful builds. Inspect artifacts/checksums and install-test them before owner-approved publication.
 
-v1 is intentionally **unsigned** to ship at zero cost. What users see:
+A tag created on the feature branch builds that commit. A successful audit/build does not make the encrypted multi-device product complete. The existing workflow audits production dependencies; also run the full audit because Electron is classified as dev but ships in the app.
 
-- **Windows:** SmartScreen — *"Windows protected your PC"* → **More info** →
-  **Run anyway**.
-- **macOS:** Gatekeeper blocks a double-click — users **right-click → Open**
-  once (or run `xattr -cr /Applications/AIOS.app`). `mac.identity` is set to
-  `null` in `package.json` so electron-builder ad-hoc signs (required for the app
-  to launch on Apple Silicon) without a Developer ID.
+## Signing and distribution limits
 
-### Turning signing on later (no restructure needed)
+Current configuration has no configured production signing/notarization credentials. Treat generated installers as unsigned/ad-hoc-signed private test artifacts, with expected OS trust warnings. Do not promise public frictionless installation or recommend disabling system-wide protections.
 
-- **macOS** (removes the Gatekeeper warning): enrol in the
-  [Apple Developer Program](https://developer.apple.com/programs/) ($99/yr),
-  then in CI set secrets `CSC_LINK` (base64 of your `.p12`), `CSC_KEY_PASSWORD`,
-  `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`. Remove
-  `"identity": null`, add `"notarize": true` under `mac`, and pass the env vars
-  to the macOS build job.
-- **Windows** (removes SmartScreen warning): obtain a code-signing certificate
-  (OV ~\$200–500/yr, or EV for instant reputation), set `CSC_LINK` /
-  `CSC_KEY_PASSWORD` secrets for the Windows job.
+Public distribution requires reviewed Windows signing and macOS signing/notarization, appropriate developer identities, update/recovery testing, privacy/security documentation, and the remaining shipping gates. Accounts and paid services require owner involvement; no new accounts were created for this checkpoint.
+
+electron-builder uses `build/icon.png` when present; otherwise the default Electron icon may appear. Verify branding in the actual installer.

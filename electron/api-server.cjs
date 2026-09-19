@@ -37,29 +37,8 @@ function withContext(base, context) {
 }
 
 function streamHandler(buildModel, defaultSystem) {
-  return async (req, res) => {
-    try {
-      const { messages, showReasoning = false, mode = 'normal', variant, context } = req.body || {};
-      const { ai, createOpenAI, createAnthropic } = await loadAi();
-      const { model, system, steer } = buildModel({ showReasoning, mode, variant, createOpenAI, createAnthropic });
-      const result = await ai.streamText({
-        model,
-        messages: ai.convertToCoreMessages(appendSteer(messages, steer)),
-        system: withContext(system ?? defaultSystem, context),
-        maxTokens: 4000,
-      });
-      result.pipeDataStreamToResponse(res);
-    } catch (err) {
-      console.error('API stream error:', err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: err?.message || 'Stream failed' });
-      } else {
-        res.end();
-      }
-    }
-  };
+  return require('./chat-stream.cjs').createChatStreamHandler({ buildModel, defaultSystem, loadAi, withContext, appendSteer });
 }
-
 const VISION_EXT_MIME = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -628,7 +607,7 @@ function start({ development = false, approveAgentTool } = {}) {
       const key = getProviderKey('openai');
       if (!key) throw new Error('OpenAI key not configured. Add it in Models tab.');
       const client = createOpenAI({ apiKey: key });
-      return { model: client(getModelId('openai')), system: 'You are a helpful AI assistant' };
+      return { model: client.chat(getModelId('openai')), system: 'You are a helpful AI assistant' };
     }
   ));
 
@@ -649,7 +628,7 @@ function start({ development = false, approveAgentTool } = {}) {
       const key = getProviderKey('grok');
       if (!key) throw new Error('Grok (xAI) key not configured. Add it in Models tab.');
       const client = createOpenAI({ baseURL: 'https://api.x.ai/v1', apiKey: key });
-      return { model: client(getModelId('grok')), system: buildGrokSystemPrompt({ showReasoning, mode }), steer: buildGrokSteer(mode) };
+      return { model: client.chat(getModelId('grok')), system: buildGrokSystemPrompt({ showReasoning, mode }), steer: buildGrokSteer(mode) };
     }
   ));
 

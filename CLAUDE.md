@@ -10,6 +10,8 @@ The README and `docs/PROGRESS.md` describe earlier phases and are partly stale (
 
 ## Commands
 
+Current handoff: `docs/SHIP-HANDOFF.md` (2026-09-19). Pick one H01–H06 task; the owner requested a clean stop and a private Windows test build before more broad implementation. `docs/SHIP-STATUS.md` records actual completion and limitations.
+
 ```powershell
 npm install              # postinstall auto-runs electron-rebuild for native modules
 npm run electron:dev     # MAIN dev command: Vite on :3000 + Electron pointed at it
@@ -25,7 +27,7 @@ Use `npm run check` for desktop typechecking, Electron CJS syntax validation, se
 
 Hot reload covers the renderer (`src/`). Changes to `electron/*.cjs` require **restarting** `electron:dev`.
 
-After pulling changes that touch dependencies, re-run `npm install` (native modules are recompiled by the `postinstall` hook). `.npmrc` sets `legacy-peer-deps=true` — keep it.
+After pulling dependency changes, use `npm ci`. `scripts/rebuild-native.cjs` rebuilds SQLite, uses bundled node-pty prebuilds when present (otherwise source builds), and verifies both under Electron. The native smoke must explicitly exit after PASS. Source builds require platform build tools. `.npmrc` sets `legacy-peer-deps=true` — keep it.
 
 ## Architecture
 
@@ -45,7 +47,7 @@ Every AI feature dispatches on **(provider, auth mode)**:
   - Anthropic `api` → `@ai-sdk/anthropic` with the stored key. `subscription` → `@anthropic-ai/claude-agent-sdk` `query()` against the logged-in Claude Code CLI (routes ending `-agent`, e.g. `/api/claude-agent/chat`). Same split exists for OpenAI/Codex, Grok, Gemini.
 - **Model IDs** are slot-based, stored unencrypted in `%APPDATA%/AIOS/provider-models.json` via `electron/modelstore.cjs`. Slots: `openai`, `claude` (Anthropic opus/variant=opus), `anthropic` (Anthropic sonnet/variant=sonnet), `grok`, `gemini`, `hermes`. Retired model IDs are auto-upgraded on read (`RETIRED` map). Edit defaults there, not scattered in routes.
 - **API keys** are encrypted with Electron `safeStorage` (DPAPI on Windows) at `%APPDATA%/AIOS/provider-keys.json` via `electron/keystore.cjs`, shared by main IPC and the API server. `src/lib/providers.ts` is the renderer-side registry + "which providers are configured" cache.
-- Chat streaming uses the **Vercel AI data-stream protocol**. SDK routes use `result.pipeDataStreamToResponse`; the hand-rolled agent routes emit it manually (`0:` text delta, `d:` finish, `3:` error — see `streamPart`).
+- Chat retains the **Vercel v1 text/error/finish wire format**. AI SDK 7 API-key routes use `electron/chat-stream.cjs` (`0:` text, `d:` finish, `3:` error); CLI routes emit the same format. Renderer hooks are `useChat.tsx`/`chatSession.ts`, not `ai/react`. Keep OpenAI/Grok `.chat()` explicit to preserve Chat Completions.
 
 When adding a provider/feature, follow an existing route in `api-server.cjs`: pull the key/model from the stores, branch on `authMode`, stream back in the AI data-stream format.
 

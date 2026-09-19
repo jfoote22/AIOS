@@ -1,10 +1,10 @@
 # AIOS implementation status
 
-Updated 2026-09-18. **Foundation hardening implemented; not ready for public release.**
+Updated 2026-09-19. **Three hardening batches implemented; not ready for public release.** Start with [the v1.4.0 agent handoff](SHIP-HANDOFF.md) for current, bounded tasks.
 
 This is the execution record for [SHIP-BACKLOG.md](SHIP-BACKLOG.md), not a replacement roadmap. No vault encryption, multi-device sync, offline OCR, video pipeline, signed installers, or launch/billing system is claimed by this batch. No production user data or paid provider sessions were used for testing.
 
-## Implemented across the first two batches
+## Implemented across the first three batches
 
 | Packet | Implemented | Remaining before packet acceptance |
 |---|---|---|
@@ -13,7 +13,7 @@ This is the execution record for [SHIP-BACKLOG.md](SHIP-BACKLOG.md), not a repla
 | B03, partial | Gemini generation moved out of renderer; raw provider-key getter and Deepgram key route removed; provider-only credential mutation; trusted top-frame IPC checks; renderer/overlay sandbox; navigation controls; production CSP; insecure Linux keyring fallback rejected; safer credential-file replacement; dictation file logging opt-in | Comprehensive IPC payload schemas, narrower popout capabilities, explicit browser-permission policy, complete capture/editor/popout regression matrix, custom app protocol |
 | B04, partial | Claude chat/drafting has explicit empty tool inventory; agent execution has bounded selected tools and native allow-once/deny hooks; no implicit machine skills/settings; per-run credential environment; disconnect cancellation; duplicate-run rejection; SDK failures not reported as success; removed Google CLI permission-bypass flag | Live SDK approval/denial tests; workspace/network/OS sandbox; comprehensive CLI capability/version checks; approval history and persistent run lifecycle; environment minimization across providers |
 | B05, partial | DNS-pinned bounded public research fetch; native-approved workspace/attachment paths; link/root-change checks; recoverable editor deletion; short-lived PDF/Office/HTML parser processes; ZIP expansion checks; malformed/oversized/timeout fixtures | OS-level parser/agent filesystem and network sandbox; hostile concurrent filesystem race resistance; disconnect cancellation; full quotas/rate limits; safe JS-rendering worker; cross-platform packaged tests |
-| B06, partial | Removed vulnerable registry `xlsx`; officeparser 8 migration with DOCX/XLSX/PPTX/PDF fixtures; compatible xmldom/form-data/undici/nanoid patches; repeated audit; high/critical release gate retained | AI SDK/jsondiffpatch/pinned nanoid migration with stream tests; mobile/toolchain upgrades; remaining advisories; licenses and SBOM |
+| B06, partial | Removed vulnerable registry `xlsx`; officeparser 8 migration with DOCX/XLSX/PPTX/PDF fixtures; AI SDK 7 migration and stream tests; Electron 41.10.7/compatible desktop toolchain patches; zero full-desktop audit findings; release gate retained | Mobile dependencies; clean-install and packaged cross-platform verification; full UI/live-provider tests; licenses and SBOM |
 | B20 prerequisite only | Mobile pairing credentials migrated to native SecureStore with verified readback before deleting legacy plaintext; unpair ordering tested; tokens removed from WebView/SSE URLs | Native Android/iOS migration tests, independent encrypted mobile vault, durable offline capture queue, TLS/pinning/device pairing |
 
 The existing layout, colors, sidebar, brain visualization, capture controls, and agent tabs have not been redesigned. Functional security changes below are intentional.
@@ -28,6 +28,17 @@ The existing layout, colors, sidebar, brain visualization, capture controls, and
 - Spreadsheet extraction now uses officeparser 8. Legacy `.xls` requires conversion to `.xlsx` or CSV; `.doc` still requires DOCX/text. Unknown/binary/invalid UTF-8 files no longer fall through as garbled text. RTF is no longer advertised as a supported attachment. Spreadsheet output is readable text rather than the old CSV-per-sheet formatting; formatting/formula/large real-world corpus parity is not claimed.
 
 **Security limits:** child processes are not OS sandboxes and still run as the user. V8 heap limits are not a total RSS/native-memory cap. Path checks reject static link escapes but are not kernel-relative filesystem capabilities: a hostile same-user process can still race filesystem operations. Ordinary file replacement is atomic, not a transaction with the SQLite agent/project record; crash durability and automatic recovery remain unfinished. This batch does not sandbox terminals or agent tools, rate-limit every API, guarantee provider-call cancellation, or make the plaintext vault encrypted.
+
+## Third batch: dependency and chat migration
+
+- AI SDK 7.0.107, OpenAI adapter 4.0.71, Anthropic adapter 4.0.58. Removed old `ai/react`, jsondiffpatch, and the vulnerable pinned nanoid path. Configured model IDs are unchanged; OpenAI/Grok explicitly retain Chat Completions.
+- `electron/chat-stream.cjs` translates current SDK events to the existing `0:/3:/d:` text/error/finish protocol. API-key chats validate text-only requests before loading SDKs/credentials, prohibit tools, bound context/output, apply a two-minute deadline, cancel on disconnect, handle backpressure, and sanitize upstream errors. CLI/subscription policies remain separate.
+- `chatSession.ts`/`useChat.tsx` replace the old client hook with owner-scoped sessions and strict parsing. Partial text survives failures; reset/stop rejects late output; thread state survives panel remounts and is discarded on close/reset. Thread errors are visible. Saved text-message format and layout remain unchanged. Full React interaction testing remains pending.
+- Updated Electron 41.10.7, Vite 6.4.3, builder and compatible transitive patches. Native setup rebuilds SQLite and uses bundled node-pty prebuilds when present, otherwise source builds. The initial forced Windows node-pty rebuild failed without Visual Studio; the prebuild path passes real SQLite/PTY execution under Electron. The standalone probe now explicitly exits after PASS, fixing the ConPTY hang reported by the other agent.
+- All scripts referenced by package.json are committed together. No personal database migration or modification occurred in these batches.
+- All six supplied Claude-session commits are verified ancestors. Single-instance handling, ingest bind retries/error reporting, enrichment retries and the 60-second sweep remain. See the handoff for the other agent's reported, owner-approved personal DB recovery; do not repeat it automatically.
+
+Batch-three verification: six actual-provider-adapter/HTTP fixture tests and six client protocol/session tests. Total: **35 CommonJS + 10 TypeScript tests**, plus SQLite, native PTY, type/syntax checks and production build. No paid calls. Fresh-clone installation, real React interaction matrix, packaged artifacts and cross-platform runs remain unverified.
 
 ## Compatibility and migration notes
 
@@ -44,7 +55,7 @@ The existing layout, colors, sidebar, brain visualization, capture controls, and
 
 ## Verification
 
-Local environment: Windows, Node 22.14.0, Electron 41.7.0. Desktop lockfile updated for the parser and compatible dependency patches; Electron, better-sqlite3, and node-pty versions unchanged. Mobile SecureStore lockfile is unchanged from batch one.
+Local environment: Windows x64, Node 22.14.0, Electron 41.10.7. Desktop lockfile updated across three batches; better-sqlite3/node-pty package versions unchanged. Mobile lockfile unchanged from batch one. Fresh-clone install verification is still pending.
 
 Commands:
 
@@ -73,18 +84,19 @@ Not verified: paid/live model calls, real Claude CLI permission hooks, all captu
 
 ## Release-blocking dependency inventory
 
-`npm audit --omit=dev --json`, 2026-09-18:
+Desktop audits refreshed 2026-09-19; mobile retains the 2026-09-18 inventory:
 
 | Tree | High | Critical | Other | Total affected entries |
 |---|---:|---:|---:|---:|
-| Desktop (after batch two) | 2 | 0 | 6 moderate, 7 low | 15 |
+| Desktop production | 0 | 0 | 0 | 0 |
+| Desktop full tree, including Electron/build tools | 0 | 0 | 0 | 0 |
 | Mobile | 21 | 1 | 17 moderate | 39 |
 
 Counts include propagated/transitive entries, not that many independently exploitable runtime flaws. Mobile's production tree includes its Expo/Metro build tooling.
 
-Desktop production high entries fell from 8 to 2: `jsondiffpatch` and the old AI SDK's pinned `nanoid` remain. Updating compatible nanoid ranges does not fix that pinned copy. Moderate AI SDK/body-parser/express/qs/protobufjs findings also remain. The full desktop tree **including development/build dependencies** still reports 35 entries (3 critical, 17 high, 7 moderate, 8 low). Mobile remains the batch-one audit inventory; no mobile dependencies changed in batch two. Do not run `audit fix --force` or override major versions without compatibility evidence.
+Desktop production entries fell 21 → 15 → 0; the full desktop tree now also reports zero. This is an advisory snapshot, not security certification. Mobile dependencies remain unchanged and release-blocking for the mobile product. No forced major overrides were used.
 
-The desktop release workflow now stops on high/critical audit results. It is expected to fail that gate until B06 is completed. No tag, installer publication, store upload, or monetization launch is authorized by a passing unit test.
+The desktop release workflow now stops on high/critical audit results. That gate now passes locally. Run the full audit too: Electron is a devDependency but ships with the app. Packaging, platform, UI, and security acceptance remain separate. No tag, installer publication, store upload, or monetization launch is authorized by a passing unit test.
 
 ## Next executable batches
 
@@ -106,3 +118,6 @@ No new account was required for this batch. Native platform testing, code-signin
 - [Node child processes](https://nodejs.org/api/child_process.html): explicit subprocess environment, IPC, and lifecycle.
 - [officeparser](https://github.com/harshankur/officeParser): v8 buffer parsing and asynchronous text output API; Node 22.13 or newer.
 - [yauzl](https://github.com/thejoshwolfe/yauzl): lazy archive iteration and actual entry-size validation used by preflight.
+
+- [OpenAI streaming documentation](https://developers.openai.com/api/docs/guides/streaming-responses): verified existing Chat Completions compatibility; no model migration.
+- [AI SDK generation documentation](https://github.com/vercel/ai/blob/main/content/docs/03-ai-sdk-core/05-generating-text.mdx): current event model, checked against installed types and synthetic adapter tests.
