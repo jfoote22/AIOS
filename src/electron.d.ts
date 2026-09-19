@@ -41,6 +41,7 @@ declare global {
       captureRegion: () => Promise<{ dataUrl: string } | null>;
       getVersion: () => Promise<string>;
       getApiPort: () => Promise<number>;
+      authorizeWorkspace: (root: string) => Promise<boolean>;
       pickFolder: (opts?: { title?: string; defaultPath?: string }) => Promise<string | null>;
       pickFiles: (opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }) => Promise<string[]>;
       getProviderKeyPreview: (providerId: string) => Promise<string>;

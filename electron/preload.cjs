@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('aios', {
   getApiPort: () => ipcRenderer.invoke('app:get-api-port'),
   // Native folder picker
   pickFolder: (opts) => ipcRenderer.invoke('dialog:pick-folder', opts || {}),
+  authorizeWorkspace: (root) => ipcRenderer.invoke('files:authorize-workspace', root),
   // Native multi-file picker (DeepDive research attachments)
   pickFiles: (opts) => ipcRenderer.invoke('dialog:pick-files', opts || {}),
   // Deep Research report export (md/pdf/docx) — save dialog handled in main.

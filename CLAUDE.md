@@ -51,6 +51,9 @@ When adding a provider/feature, follow an existing route in `api-server.cjs`: pu
 
 ### Data layer
 
+- File APIs use `electron/file-access.cjs`: session-only native folder grants, `.claude` editor scope, `.aios/project.json` snapshots, and separately picker-selected attachments. Do not add HTTP grant endpoints or bypass the policy with raw paths. Deletes move to workspace `.aios-trash`; failed atomic writes may retain `.aios-write-*.tmp` files for recovery.
+- PDF/Office/HTML parsing uses `document-parser.cjs` → short-lived `document-worker.cjs` processes (deadline, limited concurrency/heap, stripped environment). Office ZIP expansion is checked before parsing. This is availability isolation, **not an OS sandbox**; see shipping status for residual risks. XLSX uses officeparser 8; legacy XLS is intentionally unsupported. Never restore `xlsx@0.18.5`.
+
 - **SQLite** via `better-sqlite3` in main (`electron/sqlite-store.cjs`), reached from the renderer over a single whitelisted IPC op bridge (`ipcMain.handle('aios:db', op, args)` → `window.aios.db.call`). `src/lib/db.ts` is the **only** renderer module that talks to the store; everything imports from it. Tables: `snippets, meta, threads, messages, imports, import_chunks, agents, skills, runs`. The `meta` table is the catch-all key/value store for prefs, auth modes, board state, Maestro config, etc.
 - There was a one-time IndexedDB→SQLite migration (`src/lib/db.ts` `ensureMigrated` + `src/lib/idb-legacy.ts`); SQLite is now the source of truth.
 - Per-feature stores wrap `db.ts`: `snippetStore.ts`, `deepdiveStore.ts`, `agents.ts`, `skills.ts`, `runs.ts`, `kanban.ts`, `memory.ts`, `imports.ts`. Full export/import of the whole brain to JSON is in `main.cjs` (`brain:export`/`brain:import` → `sqliteStore.dumpAll`/`bulkLoad`).

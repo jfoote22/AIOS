@@ -12,6 +12,7 @@ import { listAgents, emitAgentsChanged, type AgentDef } from './agents';
 import { saveMaestroState, loadMaestroState, type MaestroState } from './maestro';
 import { listRuns, type AgentRun, type RunStatus } from './runs';
 import { apiUrl } from './apiBase';
+import { ensureWorkspaceAccess } from './fileAccess';
 
 export const PROJECT_FORMAT = 'aios-project' as const;
 export const PROJECT_VERSION = 1 as const;
@@ -90,6 +91,7 @@ export async function saveProject(board: KanbanBoard): Promise<SaveResult> {
   const projectRoot = board.projectRoot?.trim();
   if (!projectRoot) throw new Error('No project folder set — pick one before saving.');
   const project = await buildProjectSnapshot(board);
+  await ensureWorkspaceAccess(projectRoot);
   const res = await fetch(apiUrl('/api/project/save'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -107,6 +109,7 @@ export async function saveProject(board: KanbanBoard): Promise<SaveResult> {
 export async function loadProjectFromFolder(projectRoot: string): Promise<AiosProjectFile | null> {
   const root = projectRoot.trim();
   if (!root) return null;
+  await ensureWorkspaceAccess(root);
   const res = await fetch(apiUrl('/api/project/load'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -4,7 +4,7 @@ Updated 2026-09-18. **Foundation hardening implemented; not ready for public rel
 
 This is the execution record for [SHIP-BACKLOG.md](SHIP-BACKLOG.md), not a replacement roadmap. No vault encryption, multi-device sync, offline OCR, video pipeline, signed installers, or launch/billing system is claimed by this batch. No production user data or paid provider sessions were used for testing.
 
-## Implemented in the first batch
+## Implemented across the first two batches
 
 | Packet | Implemented | Remaining before packet acceptance |
 |---|---|---|
@@ -12,11 +12,22 @@ This is the execution record for [SHIP-BACKLOG.md](SHIP-BACKLOG.md), not a repla
 | B02, partial | Process-lifetime loopback credential; Host/Origin checks; exact mobile proxy allowlist; header-only mobile auth; remote terminal off by default with desktop confirmation; token rotation closes active gateway streams/terminals; ingest authentication before body parsing | Enforced encrypted remote transport, per-device/scoped grants, rate/resource limits; existing LAN listeners are still HTTP |
 | B03, partial | Gemini generation moved out of renderer; raw provider-key getter and Deepgram key route removed; provider-only credential mutation; trusted top-frame IPC checks; renderer/overlay sandbox; navigation controls; production CSP; insecure Linux keyring fallback rejected; safer credential-file replacement; dictation file logging opt-in | Comprehensive IPC payload schemas, narrower popout capabilities, explicit browser-permission policy, complete capture/editor/popout regression matrix, custom app protocol |
 | B04, partial | Claude chat/drafting has explicit empty tool inventory; agent execution has bounded selected tools and native allow-once/deny hooks; no implicit machine skills/settings; per-run credential environment; disconnect cancellation; duplicate-run rejection; SDK failures not reported as success; removed Google CLI permission-bypass flag | Live SDK approval/denial tests; workspace/network/OS sandbox; comprehensive CLI capability/version checks; approval history and persistent run lifecycle; environment minimization across providers |
-| B05, partial | Shared research fetch transport validates every redirect before contact, pins DNS answers, excludes private/reserved addresses, limits response size/redirects/time; URL liveness checks use it; unsafe browser fallback removed | Approved real-path filesystem capabilities, symlink/junction tests, isolated parsers, archive/PDF/resource-limit fixtures, safe JS-rendering worker |
-| B06, inventory only | Re-ran desktop/mobile production dependency audits; release gate rejects high/critical findings | Dependency upgrades/replacements, parser/stream compatibility testing, license inventory, SBOM |
+| B05, partial | DNS-pinned bounded public research fetch; native-approved workspace/attachment paths; link/root-change checks; recoverable editor deletion; short-lived PDF/Office/HTML parser processes; ZIP expansion checks; malformed/oversized/timeout fixtures | OS-level parser/agent filesystem and network sandbox; hostile concurrent filesystem race resistance; disconnect cancellation; full quotas/rate limits; safe JS-rendering worker; cross-platform packaged tests |
+| B06, partial | Removed vulnerable registry `xlsx`; officeparser 8 migration with DOCX/XLSX/PPTX/PDF fixtures; compatible xmldom/form-data/undici/nanoid patches; repeated audit; high/critical release gate retained | AI SDK/jsondiffpatch/pinned nanoid migration with stream tests; mobile/toolchain upgrades; remaining advisories; licenses and SBOM |
 | B20 prerequisite only | Mobile pairing credentials migrated to native SecureStore with verified readback before deleting legacy plaintext; unpair ordering tested; tokens removed from WebView/SSE URLs | Native Android/iOS migration tests, independent encrypted mobile vault, durable offline capture queue, TLS/pinning/device pairing |
 
 The existing layout, colors, sidebar, brain visualization, capture controls, and agent tabs have not been redesigned. Functional security changes below are intentional.
+
+## Second batch: file and parser boundaries
+
+- Native folder selection or a default-deny native approval dialog grants editor/project access for the current app session. No HTTP or renderer-only operation can grant it. Existing saved paths need approval again after restart. Grants permit `.claude` files and `.aios/project.json`, **not** general agent tool access or attachments.
+- File attachments require an exact file-picker selection. Workspace approval alone cannot read arbitrary attachments. Reselect files after modification/replacement or restart. Reads check file identity before/after opening and enforce an actual byte cap. Symlinks/junctions, hard-linked files, filesystem roots, Windows UNC/device/alternate-stream paths, and ambiguous Windows names are rejected. Linked directory aliases must be replaced with the physical path.
+- Editor read/write cap: 2 MiB; project snapshot cap: 10 MiB; attachment cap: 50 MiB. Editor writes use sibling temporary files plus atomic publication. Create/rename reject existing destinations in ordinary use. Deleted agent/skill/editor files move to `<approved-workspace>/.aios-trash/<id>-<name>`; restore manually. Failed writes can retain `.aios-write-*.tmp` files. These are plaintext copies; there is no automatic purge or undo UI yet.
+- At most two attachment extractions and two document parser children run concurrently; excess requests return a retryable busy error (no durable queue yet). Workers receive bytes rather than source paths, a minimal environment without provider keys/Node injection options, a 192 MiB V8 old-space limit, a 20-second deadline, and at most 24,000 output characters. Explicit app quit stops active children. PDF parsing rejects more than 300 pages and disables eval support. HTML runs without scripts/resource loading.
+- OOXML preflight sequentially reads ZIP members before parsing: 2,048 entries, 16 MiB per member, 64 MiB expanded total, 200:1 expansion ratio. It rejects traversal, duplicate entries, links, encryption, unsupported compression, and XML DTD/entity declarations. No archive is extracted to disk.
+- Spreadsheet extraction now uses officeparser 8. Legacy `.xls` requires conversion to `.xlsx` or CSV; `.doc` still requires DOCX/text. Unknown/binary/invalid UTF-8 files no longer fall through as garbled text. RTF is no longer advertised as a supported attachment. Spreadsheet output is readable text rather than the old CSV-per-sheet formatting; formatting/formula/large real-world corpus parity is not claimed.
+
+**Security limits:** child processes are not OS sandboxes and still run as the user. V8 heap limits are not a total RSS/native-memory cap. Path checks reject static link escapes but are not kernel-relative filesystem capabilities: a hostile same-user process can still race filesystem operations. Ordinary file replacement is atomic, not a transaction with the SQLite agent/project record; crash durability and automatic recovery remain unfinished. This batch does not sandbox terminals or agent tools, rate-limit every API, guarantee provider-call cancellation, or make the plaintext vault encrypted.
 
 ## Compatibility and migration notes
 
@@ -33,7 +44,7 @@ The existing layout, colors, sidebar, brain visualization, capture controls, and
 
 ## Verification
 
-Local environment: Windows, Node 22.14.0, dependencies resolved by the existing desktop lockfile. New mobile SecureStore dependency recorded in the mobile lockfile.
+Local environment: Windows, Node 22.14.0, Electron 41.7.0. Desktop lockfile updated for the parser and compatible dependency patches; Electron, better-sqlite3, and node-pty versions unchanged. Mobile SecureStore lockfile is unchanged from batch one.
 
 Commands:
 
@@ -50,12 +61,13 @@ Verified locally:
 - Desktop and mobile TypeScript checks.
 - Electron/test CommonJS syntax validation.
 - Security suite: actual HTTP authentication/Host/Origin/preflight, mobile route policy, no-tool policy, allow-once/deny/cancel decisions, credential isolation, SDK error outcomes, Gemini input boundary, IP/redirect/DNS/deadline fixtures.
+- Fifteen new file/parser tests: grants/scope, link and replaced-root escapes, selected-file identity, bounded writes/reads, recoverable deletion, strict input formats, attachment backpressure, actual document/HTML fixtures, archive limits, worker timeout/crash/invalid-output recovery, environment isolation, and shutdown. Combined desktop security/file/parser suite: 29 passing tests.
 - Four migration tests: secure copy/readback, failure preservation, unpair ordering, malformed pairing rejection.
 - Existing native SQLite CRUD/bulk-load tests plus inherited-property dispatch rejection.
 - Production Vite build. Existing large-bundle warnings remain; no performance improvement is claimed.
-- Real Electron/Chromium using a temporary profile/database: sandboxed preload, authenticated GET/JSON POST with preflight, unauthenticated HTTP rejected, unregistered/navigated IPC rejected, mobile forwarding authenticated internally, privileged proxy paths denied, terminal default-deny, token rotation, and corruption-safe credential-file handling. Native key encryption/roundtrip is tested when an OS keyring is available (Windows locally).
+- Real Electron/Chromium using a temporary profile/database: sandboxed preload, authenticated GET/JSON POST with preflight, unauthorized file/project/attachment access denied, approved editor CRUD and recoverable deletion, selected DOCX and HTML worker execution, unregistered/navigated IPC rejected, mobile forwarding authenticated internally, privileged proxy paths denied, terminal default-deny, token rotation, and corruption-safe credential-file handling. Native key encryption/roundtrip is tested when an OS keyring is available (Windows locally).
 
-Tests retain temporary fixture profiles in the OS temp directory for inspection. The Electron smoke intentionally prints two “Untrusted IPC sender” errors for denied negative cases. These are expected; success is the final PASS and exit code 0.
+Tests retain temporary fixture profiles in the OS temp directory for inspection. The Electron smoke intentionally prints denied file/project access and two “Untrusted IPC sender” errors. These are expected; success is the final PASS and exit code 0. Native approval dialogs are not automated; the smoke grants synthetic paths directly through the main-process policy, then exercises the real API.
 
 Not verified: paid/live model calls, real Claude CLI permission hooks, all capture/Monaco/terminal interactions, physical phone SecureStore/WebView/SSE behavior, iOS builds, Linux/macOS desktop runtime, packaged installers, signing, updater, or remote CI. Native security review is still required. Local typechecks and mocks do not establish those claims.
 
@@ -65,18 +77,18 @@ Not verified: paid/live model calls, real Claude CLI permission hooks, all captu
 
 | Tree | High | Critical | Other | Total affected entries |
 |---|---:|---:|---:|---:|
-| Desktop | 8 | 0 | 6 moderate, 7 low | 21 |
+| Desktop (after batch two) | 2 | 0 | 6 moderate, 7 low | 15 |
 | Mobile | 21 | 1 | 17 moderate | 39 |
 
 Counts include propagated/transitive entries, not that many independently exploitable runtime flaws. Mobile's production tree includes its Expo/Metro build tooling.
 
-Desktop priorities: `xlsx` has no registry fix reported; `officeparser`/`pdfjs-dist` need a reviewed parser upgrade; AI SDK/jsondiffpatch/nanoid must be upgraded with stream-protocol tests; fixable xmldom/form-data/undici paths also remain. Mobile priorities: legacy Expo/RN toolchain and `tar` critical findings, plus markdown/linkification and parser dependencies. Do not run `audit fix --force` or override major versions without compatibility evidence.
+Desktop production high entries fell from 8 to 2: `jsondiffpatch` and the old AI SDK's pinned `nanoid` remain. Updating compatible nanoid ranges does not fix that pinned copy. Moderate AI SDK/body-parser/express/qs/protobufjs findings also remain. The full desktop tree **including development/build dependencies** still reports 35 entries (3 critical, 17 high, 7 moderate, 8 low). Mobile remains the batch-one audit inventory; no mobile dependencies changed in batch two. Do not run `audit fix --force` or override major versions without compatibility evidence.
 
 The desktop release workflow now stops on high/critical audit results. It is expected to fail that gate until B06 is completed. No tag, installer publication, store upload, or monetization launch is authorized by a passing unit test.
 
 ## Next executable batches
 
-1. Finish B05 approved-path/file capabilities and parser worker isolation. Add symlink/junction, malformed archive, oversized file, timeout, and rollback fixtures before handling more media formats.
+1. Finish B05 with OS sandbox/egress enforcement, race-resistant native file capabilities, lifecycle cancellation/quotas, and packaged Windows/macOS/Linux parser/editor tests. Add crash-recovery fixtures and a representative document corpus; do not interpret passing synthetic tests as hostile-file safety certification.
 2. Complete B06 in tested dependency groups, then run clean-install desktop/mobile CI. Confirm distribution rights for dependencies and brain assets.
 3. B07 shared schemas and transaction-safe migrations; B08 SQLCipher/native binding compatibility spike on all intended platforms. Do not substitute a SQLite PRAGMA for verified encryption support.
 4. B09 lock/recovery and staged conversion, then B10 durable jobs + B11 capture-first/offline OCR. Prove crash/retry/offline capture retains originals without any AI account.
@@ -91,3 +103,6 @@ No new account was required for this batch. Native platform testing, code-signin
 - [Claude SDK permissions](https://code.claude.com/docs/en/agent-sdk/permissions): tool inventory, permission modes, and approval hooks are separate controls.
 - [Expo SecureStore](https://docs.expo.dev/versions/latest/sdk/securestore/): native credential storage and platform backup limitations; not a substitute for a vault database.
 - [Node HTTP request API](https://nodejs.org/api/http.html#httprequesturl-options-callback): controlled connection lookup and bounded request lifecycle.
+- [Node child processes](https://nodejs.org/api/child_process.html): explicit subprocess environment, IPC, and lifecycle.
+- [officeparser](https://github.com/harshankur/officeParser): v8 buffer parsing and asynchronous text output API; Node 22.13 or newer.
+- [yauzl](https://github.com/thejoshwolfe/yauzl): lazy archive iteration and actual entry-size validation used by preflight.

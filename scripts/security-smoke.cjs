@@ -6,7 +6,7 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 const { ipcMain, protectWindow, installApiTransport } = require('../electron/renderer-security.cjs');
-const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'aios-security-smoke-'));
+const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aios-security-smoke-')));
 app.setPath('userData', profile);
 app.commandLine.appendSwitch('disable-gpu');
 const timeout = setTimeout(() => { console.error('Electron smoke timed out.'); app.exit(1); }, 45000);
@@ -53,6 +53,39 @@ app.whenReady().then(async () => {
   }).then(r => r.status)`);
   assert.equal(postStatus, 400);
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/health`)).status, 401);
+
+  const post = (route, body) => win.webContents.executeJavaScript(`fetch(${JSON.stringify(`http://127.0.0.1:${port}/api/`)} + ${JSON.stringify(route)}, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: ${JSON.stringify(JSON.stringify(body))}
+  }).then(async r => ({status: r.status, body: await r.json()}))`);
+  const workspace = path.join(profile, 'workspace');
+  const editor = path.join(workspace, '.claude');
+  fs.mkdirSync(editor, { recursive: true });
+  const note = path.join(workspace, 'note.txt');
+  fs.writeFileSync(note, 'AIOS selected attachment fixture');
+  assert.equal((await post('fs/write', { root: editor, relPath: 'test.md', content: 'denied' })).status, 403);
+  assert.equal((await post('project/load', { projectRoot: workspace })).status, 403);
+  assert.equal((await post('research/extract-file', { filePath: note })).status, 403);
+  const { fileAccess } = require('../electron/file-access.cjs');
+  await fileAccess.grantWorkspace(workspace); // native dialog result; never an API grant
+  assert.equal((await post('fs/write', { root: editor, relPath: 'test.md', content: 'preserve me' })).status, 200);
+  assert.equal((await post('fs/read', { root: editor, relPath: 'test.md' })).body.content, 'preserve me');
+  assert.equal((await post('fs/write', { root: editor, relPath: '../escape.md', content: 'denied' })).status, 403);
+  assert.equal((await post('fs/create', { root: editor, relPath: 'test.md' })).status, 409);
+  const deleted = await post('fs/delete', { root: editor, relPath: 'test.md' });
+  assert.equal(deleted.status, 200);
+  assert.equal(fs.readFileSync(deleted.body.trashPath, 'utf8'), 'preserve me');
+  assert.equal((await post('research/extract-file', { filePath: note })).status, 403);
+  await fileAccess.grantFile(note);
+  assert.equal((await post('research/extract-file', { filePath: note })).body.text, 'AIOS selected attachment fixture');
+  const { Document, Packer, Paragraph } = require('docx');
+  const documentPath = path.join(workspace, 'fixture.docx');
+  fs.writeFileSync(documentPath, await Packer.toBuffer(new Document({ sections: [{ children: [new Paragraph('Electron document worker fixture')] }] })));
+  await fileAccess.grantFile(documentPath);
+  const document = await post('research/extract-file', { filePath: documentPath });
+  assert.equal(document.status, 200, JSON.stringify(document.body));
+  assert.match(document.body.text, /Electron document worker fixture/);
+  const html = await require('../electron/document-parser.cjs').parseDocument('html', Buffer.from('<title>Smoke</title><p>Electron HTML worker fixture</p>'), 'https://example.com');
+  assert.match(html.text, /Electron HTML worker fixture/);
 
   // Exercise the actual gateway with an in-memory test credential provider.
   // Do not require a desktop keyring on headless Linux CI or touch real keys.
@@ -106,7 +139,7 @@ app.whenReady().then(async () => {
   assert.equal(fs.readFileSync(keystoreFile, 'utf8'), '{malformed-fixture');
   await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
   clearTimeout(timeout);
-  console.log('PASS: Chromium API/CORS, sandboxed preload, untrusted/navigated IPC, mobile proxy allowlist, terminal default-deny, token rotation, and credential-file preservation.');
+  console.log('PASS: Chromium API/CORS, sandboxed preload, path/attachment grants, recoverable deletion, Electron document/HTML workers, untrusted/navigated IPC, mobile proxy allowlist, terminal default-deny, token rotation, and credential-file preservation.');
   console.log(`Isolated test profile retained at ${profile}`);
   app.exit(0);
 }).catch(error => { console.error(error); clearTimeout(timeout); app.exit(1); });

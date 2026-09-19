@@ -11,6 +11,7 @@ const { spawn } = require('node:child_process');
 const { localApiGuard } = require('./http-security.cjs');
 const { registerGeminiGeneration } = require('./gemini-generation.cjs');
 const { noToolsPolicy, executionPolicy, assertAgentResult } = require('./agent-policy.cjs');
+const { fileAccess } = require('./file-access.cjs');
 
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
 const { getModelId, setModelId } = require('./modelstore.cjs');
@@ -956,14 +957,11 @@ function start({ development = false, approveAgentTool } = {}) {
         return res.status(400).json({ error: 'Slug must be lowercase alphanumeric + dashes.' });
       }
       const safeSlug = slug.slice(0, 60);
-      const dir = path.resolve(workingDir, '.claude', 'agents');
-      const file = path.join(dir, `${safeSlug}.md`);
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(file, markdown, 'utf8');
+      const file = await fileAccess.write(workingDir, `.claude/agents/${safeSlug}.md`, markdown);
       res.json({ path: file });
     } catch (err) {
       console.error('write-md error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to write agent file.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to write agent file.' });
     }
   });
 
@@ -972,12 +970,11 @@ function start({ development = false, approveAgentTool } = {}) {
       const { slug, workingDir } = req.body || {};
       if (!slug || !workingDir) return res.status(400).json({ error: 'Missing slug or workingDir.' });
       if (!/^[a-z0-9-]+$/.test(slug)) return res.status(400).json({ error: 'Bad slug.' });
-      const file = path.resolve(workingDir, '.claude', 'agents', `${slug.slice(0, 60)}.md`);
-      try { await fs.unlink(file); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
-      res.json({ ok: true });
+      const trashPath = await fileAccess.trash(workingDir, `.claude/agents/${slug.slice(0, 60)}.md`);
+      res.json({ ok: true, trashPath });
     } catch (err) {
       console.error('delete-md error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to delete agent file.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to delete agent file.' });
     }
   });
 
@@ -994,14 +991,11 @@ function start({ development = false, approveAgentTool } = {}) {
       if (!project || typeof project !== 'object') {
         return res.status(400).json({ error: 'Missing project payload.' });
       }
-      const dir = path.resolve(projectRoot, '.aios');
-      const file = path.join(dir, 'project.json');
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(file, JSON.stringify(project, null, 2), 'utf8');
+      const file = await fileAccess.write(projectRoot, '.aios/project.json', JSON.stringify(project, null, 2), { scope: 'project', maxBytes: 10 * 1024 * 1024 });
       res.json({ path: file });
     } catch (err) {
       console.error('project save error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to save project.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to save project.' });
     }
   });
 
@@ -1011,10 +1005,10 @@ function start({ development = false, approveAgentTool } = {}) {
       if (!projectRoot || typeof projectRoot !== 'string') {
         return res.status(400).json({ error: 'Missing projectRoot.' });
       }
-      const file = path.resolve(projectRoot, '.aios', 'project.json');
+      const file = await fileAccess.target(projectRoot, '.aios/project.json', 'project');
       let raw;
       try {
-        raw = await fs.readFile(file, 'utf8');
+        raw = (await fileAccess.read(projectRoot, '.aios/project.json', { scope: 'project', maxBytes: 10 * 1024 * 1024 })).toString('utf8');
       } catch (e) {
         if (e?.code === 'ENOENT') return res.json({ exists: false });
         throw e;
@@ -1028,7 +1022,7 @@ function start({ development = false, approveAgentTool } = {}) {
       res.json({ exists: true, project, path: file });
     } catch (err) {
       console.error('project load error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to load project.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to load project.' });
     }
   });
 
@@ -1131,14 +1125,12 @@ function start({ development = false, approveAgentTool } = {}) {
         return res.status(400).json({ error: 'Slug must be lowercase alphanumeric + dashes.' });
       }
       const safeSlug = slug.slice(0, 60);
-      const dir = path.resolve(workingDir, '.claude', 'skills', safeSlug);
-      const file = path.join(dir, 'SKILL.md');
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(file, markdown, 'utf8');
+      const file = await fileAccess.write(workingDir, `.claude/skills/${safeSlug}/SKILL.md`, markdown);
+      const dir = path.dirname(file);
       res.json({ path: file, dir });
     } catch (err) {
       console.error('skill write-md error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to write skill file.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to write skill file.' });
     }
   });
 
@@ -1147,13 +1139,12 @@ function start({ development = false, approveAgentTool } = {}) {
       const { slug, workingDir } = req.body || {};
       if (!slug || !workingDir) return res.status(400).json({ error: 'Missing slug or workingDir.' });
       if (!/^[a-z0-9-]+$/.test(slug)) return res.status(400).json({ error: 'Bad slug.' });
-      // Remove the whole skill folder (SKILL.md + any supporting files).
-      const dir = path.resolve(workingDir, '.claude', 'skills', slug.slice(0, 60));
-      try { await fs.rm(dir, { recursive: true, force: true }); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
-      res.json({ ok: true });
+      // Move the complete folder into recoverable, workspace-local trash.
+      const trashPath = await fileAccess.trash(workingDir, `.claude/skills/${slug.slice(0, 60)}`);
+      res.json({ ok: true, trashPath });
     } catch (err) {
       console.error('skill delete-md error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to delete skill folder.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to delete skill folder.' });
     }
   });
 
@@ -1237,28 +1228,23 @@ function start({ development = false, approveAgentTool } = {}) {
     }
   });
 
-  // --- IDE file ops: sandboxed read/write/list under a .claude/* folder ---
+  // --- IDE file ops: approved read/write/list under a .claude/* folder ---
   // Powers the "Editor" mode of the Agent/Skill creators. Every op takes an
   // absolute `root` (the agent/skill folder) plus a `relPath` within it. To
   // keep this from becoming an arbitrary-filesystem API, `root` MUST contain a
   // `.claude` path segment, and the resolved target MUST stay inside `root`.
+  // Main-process native approval grants workspace access; links are rejected.
+  // These path checks do not sandbox hostile same-user filesystem processes.
   const FS_MAX_ENTRIES = 2000;
-  function resolveClaudeTarget(root, relPath = '') {
-    if (!root || typeof root !== 'string') throw Object.assign(new Error('Missing root.'), { status: 400 });
-    const normRoot = path.resolve(root);
-    const segs = normRoot.split(/[\\/]+/);
-    if (!segs.includes('.claude')) {
-      throw Object.assign(new Error('root must live under a .claude folder.'), { status: 400 });
-    }
-    const target = path.resolve(normRoot, relPath || '');
-    const rel = path.relative(normRoot, target);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      throw Object.assign(new Error('Path escapes the sandbox root.'), { status: 400 });
-    }
+  async function resolveClaudeTarget(root, relPath = '') {
+    const normRoot = await fileAccess.target(root);
+    const target = await fileAccess.target(normRoot, relPath);
     return { normRoot, target };
   }
 
-  async function buildTree(absDir, relBase, budget) {
+  async function buildTree(root, relBase, budget) {
+    if (relBase.split('/').length > 32) { budget.truncated = true; return []; }
+    const absDir = await fileAccess.target(root, relBase);
     let entries;
     try {
       entries = await fs.readdir(absDir, { withFileTypes: true });
@@ -1282,7 +1268,7 @@ function start({ development = false, approveAgentTool } = {}) {
           name: ent.name,
           path: relPath,
           type: 'dir',
-          children: await buildTree(path.join(absDir, ent.name), relPath, budget),
+          children: await buildTree(root, relPath, budget),
         });
       } else if (ent.isFile()) {
         out.push({ name: ent.name, path: relPath, type: 'file' });
@@ -1294,10 +1280,10 @@ function start({ development = false, approveAgentTool } = {}) {
   app.post('/api/fs/tree', async (req, res) => {
     try {
       const { root } = req.body || {};
-      const { normRoot } = resolveClaudeTarget(root);
+      const { normRoot } = await resolveClaudeTarget(root);
       const budget = { count: 0 };
       const tree = await buildTree(normRoot, '', budget);
-      res.json({ root: normRoot, tree, truncated: budget.count >= FS_MAX_ENTRIES });
+      res.json({ root: normRoot, tree, truncated: budget.truncated || budget.count >= FS_MAX_ENTRIES });
     } catch (err) {
       res.status(err?.status || 500).json({ error: err?.message || 'Failed to read tree.' });
     }
@@ -1306,11 +1292,8 @@ function start({ development = false, approveAgentTool } = {}) {
   app.post('/api/fs/read', async (req, res) => {
     try {
       const { root, relPath } = req.body || {};
-      const { target } = resolveClaudeTarget(root, relPath);
-      const stat = await fs.stat(target);
-      if (!stat.isFile()) return res.status(400).json({ error: 'Not a file.' });
-      if (stat.size > 2 * 1024 * 1024) return res.status(413).json({ error: 'File too large to edit here (>2 MB).' });
-      const buf = await fs.readFile(target);
+      await resolveClaudeTarget(root, relPath);
+      const buf = await fileAccess.read(root, relPath);
       // Reject binary-ish content so Monaco doesn't choke on a blob.
       if (buf.includes(0)) return res.status(415).json({ error: 'Binary file — not editable.' });
       res.json({ content: buf.toString('utf8') });
@@ -1324,9 +1307,8 @@ function start({ development = false, approveAgentTool } = {}) {
     try {
       const { root, relPath, content } = req.body || {};
       if (typeof content !== 'string') return res.status(400).json({ error: 'Missing content.' });
-      const { target } = resolveClaudeTarget(root, relPath);
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, content, 'utf8');
+      await resolveClaudeTarget(root, relPath);
+      const target = await fileAccess.write(root, relPath, content);
       res.json({ ok: true, path: target });
     } catch (err) {
       res.status(err?.status || 500).json({ error: err?.message || 'Failed to write file.' });
@@ -1337,15 +1319,12 @@ function start({ development = false, approveAgentTool } = {}) {
     try {
       const { root, relPath, kind = 'file' } = req.body || {};
       if (!relPath) return res.status(400).json({ error: 'Missing relPath.' });
-      const { target } = resolveClaudeTarget(root, relPath);
+      const { target } = await resolveClaudeTarget(root, relPath);
       if (kind === 'dir') {
-        await fs.mkdir(target, { recursive: true });
+        await fileAccess.mkdir(root, relPath);
       } else {
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        // Don't clobber an existing file.
-        const fh = await fs.open(target, 'wx').catch(e => { if (e?.code === 'EEXIST') return null; throw e; });
-        if (!fh) return res.status(409).json({ error: 'A file with that name already exists.' });
-        await fh.close();
+        try { await fileAccess.write(root, relPath, '', { exclusive: true }); }
+        catch (error) { if (error.code === 'EEXIST') return res.status(409).json({ error: 'A file with that name already exists.' }); throw error; }
       }
       res.json({ ok: true, path: target });
     } catch (err) {
@@ -1357,10 +1336,10 @@ function start({ development = false, approveAgentTool } = {}) {
     try {
       const { root, relPath } = req.body || {};
       if (!relPath) return res.status(400).json({ error: 'Missing relPath.' });
-      const { normRoot, target } = resolveClaudeTarget(root, relPath);
+      const { normRoot, target } = await resolveClaudeTarget(root, relPath);
       if (target === normRoot) return res.status(400).json({ error: 'Refusing to delete the root folder here.' });
-      await fs.rm(target, { recursive: true, force: true });
-      res.json({ ok: true });
+      const trashPath = await fileAccess.trash(root, relPath);
+      res.json({ ok: true, trashPath });
     } catch (err) {
       res.status(err?.status || 500).json({ error: err?.message || 'Failed to delete entry.' });
     }
@@ -1370,10 +1349,9 @@ function start({ development = false, approveAgentTool } = {}) {
     try {
       const { root, relPath, newRelPath } = req.body || {};
       if (!relPath || !newRelPath) return res.status(400).json({ error: 'Missing relPath or newRelPath.' });
-      const { target: from } = resolveClaudeTarget(root, relPath);
-      const { target: to } = resolveClaudeTarget(root, newRelPath);
-      await fs.mkdir(path.dirname(to), { recursive: true });
-      await fs.rename(from, to);
+      await resolveClaudeTarget(root, relPath);
+      await resolveClaudeTarget(root, newRelPath);
+      const to = await fileAccess.rename(root, relPath, newRelPath);
       res.json({ ok: true, path: to });
     } catch (err) {
       res.status(err?.status || 500).json({ error: err?.message || 'Failed to rename entry.' });
@@ -2140,7 +2118,7 @@ Be specific and faithful to what is actually visible. Do not invent details. If 
       res.json(result);
     } catch (e) {
       console.error('File extraction error:', e);
-      res.status(400).json({ error: e?.message || 'Failed to extract file' });
+      res.status(e?.status || 400).json({ error: e?.message || 'Failed to extract file' });
     }
   });
 

@@ -12,6 +12,7 @@
 
 import * as db from './db';
 import { apiUrl } from './apiBase';
+import { ensureWorkspaceAccess } from './fileAccess';
 import { getAnthropicAuthMode } from './authMode';
 
 export interface AgentDef {
@@ -355,6 +356,7 @@ export async function saveAgent(agent: AgentDef, opts?: { fallbackWorkingDir?: s
     return { filePath: null, warning: 'No working directory or board project root set — skipped .md file write.' };
   }
   try {
+    await ensureWorkspaceAccess(writeDir);
     const res = await fetch(apiUrl('/api/agents/write-md'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -379,6 +381,7 @@ export async function deleteAgent(id: string, opts?: { alsoDeleteFile?: boolean;
   await db.removeAgent(id);
   if (opts?.alsoDeleteFile && opts.workingDir && opts.slug) {
     try {
+      await ensureWorkspaceAccess(opts.workingDir);
       await fetch(apiUrl('/api/agents/delete-md'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

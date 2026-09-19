@@ -10,6 +10,7 @@ const reportExport = require('./report-export.cjs');
 const sqliteStore = require('./sqlite-store.cjs');
 const memoryIngest = require('./memory-ingest.cjs');
 const mobileGateway = require('./mobile-gateway.cjs');
+const { fileAccess, inspectPath } = require('./file-access.cjs');
 
 // Keep the renderer fully alive when the main window is minimized during a
 // capture. "Add Shot" minimizes the window (so AIOS stays out of the shot),
@@ -448,6 +449,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  require('./document-parser.cjs').stopParsers();
   globalShortcut.unregisterAll();
   terminal.killAll();
   mobileGateway.stop();
@@ -530,6 +532,28 @@ ipcMain.handle('mobile:regenerate-token', () => {
 // rejects the renderer's invoke() (matching the old IndexedDB reject path).
 ipcMain.handle('aios:db', (_e, op, args) => sqliteStore.call(op, args));
 
+const pendingWorkspaceApprovals = new Map();
+ipcMain.handle('files:authorize-workspace', async (_e, root) => {
+  const { target, stat } = await inspectPath(root);
+  if (!stat.isDirectory()) throw new Error('Select a project folder.');
+  try { await fileAccess.assertWorkspace(target); return true; } catch { /* request explicit consent */ }
+  if (!pendingWorkspaceApprovals.has(target)) {
+    const decision = (async () => {
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'question', title: 'Approve project folder',
+        message: 'Allow AIOS to manage agent/skill files and project snapshots in this folder?',
+        detail: `${target}\n\nAllows the .claude editor and .aios/project.json operations for this app session. It does not approve agent tool actions or grant attachment access. Deleted editor files go to .aios-trash.`,
+        buttons: ['Cancel', 'Allow folder'], defaultId: 0, cancelId: 0,
+      });
+      if (response !== 1) return false;
+      await fileAccess.grantWorkspace(target);
+      return true;
+    })().finally(() => pendingWorkspaceApprovals.delete(target));
+    pendingWorkspaceApprovals.set(target, decision);
+  }
+  return pendingWorkspaceApprovals.get(target);
+});
+
 // Native folder picker (used by Orchestra: project root, agent working dir, card overrides)
 ipcMain.handle('dialog:pick-folder', async (_e, opts = {}) => {
   const win = BrowserWindow.getFocusedWindow() || mainWindow;
@@ -539,7 +563,7 @@ ipcMain.handle('dialog:pick-folder', async (_e, opts = {}) => {
     properties: ['openDirectory', 'createDirectory'],
   });
   if (result.canceled || !result.filePaths.length) return null;
-  return result.filePaths[0];
+  return fileAccess.grantWorkspace(result.filePaths[0]);
 });
 
 // Native file picker (used by DeepDive research attachments). Returns an array
@@ -550,14 +574,14 @@ ipcMain.handle('dialog:pick-files', async (_e, opts = {}) => {
     title: opts.title || 'Attach files',
     properties: ['openFile', 'multiSelections'],
     filters: opts.filters || [
-      { name: 'Documents', extensions: ['pdf', 'docx', 'xlsx', 'xls', 'pptx', 'txt', 'md', 'markdown', 'csv', 'json', 'rtf'] },
+      { name: 'Documents', extensions: ['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'markdown', 'csv', 'json'] },
       { name: 'Code', extensions: ['js', 'ts', 'tsx', 'jsx', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'go', 'rs', 'rb', 'php', 'html', 'css', 'xml', 'yaml', 'yml', 'sql', 'sh'] },
       { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'tif'] },
       { name: 'All Files', extensions: ['*'] },
     ],
   });
   if (result.canceled || !result.filePaths.length) return [];
-  return result.filePaths;
+  return Promise.all(result.filePaths.map(file => fileAccess.grantFile(file)));
 });
 
 // Export a Deep Research report (md/pdf/docx). Shows a save dialog and writes
