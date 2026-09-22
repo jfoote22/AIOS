@@ -373,6 +373,32 @@ interface MobileSelection {
 
 type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'fable' | 'grok' | 'gemini';
 
+// The frontier tier is the default. Which concrete model each tier resolves to
+// is the model store's job, so this does not need touching when a provider
+// ships a new version.
+const DEFAULT_MODEL: ModelProvider = 'fable';
+
+const MODEL_GROUPS: {
+  label: string;
+  dot: string;
+  tiers: { value: ModelProvider; label: string }[];
+}[] = [
+  {
+    label: 'Claude',
+    dot: 'bg-indigo-500',
+    tiers: [
+      { value: 'fable', label: 'Fable' },
+      { value: 'claude', label: 'Opus' },
+      { value: 'anthropic', label: 'Sonnet' },
+    ],
+  },
+  { label: 'ChatGPT', dot: 'bg-emerald-500', tiers: [{ value: 'openai', label: 'Default' }] },
+  { label: 'Grok', dot: 'bg-orange-500', tiers: [{ value: 'grok', label: 'Default' }] },
+  { label: 'Gemini', dot: 'bg-blue-500', tiers: [{ value: 'gemini', label: 'Default' }] },
+];
+
+const MODEL_VALUES: ModelProvider[] = MODEL_GROUPS.flatMap(g => g.tiers.map(t => t.value));
+
 // Build the background context a deep-dive thread should carry into its chat.
 // The Deep Research report lives in `thread.research`, separate from the chat
 // messages, so without this the model has no idea what the thread is about.
@@ -470,7 +496,7 @@ function useThreadChat(
 
 const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const chatSessions = useChatSessions();
-  const [selectedModel, setSelectedModel] = useState<ModelProvider>('grok');
+  const [selectedModel, setSelectedModel] = useState<ModelProvider>(DEFAULT_MODEL);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [selectedText, setSelectedText] = useState<string>('');
@@ -1131,7 +1157,11 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       // Wait a bit for the clear to take effect
       setTimeout(() => {
         // Set model first
-        setSelectedModel(state.selectedModel || 'anthropic');
+        // A dive saved before a tier existed (or after one was removed) must
+        // not leave the picker empty — fall back to the frontier default.
+        setSelectedModel(
+          MODEL_VALUES.includes(state.selectedModel) ? state.selectedModel : DEFAULT_MODEL,
+        );
         
         // Set threads - ensure they have all required properties
         const loadedThreads = (state.threads || []).map((thread: any) => ({
@@ -1798,17 +1828,15 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     return configuredProviders.has(providerForModel(m));
   };
 
-  // The picker names the provider and tier, not the model ID. Which model each
-  // entry resolves to is the model store's job (Models tab), so the menu does
-  // not go stale every time a provider ships a new version.
-  const modelOptions = [
-    { value: 'fable' as ModelProvider,     label: 'Claude · Fable',  dot: 'bg-indigo-600'  },
-    { value: 'claude' as ModelProvider,    label: 'Claude · Opus',   dot: 'bg-indigo-500'  },
-    { value: 'anthropic' as ModelProvider, label: 'Claude · Sonnet', dot: 'bg-indigo-400'  },
-    { value: 'openai' as ModelProvider,    label: 'ChatGPT',         dot: 'bg-emerald-500' },
-    { value: 'grok' as ModelProvider,      label: 'Grok',            dot: 'bg-orange-500'  },
-    { value: 'gemini' as ModelProvider,    label: 'Gemini',          dot: 'bg-blue-500'    },
-  ];
+  // Grouped by provider: the menu shows the provider name, and the tiers under
+  // it where a provider has more than one. Neither carries a model ID — which
+  // model a tier resolves to is the model store's job (Models tab) — so the menu
+  // does not go stale when a provider ships a new version. Tiers are listed most
+  // capable first, matching DEFAULT_MODEL.
+  const modelGroups = MODEL_GROUPS;
+  const modelOptions = modelGroups.flatMap(g =>
+    g.tiers.map(t => ({ value: t.value, label: `${g.label} · ${t.label}`, dot: g.dot })),
+  );
 
   // Compact model picker that lives in the lower input bar. Opens upward so the
   // list doesn't get clipped at the bottom of the screen.
@@ -1831,27 +1859,36 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             {/* Click-away backdrop */}
             <div className="fixed inset-0 z-10" onClick={() => setShowModelMenu(false)} />
             <div className="absolute bottom-full left-0 mb-2 z-20 w-60 bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl overflow-hidden py-1">
-              {modelOptions.map((model) => {
-                const ready = isModelReady(model.value);
-                const isActive = selectedModel === model.value;
-                return (
-                  <button
-                    key={model.value}
-                    type="button"
-                    disabled={!ready}
-                    onClick={() => { setSelectedModel(model.value); setShowModelMenu(false); }}
-                    title={ready ? `Use ${model.label}` : `${providerForModel(model.value)} key not configured — add it in the Models tab`}
-                    className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                      isActive ? 'bg-zinc-800 text-white' : 'text-zinc-300 hover:bg-zinc-800/70 hover:text-white'
-                    } ${!ready ? 'opacity-40 cursor-not-allowed hover:bg-transparent' : ''}`}
-                  >
-                    <span className={`w-2 h-2 rounded-full shrink-0 ${model.dot}`} />
-                    <span className="flex-1 truncate">{model.label}</span>
-                    {!ready && <span className="text-[9px] uppercase tracking-widest text-amber-400 shrink-0">no key</span>}
-                    {isActive && ready && <span className="text-indigo-400 text-xs shrink-0">✓</span>}
-                  </button>
-                );
-              })}
+              {modelGroups.map((group) => (
+                <div key={group.label} className="py-0.5">
+                  <div className="flex items-center gap-2 px-3 pt-1.5 pb-1">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${group.dot}`} />
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">{group.label}</span>
+                  </div>
+                  {group.tiers.map((tier) => {
+                    const ready = isModelReady(tier.value);
+                    const isActive = selectedModel === tier.value;
+                    return (
+                      <button
+                        key={tier.value}
+                        type="button"
+                        disabled={!ready}
+                        onClick={() => { setSelectedModel(tier.value); setShowModelMenu(false); }}
+                        title={ready
+                          ? `Use ${group.label} ${tier.label}`
+                          : `${providerForModel(tier.value)} key not configured — add it in the Models tab`}
+                        className={`w-full flex items-center gap-2 pl-7 pr-3 py-1.5 text-left text-sm transition-colors ${
+                          isActive ? 'bg-zinc-800 text-white' : 'text-zinc-300 hover:bg-zinc-800/70 hover:text-white'
+                        } ${!ready ? 'opacity-40 cursor-not-allowed hover:bg-transparent' : ''}`}
+                      >
+                        <span className="flex-1 truncate">{tier.label}</span>
+                        {!ready && <span className="text-[9px] uppercase tracking-widest text-amber-400 shrink-0">no key</span>}
+                        {isActive && ready && <span className="text-indigo-400 text-xs shrink-0">✓</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
           </>
         )}
