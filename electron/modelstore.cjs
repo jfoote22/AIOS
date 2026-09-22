@@ -16,7 +16,7 @@ const DEFAULTS = {
   claude: 'claude-opus-5',
   anthropic: 'claude-sonnet-5',
   fable: 'claude-fable-5-1',
-  grok: 'grok-4',
+  grok: 'grok-4.7',
   gemini: 'gemini-flash-latest',
   hermes: 'hermes-mac',
 };
@@ -42,6 +42,11 @@ const RETIRED = {
   },
   openai: {
     'gpt-4o': 'gpt-5.6',
+  },
+  grok: {
+    'grok-4': 'grok-4.7',
+    'grok-4.3': 'grok-4.7',
+    'grok-4.5': 'grok-4.7',
   },
 };
 
