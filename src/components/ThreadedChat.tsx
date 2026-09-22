@@ -391,8 +391,11 @@ const MODEL_GROUPS: {
   {
     label: 'Claude',
     dot: 'bg-indigo-500',
+    // Fable is deliberately absent: it needs an Anthropic plan entitlement the
+    // owner's account does not have, so offering it only produced a permissions
+    // error. The `fable` slot and its routing stay in place, so restoring the
+    // entry here is all that is needed if that changes.
     tiers: [
-      { value: 'fable', label: 'Fable' },
       { value: 'claude', label: 'Opus' },
       { value: 'anthropic', label: 'Sonnet' },
     ],

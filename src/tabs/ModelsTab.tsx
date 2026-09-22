@@ -543,7 +543,10 @@ function ModelIdEditor() {
     return unsub;
   }, []);
 
-  const slots: ModelSlot[] = ['openai', 'claude', 'anthropic', 'fable', 'grok', 'gemini'];
+  // 'fable' is omitted deliberately: the DeepDive picker no longer offers that
+  // tier, so a configurable model field for it would be unreachable config.
+  // The slot itself still exists in the model store and in ANTHROPIC_SLOTS.
+  const slots: ModelSlot[] = ['openai', 'claude', 'anthropic', 'grok', 'gemini'];
 
   const handleSave = async (slot: ModelSlot) => {
     const draft = (drafts[slot] ?? '').trim();
