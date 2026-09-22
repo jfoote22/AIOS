@@ -15,7 +15,7 @@
     "electron:build": "vite build && electron-builder",
     "dist": "vite build && electron-builder --publish never",
     "lint": "tsc --noEmit",
-    "test": "node --test scripts/security.test.cjs scripts/file-access.test.cjs scripts/document-parser.test.cjs scripts/chat-stream.test.cjs && node --experimental-strip-types --test scripts/mobile-credentials.test.ts scripts/chat-session.test.ts scripts/memory-retry.test.ts && node scripts/test-sqlite.cjs",
+    "test": "node --test scripts/security.test.cjs scripts/file-access.test.cjs scripts/document-parser.test.cjs scripts/chat-stream.test.cjs && node --experimental-strip-types --test scripts/mobile-credentials.test.ts scripts/chat-session.test.ts scripts/memory-retry.test.ts scripts/chat-ui.test.ts && node scripts/test-sqlite.cjs",
     "test:electron": "electron scripts/security-smoke.cjs && electron scripts/ingest-smoke.cjs",
     "test:native": "node scripts/test-native.cjs",
     "check:electron": "node scripts/check-electron.cjs",

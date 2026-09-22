@@ -1,11 +1,14 @@
-import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode, type ChangeEvent, type FormEvent } from 'react';
+import { createContext, createElement, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode, type ChangeEvent, type FormEvent } from 'react';
 import { ChatSessions, type ChatMessage, type ChatOptions } from './chatSession.ts';
 
 const SessionsContext = createContext<ChatSessions | null>(null);
 export function ChatSessionProvider({ children }: { children: ReactNode }) {
   const [sessions] = useState(() => new ChatSessions());
   useEffect(() => () => sessions.stopAll(), [sessions]);
-  return <SessionsContext.Provider value={sessions}>{children}</SessionsContext.Provider>;
+  // createElement rather than JSX so this module is a .ts file: Node's type
+  // stripping does not transform JSX, and keeping it strippable is what lets
+  // the hook be exercised by a real React test without a build step.
+  return createElement(SessionsContext.Provider, { value: sessions }, children);
 }
 export function useChatSessions() {
   const sessions = useContext(SessionsContext);
