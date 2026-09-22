@@ -110,7 +110,72 @@ async function buildVisionExtractor() {
   return null;
 }
 
-function buildGrokSystemPrompt({ showReasoning, mode }) {
+// ── Persona: a provider-neutral style layer ──────────────────────────────────
+// Personas apply to EVERY provider, not just Grok. The user picks one style and
+// gets it whether the reply comes from Claude, ChatGPT, Grok or Gemini, so the
+// assistant's voice does not change when they switch models mid-conversation.
+//
+// Persona is chosen per-message and can change mid-conversation. The model sees
+// its own earlier replies in the history and tends to keep imitating their
+// style, so every persona ends with an explicit override clause telling it to
+// ignore the tone/format of prior messages from THIS reply on.
+const PERSONA_OVERRIDE =
+  ' IMPORTANT: This style governs your next reply and every reply after it. ' +
+  'Ignore and override the tone, length, and formatting of any earlier ' +
+  'messages in this conversation — even if your own previous answers used a ' +
+  'completely different style. Switch fully to this style now.';
+
+function buildPersonaSystem(persona) {
+  switch (persona) {
+    case 'fun':      return "Answer in Fun mode — witty and irreverent, in the spirit of the Hitchhiker's Guide to the Galaxy. Lean into clever jokes, playful sarcasm, and entertaining asides while staying genuinely helpful and accurate." + PERSONA_OVERRIDE;
+    case 'creative': return 'Answer in Creative mode. Think laterally: offer imaginative, original, out-of-the-box ideas, vivid analogies, and unexpected angles, while keeping the underlying substance accurate and useful.' + PERSONA_OVERRIDE;
+    case 'precise':  return 'Answer in Precise mode. Prioritize accuracy and clarity: give well-structured, detailed, factual answers in complete sentences. Be thorough and specific, define key terms, and avoid humor, hedging, and filler.' + PERSONA_OVERRIDE;
+    case 'caveman':  return 'Answer in Caveman mode. Talk like primitive caveman: very short, blunt sentences. Few words. Drop "the", "a", "is", and filler. Grunt-style speech — but answer must still be correct, efficient, and effective. Example: "Code broke. Missing comma line 5. Add comma. Fixed. Good."' + PERSONA_OVERRIDE;
+    default:         return 'Answer in Normal mode: clear, well-structured responses in full sentences with a light touch of wit when it fits.' + PERSONA_OVERRIDE;
+  }
+}
+
+// A short, recency-weighted style directive appended to ONLY the latest user
+// message. The system prompt sets the persona, but when a conversation was
+// started in one style (e.g. caveman) the model tends to keep imitating its own
+// earlier replies. Putting the directive on the most recent turn — the highest-
+// weighted position — reliably overrides that without touching the history.
+function buildPersonaSteer(persona) {
+  switch (persona) {
+    case 'fun':      return '[Answer THIS message in Fun mode: witty and playful with jokes — ignore the style of earlier replies.]';
+    case 'creative': return '[Answer THIS message in Creative mode: imaginative and out-of-the-box — ignore the style of earlier replies.]';
+    case 'precise':  return '[Answer THIS message in Precise mode: detailed, well-structured, factual, no filler — ignore the style of earlier replies.]';
+    case 'caveman':  return '[Answer THIS message in Caveman mode: very short, blunt, primitive grunt-speech — ignore the style of earlier replies.]';
+    default:         return '[Answer THIS message in Normal mode: clear, well-structured full sentences — ignore the style of earlier replies.]';
+  }
+}
+
+// Compose a route's own system prompt with the selected persona.
+function withPersona(base, persona) {
+  return `${base}
+
+${buildPersonaSystem(persona)}`;
+}
+
+// ── Grok response mode: how much work to do, orthogonal to persona ───────────
+// These mirror the mode names in xAI's own Grok interface. They are implemented
+// as system-prompt directives — the chat API takes a model id and messages, not
+// a mode parameter — so they shape how the configured Grok model answers. Heavy
+// in particular is a prompt directive, NOT xAI's paid multi-agent Heavy tier;
+// reaching that requires a model id that grants it, set in the Models tab.
+function buildGrokModeDirective(mode) {
+  switch (mode) {
+    case 'fast':   return 'Work in Fast mode: answer immediately and briefly — lead with the direct answer, skip preamble and restating the question. If something is genuinely uncertain, say so in a clause, not a paragraph.';
+    case 'expert': return 'Work in Expert mode: answer as a domain specialist writing for another specialist — precise terminology, explicit assumptions, quantities and tradeoffs where they matter, and the reasoning behind the conclusion rather than only the conclusion.';
+    case 'build':  return 'Work in Build mode: lead with working code, commands, or configuration rather than prose about them. State assumptions inline as comments, note the failure modes that actually bite, and keep explanation to what the reader needs to run it.';
+    case 'heavy':  return 'Work in Heavy mode: take the hardest reading of the question and work it thoroughly — consider several approaches before committing, check your own reasoning for errors, surface edge cases and where the answer could be wrong, then give a complete answer. Prefer being right and long over quick and thin.';
+    default:       return 'Work in Auto mode: judge the depth the question deserves and match it — brief for simple questions, thorough for hard ones.';
+  }
+}
+
+// The Think Mode transcript format is Grok-specific and replaces the normal
+// system prompt entirely, so it is checked before persona/mode composition.
+function buildGrokSystemPrompt({ showReasoning, mode, persona }) {
   if (showReasoning) {
     return `You are Grok4, a witty and helpful AI assistant created by X.AI. When responding, you MUST show your complete thinking process using this exact format:
 
@@ -127,45 +192,10 @@ function buildGrokSystemPrompt({ showReasoning, mode }) {
 
 Always show your work like on grok.com's Think Mode. Be thorough in your reasoning process, even for simple questions.`;
   }
-  // Persona is chosen per-message and can change mid-conversation. The model
-  // sees its own earlier replies in the history and tends to keep imitating
-  // their style, so every persona ends with an explicit override clause that
-  // tells it to ignore the tone/format of prior messages from THIS reply on.
-  const OVERRIDE =
-    ' IMPORTANT: This style governs your next reply and every reply after it. ' +
-    'Ignore and override the tone, length, and formatting of any earlier ' +
-    'messages in this conversation — even if your own previous answers used a ' +
-    'completely different style. Switch fully to this style now.';
-
-  // These mirror the mode names in xAI's own Grok interface. They are
-  // implemented here as system-prompt directives — the chat API takes a model
-  // id and messages, not a mode parameter — so they shape how the configured
-  // Grok model answers. Heavy in particular is a prompt directive, NOT xAI's
-  // paid multi-agent Heavy tier; reaching that requires a model id that grants
-  // it, set in the Models tab.
-  switch (mode) {
-    case 'fast':   return 'You are Grok in Fast mode. Answer immediately and briefly: lead with the direct answer, keep it to a few sentences, skip preamble, caveats, and restating the question. Accuracy still matters — if something is genuinely uncertain, say so in a clause, not a paragraph.' + OVERRIDE;
-    case 'expert': return 'You are Grok in Expert mode. Answer as a domain specialist writing for another specialist: precise terminology, explicit assumptions, quantities and tradeoffs where they matter, and the reasoning behind the conclusion rather than only the conclusion. No hedging, no filler, no flattery.' + OVERRIDE;
-    case 'build':  return 'You are Grok in Build mode, helping construct something concrete. Lead with working code, commands, or a config rather than prose about them. State assumptions inline as comments, note the failure modes that actually bite, and keep explanation to what the reader needs to run it.' + OVERRIDE;
-    case 'heavy':  return 'You are Grok in Heavy mode. Take the hardest reading of the question and work it thoroughly: consider several approaches before committing, check your own reasoning for errors, surface the edge cases and where the answer could be wrong, and only then give a complete, well-structured answer. Prefer being right and long over being quick and thin.' + OVERRIDE;
-    // 'auto' and anything unrecognized: let the model pick its own register.
-    default:       return 'You are Grok, a helpful AI assistant by xAI. Judge the depth the question deserves and match it — brief for simple questions, thorough for hard ones. Write clear, well-structured responses with a light touch of wit when it fits.' + OVERRIDE;
-  }
-}
-
-// A short, recency-weighted style directive appended to ONLY the latest user
-// message. The system prompt sets the persona, but when a conversation was
-// started in one style (e.g. caveman) the model tends to keep imitating its own
-// earlier replies. Putting the directive on the most recent turn — the highest-
-// weighted position — reliably overrides that without touching the history.
-function buildGrokSteer(mode) {
-  switch (mode) {
-    case 'fun':      return '[Answer THIS message in Fun mode: witty and playful with jokes — ignore the style of earlier replies.]';
-    case 'creative': return '[Answer THIS message in Creative mode: imaginative and out-of-the-box — ignore the style of earlier replies.]';
-    case 'precise':  return '[Answer THIS message in Precise mode: detailed, well-structured, factual, no filler — ignore the style of earlier replies.]';
-    case 'caveman':  return '[Answer THIS message in Caveman mode: very short, blunt, primitive grunt-speech — ignore the style of earlier replies.]';
-    default:         return '[Answer THIS message in Normal mode: clear, well-structured full sentences — ignore the style of earlier replies.]';
-  }
+  return withPersona(
+    `You are Grok, a helpful AI assistant by xAI. ${buildGrokModeDirective(mode)}`,
+    persona,
+  );
 }
 
 // Return a copy of `messages` with `steer` appended to the most recent user
@@ -610,11 +640,15 @@ function start({ development = false, approveAgentTool } = {}) {
 
   // --- OpenAI chat (model ID configurable via Models tab) ---
   app.post('/api/openai/chat', streamHandler(
-    ({ createOpenAI }) => {
+    ({ persona, createOpenAI }) => {
       const key = getProviderKey('openai');
       if (!key) throw new Error('OpenAI key not configured. Add it in Models tab.');
       const client = createOpenAI({ apiKey: key });
-      return { model: client.chat(getModelId('openai')), system: 'You are a helpful AI assistant' };
+      return {
+        model: client.chat(getModelId('openai')),
+        system: withPersona('You are a helpful AI assistant.', persona),
+        steer: buildPersonaSteer(persona),
+      };
     }
   ));
 
@@ -624,22 +658,26 @@ function start({ development = false, approveAgentTool } = {}) {
 
   // --- Anthropic chat (model IDs for Opus/Sonnet/Fable variants, configurable via Models tab) ---
   app.post('/api/anthropic/chat', streamHandler(
-    ({ variant, createAnthropic }) => {
+    ({ variant, persona, createAnthropic }) => {
       const key = getProviderKey('anthropic');
       if (!key) throw new Error('Anthropic key not configured. Add it in Models tab.');
       const client = createAnthropic({ apiKey: key });
       const slot = ANTHROPIC_SLOTS[variant] || 'claude';
-      return { model: client(getModelId(slot)), system: 'You are a helpful AI assistant. You provide thoughtful, accurate, and engaging responses.' };
+      return {
+        model: client(getModelId(slot)),
+        system: withPersona('You are a helpful AI assistant. You provide thoughtful, accurate, and engaging responses.', persona),
+        steer: buildPersonaSteer(persona),
+      };
     }
   ));
 
   // --- Grok chat (X.AI, OpenAI-compatible; model ID configurable via Models tab) ---
   app.post('/api/grok/chat', streamHandler(
-    ({ showReasoning, mode, createOpenAI }) => {
+    ({ showReasoning, mode, persona, createOpenAI }) => {
       const key = getProviderKey('grok');
       if (!key) throw new Error('Grok (xAI) key not configured. Add it in Models tab.');
       const client = createOpenAI({ baseURL: 'https://api.x.ai/v1', apiKey: key });
-      return { model: client.chat(getModelId('grok')), system: buildGrokSystemPrompt({ showReasoning, mode }), steer: buildGrokSteer(mode) };
+      return { model: client.chat(getModelId('grok')), system: buildGrokSystemPrompt({ showReasoning, mode, persona }), steer: buildPersonaSteer(persona) };
     }
   ));
 
@@ -1679,7 +1717,7 @@ function start({ development = false, approveAgentTool } = {}) {
   app.post('/api/grok-agent/chat', async (req, res) => {
     let child = null;
     try {
-      const { messages = [], showReasoning = false, mode = 'normal', context } = req.body || {};
+      const { messages = [], showReasoning = false, mode = 'auto', persona = 'normal', context } = req.body || {};
       const last = messages[messages.length - 1];
       if (!last || last.role !== 'user') {
         return res.status(400).json({ error: 'Last message must be from user.' });
@@ -1689,14 +1727,14 @@ function start({ development = false, approveAgentTool } = {}) {
         `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`
       ).join('\n\n');
       // Recency reinforcement so a mid-conversation persona switch overrides the
-      // style of earlier replies (see appendSteer / buildGrokSteer).
-      const steeredLast = `${last.content}\n\n${buildGrokSteer(mode)}`;
+      // style of earlier replies (see appendSteer / buildPersonaSteer).
+      const steeredLast = `${last.content}\n\n${buildPersonaSteer(persona)}`;
       const prompt = history ? `${history}\n\nUser: ${steeredLast}` : steeredLast;
 
       // Reasoning is delivered via real `thought` events, so the system prompt
       // never needs the inline THINKING/ANSWER scaffold — pass showReasoning:false.
       // Any background context (e.g. a Deep Research report) is folded in too.
-      const systemPrompt = withContext(buildGrokSystemPrompt({ showReasoning: false, mode }), context);
+      const systemPrompt = withContext(buildGrokSystemPrompt({ showReasoning: false, mode, persona }), context);
 
       // Grok Build with a grok.com login auto-selects the model for the plan.
       // Override with AIOS_GROK_MODEL (e.g. `grok-composer-2.5-fast`) if desired.
@@ -1810,7 +1848,7 @@ function start({ development = false, approveAgentTool } = {}) {
   // Vercel AI data-stream protocol (same streamPart codes as the CLI routes).
   app.post('/api/gemini/chat', async (req, res) => {
     try {
-      const { messages = [], context } = req.body || {};
+      const { messages = [], persona = 'normal', context } = req.body || {};
       const last = messages[messages.length - 1];
       if (!last || last.role !== 'user') {
         return res.status(400).json({ error: 'Last message must be from user.' });
@@ -1829,7 +1867,7 @@ function start({ development = false, approveAgentTool } = {}) {
         parts: [{ text: String(m.content ?? '') }],
       }));
       const systemInstruction = withContext(
-        'You are a helpful AI assistant. Respond conversationally and concisely.',
+        withPersona('You are a helpful AI assistant. Respond conversationally and concisely.', persona),
         context,
       );
 

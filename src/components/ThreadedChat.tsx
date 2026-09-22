@@ -379,6 +379,10 @@ type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'fable' | 'grok' | 'gem
 // does not need touching when a provider ships a new version.
 const DEFAULT_MODEL: ModelProvider = 'claude';
 
+// Response styles applied to whichever provider is selected.
+type Persona = 'normal' | 'fun' | 'creative' | 'precise' | 'caveman';
+const PERSONAS: Persona[] = ['normal', 'fun', 'creative', 'precise', 'caveman'];
+
 const MODEL_GROUPS: {
   label: string;
   dot: string;
@@ -431,6 +435,7 @@ function useThreadChat(
   threadId: string,
   initialMessages?: Message[],
   grokMode: string = 'auto',
+  persona: Persona = 'normal',
   anthropicAuthMode: AnthropicAuthMode = 'api',
   openaiAuthMode: AuthMode = 'api',
   grokAuthMode: AuthMode = 'api',
@@ -471,6 +476,7 @@ function useThreadChat(
     body: {
       showReasoning,
       ...(contextText ? { context: contextText } : {}),
+      persona,
       ...(selectedModel === 'grok' && { mode: grokMode }),
       ...(selectedModel === 'claude' && { variant: 'opus' }),
       ...(selectedModel === 'anthropic' && { variant: 'sonnet' }),
@@ -507,6 +513,9 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const [mainShowReasoning, setMainShowReasoning] = useState(false);
 
   const [grokMode, setGrokMode] = useState<'auto' | 'fast' | 'expert' | 'build' | 'heavy'>('auto');
+  // Persona is provider-neutral: the chosen voice follows the conversation
+  // across every model, so switching providers mid-dive does not change it.
+  const [persona, setPersona] = useState<Persona>('normal');
 
   // Add state for thread expansion
   const [expandedThread, setExpandedThread] = useState<string | 'main' | null>('main');
@@ -716,6 +725,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     api: getApiEndpoint(selectedModel),
     body: {
       showReasoning: mainShowReasoning,
+      persona,
       ...(selectedModel === 'grok' && { mode: grokMode }),
       ...(selectedModel === 'claude' && { variant: 'opus' }),
       ...(selectedModel === 'anthropic' && { variant: 'sonnet' }),
@@ -2000,6 +2010,28 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
           </div>
         )}
 
+        {/* Response persona — applies to every provider, not just Grok, so the
+            assistant's voice survives switching models mid-conversation. */}
+        {!isThread && (
+          <div className="flex gap-2 flex-wrap items-center">
+            <span className="text-[10px] uppercase tracking-widest text-zinc-600 mr-1">Style</span>
+            {PERSONAS.map(p => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setPersona(p)}
+                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 border ${
+                  persona === p
+                    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50'
+                    : 'bg-zinc-900/40 text-zinc-500 hover:bg-zinc-800 hover:text-white border-zinc-800'
+                }`}
+              >
+                {p.charAt(0).toUpperCase() + p.slice(1)}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Input Form */}
         <form onSubmit={handleSubmit} className="w-full flex gap-3">
           <input
@@ -2236,7 +2268,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     const threadContext = buildThreadContext(thread);
 
     // Create a dedicated, isolated chat instance for this specific thread with initial messages
-    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode, openaiAuthMode, grokAuthMode, geminiAuthMode, threadContext);
+    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, persona, anthropicAuthMode, openaiAuthMode, grokAuthMode, geminiAuthMode, threadContext);
     
     // Store the thread chat instance reference for accessing messages during save
     React.useEffect(() => {

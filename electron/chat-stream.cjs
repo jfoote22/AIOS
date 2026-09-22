@@ -27,11 +27,11 @@ function createChatStreamHandler({ buildModel, loadAi, withContext, appendSteer,
       if (!res.write(frame(code, value))) await once(res, 'drain', { signal: controller.signal });
     };
     try {
-      const { messages, showReasoning = false, mode = 'normal', variant, context } = req.body || {};
+      const { messages, showReasoning = false, mode = 'auto', persona = 'normal', variant, context } = req.body || {};
       const clean = validateChatMessages(messages);
       if (context !== undefined && (typeof context !== 'string' || Buffer.byteLength(context) > 512 * 1024)) throw Object.assign(new Error('Invalid or oversized background context.'), { status: 400 });
       const { ai, createOpenAI, createAnthropic } = await loadAi();
-      const { model, system, steer } = buildModel({ showReasoning, mode, variant, createOpenAI, createAnthropic });
+      const { model, system, steer } = buildModel({ showReasoning, mode, persona, variant, createOpenAI, createAnthropic });
       if (controller.signal.aborted) return;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.setHeader('x-vercel-ai-data-stream', 'v1');

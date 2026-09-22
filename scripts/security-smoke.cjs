@@ -9,7 +9,10 @@ const { ipcMain, protectWindow, installApiTransport } = require('../electron/ren
 const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aios-security-smoke-')));
 app.setPath('userData', profile);
 app.commandLine.appendSwitch('disable-gpu');
-const timeout = setTimeout(() => { console.error('Electron smoke timed out.'); app.exit(1); }, 45000);
+// Must exceed the document parser's own deadline (60s in document-parser.cjs),
+// or a slow parse outlives this guard and kills the run instead of failing
+// cleanly inside the test it belongs to.
+const timeout = setTimeout(() => { console.error('Electron smoke timed out.'); app.exit(1); }, 120000);
 const originalFetch = globalThis.fetch;
 globalThis.fetch = (input, options) => {
   const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
