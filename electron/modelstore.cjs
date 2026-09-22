@@ -12,7 +12,7 @@ const path = require('path');
 const fs = require('fs');
 
 const DEFAULTS = {
-  openai: 'gpt-4o',
+  openai: 'gpt-5.6',
   claude: 'claude-opus-5',
   anthropic: 'claude-sonnet-5',
   fable: 'claude-fable-5-1',
@@ -24,6 +24,11 @@ const DEFAULTS = {
 // Retired model IDs → their replacement. A stored value matching a retired ID
 // is auto-upgraded on read (and re-persisted), so users who had the previous
 // default don't get pinned to an old model.
+//
+// Defaults prefer a provider's floating alias where one exists (gpt-5.6,
+// gemini-flash-latest) so a new version is picked up without a release. Where a
+// provider publishes only pinned ids (Anthropic, xAI), the entries below carry
+// users forward instead.
 const RETIRED = {
   claude: {
     'claude-opus-4-7': 'claude-opus-5',
@@ -34,6 +39,9 @@ const RETIRED = {
   },
   fable: {
     'claude-fable-5': 'claude-fable-5-1',
+  },
+  openai: {
+    'gpt-4o': 'gpt-5.6',
   },
 };
 
