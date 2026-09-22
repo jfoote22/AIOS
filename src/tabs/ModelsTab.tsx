@@ -543,7 +543,7 @@ function ModelIdEditor() {
     return unsub;
   }, []);
 
-  const slots: ModelSlot[] = ['openai', 'claude', 'anthropic', 'grok', 'gemini'];
+  const slots: ModelSlot[] = ['openai', 'claude', 'anthropic', 'fable', 'grok', 'gemini'];
 
   const handleSave = async (slot: ModelSlot) => {
     const draft = (drafts[slot] ?? '').trim();

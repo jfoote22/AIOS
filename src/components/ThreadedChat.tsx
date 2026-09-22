@@ -371,7 +371,7 @@ interface MobileSelection {
   threadId?: string;
 }
 
-type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'grok' | 'gemini';
+type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'fable' | 'grok' | 'gemini';
 
 // Build the background context a deep-dive thread should carry into its chat.
 // The Deep Research report lives in `thread.research`, separate from the chat
@@ -418,6 +418,7 @@ function useThreadChat(
         return apiUrl(openaiAuthMode === 'subscription' ? '/api/codex-agent/chat' : '/api/openai/chat');
       case 'claude':
       case 'anthropic':
+      case 'fable':
         return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
       case 'grok':
         return apiUrl(grokAuthMode === 'subscription' ? '/api/grok-agent/chat' : '/api/grok/chat');
@@ -446,6 +447,7 @@ function useThreadChat(
       ...(selectedModel === 'grok' && { mode: grokMode }),
       ...(selectedModel === 'claude' && { variant: 'opus' }),
       ...(selectedModel === 'anthropic' && { variant: 'sonnet' }),
+      ...(selectedModel === 'fable' && { variant: 'fable' }),
     },
     onError: (error) => {
       console.error(`Thread ${threadId} chat error:`, error);
@@ -671,6 +673,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         return apiUrl(openaiAuthMode === 'subscription' ? '/api/codex-agent/chat' : '/api/openai/chat');
       case 'claude':
       case 'anthropic':
+      case 'fable':
         return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
       case 'grok':
         return apiUrl(grokAuthMode === 'subscription' ? '/api/grok-agent/chat' : '/api/grok/chat');
@@ -689,6 +692,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       ...(selectedModel === 'grok' && { mode: grokMode }),
       ...(selectedModel === 'claude' && { variant: 'opus' }),
       ...(selectedModel === 'anthropic' && { variant: 'sonnet' }),
+      ...(selectedModel === 'fable' && { variant: 'fable' }),
     }
   });
 
@@ -1773,7 +1777,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   useEffect(() => onModelsChange(setConfiguredModels), []);
   const [configuredProviders, setConfiguredProviders] = useState<Set<ProviderId>>(getConfigured());
   useEffect(() => onConfiguredChange(setConfiguredProviders), []);
-  const labelFor = (slot: ModelSlot, fallback: string) => configuredModels[slot]?.trim() || fallback;
   // Model picker dropdown (lives near the chat input)
   const [showModelMenu, setShowModelMenu] = useState(false);
 
@@ -1782,25 +1785,29 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     if (m === 'openai') return 'openai';
     if (m === 'grok') return 'grok';
     if (m === 'gemini') return 'gemini';
-    return 'anthropic'; // 'claude' (Opus) and 'anthropic' (Sonnet) both use the Anthropic key
+    return 'anthropic'; // 'claude' (Opus), 'anthropic' (Sonnet) and 'fable' share the Anthropic key
   };
 
   const isModelReady = (m: ModelProvider) => {
     // Subscription modes bypass the per-provider API key requirement —
     // the local CLI (claude / codex / grok / gemini) supplies auth from the user's plan.
-    if ((m === 'claude' || m === 'anthropic') && anthropicAuthMode === 'subscription') return true;
+    if ((m === 'claude' || m === 'anthropic' || m === 'fable') && anthropicAuthMode === 'subscription') return true;
     if (m === 'openai' && openaiAuthMode === 'subscription') return true;
     if (m === 'grok' && grokAuthMode === 'subscription') return true;
     if (m === 'gemini' && geminiAuthMode === 'subscription') return true;
     return configuredProviders.has(providerForModel(m));
   };
 
+  // The picker names the provider and tier, not the model ID. Which model each
+  // entry resolves to is the model store's job (Models tab), so the menu does
+  // not go stale every time a provider ships a new version.
   const modelOptions = [
-    { value: 'openai' as ModelProvider,    label: labelFor('openai', 'GPT-4o'),               dot: 'bg-emerald-500' },
-    { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.8'),      dot: 'bg-indigo-500'  },
-    { value: 'anthropic' as ModelProvider, label: labelFor('anthropic', 'Claude Sonnet 4.6'), dot: 'bg-indigo-400'  },
-    { value: 'grok' as ModelProvider,      label: labelFor('grok', 'Grok 4'),                 dot: 'bg-orange-500'  },
-    { value: 'gemini' as ModelProvider,    label: labelFor('gemini', 'Gemini Flash'),         dot: 'bg-blue-500'    },
+    { value: 'fable' as ModelProvider,     label: 'Claude · Fable',  dot: 'bg-indigo-600'  },
+    { value: 'claude' as ModelProvider,    label: 'Claude · Opus',   dot: 'bg-indigo-500'  },
+    { value: 'anthropic' as ModelProvider, label: 'Claude · Sonnet', dot: 'bg-indigo-400'  },
+    { value: 'openai' as ModelProvider,    label: 'ChatGPT',         dot: 'bg-emerald-500' },
+    { value: 'grok' as ModelProvider,      label: 'Grok',            dot: 'bg-orange-500'  },
+    { value: 'gemini' as ModelProvider,    label: 'Gemini',          dot: 'bg-blue-500'    },
   ];
 
   // Compact model picker that lives in the lower input bar. Opens upward so the

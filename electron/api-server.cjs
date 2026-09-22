@@ -581,7 +581,7 @@ function start({ development = false, approveAgentTool } = {}) {
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 1200,
@@ -611,13 +611,17 @@ function start({ development = false, approveAgentTool } = {}) {
     }
   ));
 
-  // --- Anthropic chat (model IDs for Opus/Sonnet variants configurable via Models tab) ---
+  // Anthropic request `variant` -> model-store slot. Each slot is configurable
+  // in the Models tab; unknown variants fall back to the Opus slot.
+  const ANTHROPIC_SLOTS = { opus: 'claude', sonnet: 'anthropic', fable: 'fable' };
+
+  // --- Anthropic chat (model IDs for Opus/Sonnet/Fable variants, configurable via Models tab) ---
   app.post('/api/anthropic/chat', streamHandler(
     ({ variant, createAnthropic }) => {
       const key = getProviderKey('anthropic');
       if (!key) throw new Error('Anthropic key not configured. Add it in Models tab.');
       const client = createAnthropic({ apiKey: key });
-      const slot = variant === 'sonnet' ? 'anthropic' : 'claude';
+      const slot = ANTHROPIC_SLOTS[variant] || 'claude';
       return { model: client(getModelId(slot)), system: 'You are a helpful AI assistant. You provide thoughtful, accurate, and engaging responses.' };
     }
   ));
@@ -690,7 +694,7 @@ function start({ development = false, approveAgentTool } = {}) {
       ).join('\n\n');
       const prompt = history ? `${history}\n\nUser: ${last.content}` : last.content;
 
-      const slot = variant === 'sonnet' ? 'anthropic' : 'claude';
+      const slot = ANTHROPIC_SLOTS[variant] || 'claude';
       const modelId = getModelId(slot);
 
       const { query } = await import('@anthropic-ai/claude-agent-sdk');
@@ -809,7 +813,7 @@ function start({ development = false, approveAgentTool } = {}) {
         }
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 4096,
@@ -893,7 +897,7 @@ function start({ development = false, approveAgentTool } = {}) {
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 3072,
@@ -1069,7 +1073,7 @@ function start({ development = false, approveAgentTool } = {}) {
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 1024,
@@ -1187,7 +1191,7 @@ function start({ development = false, approveAgentTool } = {}) {
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 1536,
@@ -1549,7 +1553,7 @@ function start({ development = false, approveAgentTool } = {}) {
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId, max_tokens: 1024, system: systemPrompt,
           messages: [{ role: 'user', content: userPrompt }],

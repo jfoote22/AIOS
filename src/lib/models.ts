@@ -1,19 +1,20 @@
 // Renderer-side cache of user-configured model IDs.
 // Slots match ThreadedChat's ModelProvider semantics.
 
-export type ModelSlot = 'openai' | 'claude' | 'anthropic' | 'grok' | 'gemini' | 'hermes';
+export type ModelSlot = 'openai' | 'claude' | 'anthropic' | 'fable' | 'grok' | 'gemini' | 'hermes';
 
 export const SLOT_LABELS: Record<ModelSlot, { provider: string; variant: string; emoji: string }> = {
   openai:    { provider: 'OpenAI',    variant: 'ChatGPT', emoji: '🧠' },
   claude:    { provider: 'Anthropic', variant: 'Opus',    emoji: '🤖' },
   anthropic: { provider: 'Anthropic', variant: 'Sonnet',  emoji: '🎯' },
+  fable:     { provider: 'Anthropic', variant: 'Fable',   emoji: '🔮' },
   grok:      { provider: 'xAI',       variant: 'Grok',    emoji: '⚡' },
   gemini:    { provider: 'Google',    variant: 'Gemini',  emoji: '✨' },
   hermes:    { provider: 'Hermes',    variant: 'Gateway', emoji: 'H' },
 };
 
-let cache: Record<ModelSlot, string> = { openai: '', claude: '', anthropic: '', grok: '', gemini: '', hermes: '' };
-let defaults: Record<ModelSlot, string> = { openai: '', claude: '', anthropic: '', grok: '', gemini: '', hermes: '' };
+let cache: Record<ModelSlot, string> = { openai: '', claude: '', anthropic: '', fable: '', grok: '', gemini: '', hermes: '' };
+let defaults: Record<ModelSlot, string> = { openai: '', claude: '', anthropic: '', fable: '', grok: '', gemini: '', hermes: '' };
 const listeners = new Set<(c: Record<ModelSlot, string>) => void>();
 
 export function getCachedModels(): Record<ModelSlot, string> {
