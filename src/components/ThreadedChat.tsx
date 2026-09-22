@@ -373,10 +373,11 @@ interface MobileSelection {
 
 type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'fable' | 'grok' | 'gemini';
 
-// The frontier tier is the default. Which concrete model each tier resolves to
-// is the model store's job, so this does not need touching when a provider
-// ships a new version.
-const DEFAULT_MODEL: ModelProvider = 'fable';
+// Opus is the default: the frontier tier (Fable) costs roughly twice as much
+// per token for work that rarely needs it, and is one click away in the picker.
+// Which concrete model each tier resolves to is the model store's job, so this
+// does not need touching when a provider ships a new version.
+const DEFAULT_MODEL: ModelProvider = 'claude';
 
 const MODEL_GROUPS: {
   label: string;
@@ -429,7 +430,7 @@ function useThreadChat(
   selectedModel: ModelProvider,
   threadId: string,
   initialMessages?: Message[],
-  grokMode: string = 'normal',
+  grokMode: string = 'auto',
   anthropicAuthMode: AnthropicAuthMode = 'api',
   openaiAuthMode: AuthMode = 'api',
   grokAuthMode: AuthMode = 'api',
@@ -505,7 +506,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const [selectedMessageId, setSelectedMessageId] = useState<string>('');
   const [mainShowReasoning, setMainShowReasoning] = useState(false);
 
-  const [grokMode, setGrokMode] = useState<'normal' | 'fun' | 'creative' | 'precise' | 'caveman'>('normal');
+  const [grokMode, setGrokMode] = useState<'auto' | 'fast' | 'expert' | 'build' | 'heavy'>('auto');
 
   // Add state for thread expansion
   const [expandedThread, setExpandedThread] = useState<string | 'main' | null>('main');
@@ -1832,7 +1833,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   // it where a provider has more than one. Neither carries a model ID — which
   // model a tier resolves to is the model store's job (Models tab) — so the menu
   // does not go stale when a provider ships a new version. Tiers are listed most
-  // capable first, matching DEFAULT_MODEL.
+  // capable first; DEFAULT_MODEL picks which one is selected on a fresh dive.
   const modelGroups = MODEL_GROUPS;
   const modelOptions = modelGroups.flatMap(g =>
     g.tiers.map(t => ({ value: t.value, label: `${g.label} · ${t.label}`, dot: g.dot })),
@@ -1979,10 +1980,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
     return (
       <div className="w-full space-y-2">
-        {/* Grok persona / response mode — only in main chat, not in threads */}
+        {/* Grok response mode — only in main chat, not in threads */}
         {selectedModel === 'grok' && !isThread && (
           <div className="flex gap-2 flex-wrap">
-            {(['normal', 'fun', 'creative', 'precise', 'caveman'] as const).map(mode => (
+            {(['auto', 'fast', 'expert', 'build', 'heavy'] as const).map(mode => (
               <button
                 key={mode}
                 type="button"
