@@ -195,3 +195,31 @@ test('research deadline includes DNS resolution and bounds redirect loops', asyn
   await assert.rejects(loop('https://example.com'), /Too many/);
   assert.equal(calls, 6);
 });
+
+test('development CORS exposes the data-stream header to the renderer', async () => {
+  // In development the renderer is served from localhost:3000 while the API
+  // listens on 127.0.0.1, so every chat request is cross-origin. A cross-origin
+  // response exposes only the CORS-safelisted headers to JS, and the chat client
+  // reads x-vercel-ai-data-stream to confirm it is reading the data-stream
+  // protocol. Without Access-Control-Expose-Headers it reads null and rejects a
+  // working stream as "Unsupported chat response" — for every provider at once.
+  const app = express();
+  app.use(localApiGuard({ development: true }));
+  app.post('/api/chat', (_req, res) => {
+    res.setHeader('x-vercel-ai-data-stream', 'v1');
+    res.end('0:"hi"\n');
+  });
+  await withServer(app, async base => {
+    const response = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { ...localAuthHeaders(), Origin: 'http://localhost:3000' },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('access-control-allow-origin'), 'http://localhost:3000');
+    const exposed = (response.headers.get('access-control-expose-headers') || '').toLowerCase();
+    assert.ok(
+      exposed.split(',').map(h => h.trim()).includes('x-vercel-ai-data-stream'),
+      'the data-stream header must be exposed or every chat breaks in development',
+    );
+  });
+});

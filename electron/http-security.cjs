@@ -36,6 +36,13 @@ function localApiGuard({ development = false } = {}) {
       res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      // Cross-origin responses expose only the CORS-safelisted headers to JS.
+      // The chat client checks x-vercel-ai-data-stream to confirm it is reading
+      // the data-stream protocol, and without this it reads null and rejects a
+      // perfectly good stream ("Unsupported chat response"). Only reachable in
+      // development, where the renderer is served from localhost:3000 while the
+      // API listens on 127.0.0.1 — a different origin.
+      res.setHeader('Access-Control-Expose-Headers', 'x-vercel-ai-data-stream');
     }
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     if (!tokensEqual(bearerToken(req), localToken)) {
