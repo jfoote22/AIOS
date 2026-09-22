@@ -5,6 +5,7 @@
 // Runs in the Electron main process.
 
 const { getProviderKey } = require('./keystore.cjs');
+const { getModelId } = require('./modelstore.cjs');
 const { publicFetch } = require('./public-fetch.cjs');
 
 const UA =
@@ -43,6 +44,39 @@ function domainOf(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
+// Provider errors arrive as a raw JSON blob in error.message, which ends up
+// rendered verbatim in the thread. Translate the cases a user can act on.
+function geminiError(e, model) {
+  const raw = e?.message || String(e);
+  let code = e?.status ?? e?.code;
+  let text = raw;
+  try {
+    const parsed = JSON.parse(raw);
+    code = parsed?.error?.code ?? code;
+    text = parsed?.error?.message || raw;
+  } catch { /* not JSON — use the message as-is */ }
+
+  if (code === 429 || /RESOURCE_EXHAUSTED|quota/i.test(text)) {
+    const perDay = /free_tier|FreeTier/i.test(text);
+    return new Error(
+      `Gemini quota exceeded for ${model}. ` +
+      (perDay
+        ? 'This key is on the free tier, which allows only a few requests per day — far less than one Deep Dive needs. Enable billing on the Gemini API key, or choose a different model in the Models tab (quota is per model).'
+        : 'Wait for the quota window to reset, or choose a different model in the Models tab.'),
+    );
+  }
+  if (code === 401 || code === 403) {
+    return new Error(`Gemini rejected the API key for ${model}. Check the key and its model access in the Models tab.`);
+  }
+  if (code === 404) {
+    return new Error(`Gemini model "${model}" is unavailable for this key. Pick another in the Models tab.`);
+  }
+  if (code === 503 || /overload|unavailable/i.test(text)) {
+    return new Error(`Gemini is temporarily overloaded (${model}). Try again shortly.`);
+  }
+  return new Error(`Gemini request failed (${model}): ${text.slice(0, 300)}`);
+}
+
 // Find real, varied, live web links relevant to the selected context.
 async function findLinks(context) {
   const key = getProviderKey('gemini');
@@ -64,11 +98,17 @@ Respond in EXACTLY this format and nothing else:
 <intro>one short paragraph here</intro>
 <json>[{"title":"Page title","url":"https://...","source":"example.com","reason":"one line on why it's relevant to this context"}]</json>`;
 
-  const result = await client.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    config: { tools: [{ googleSearch: {} }] },
-  });
+  const model = getModelId('gemini');
+  let result;
+  try {
+    result = await client.models.generateContent({
+      model,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: { tools: [{ googleSearch: {} }] },
+    });
+  } catch (e) {
+    throw geminiError(e, model);
+  }
 
   const text = result.text || '';
   const intro = parseTag(text, 'intro') || 'Here are real, current resources related to your selection.';
@@ -146,7 +186,7 @@ async function findVideos(context) {
       const { GoogleGenAI } = await import('@google/genai');
       const client = new GoogleGenAI({ apiKey: geminiKey });
       const r = await client.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: getModelId('gemini'),
         contents: [{
           role: 'user',
           parts: [{
@@ -222,4 +262,4 @@ Respond EXACTLY as:
   return { intro: intro || 'Recent, well-received videos on this topic:', items };
 }
 
-module.exports = { findLinks, findVideos };
+module.exports = { findLinks, findVideos, geminiError };
