@@ -200,7 +200,13 @@ function start({ getWebContents } = {}) {
 
 function stop() {
   if (server) {
+    // close() alone only stops NEW connections; it then waits for open ones to
+    // end. Ingest clients use HTTP keep-alive, so an idle socket can hold the
+    // port well past stop() returning — and the Hermes settings toggle restarts
+    // with stop() immediately followed by start(). Dropping live connections is
+    // what actually frees the port for the rebind.
     try { server.close(); } catch {}
+    try { server.closeAllConnections?.(); } catch {}
     server = null;
     currentPort = null;
   }

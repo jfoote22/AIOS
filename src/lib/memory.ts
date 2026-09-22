@@ -14,6 +14,7 @@ import * as db from './db';
 import * as ai from './ai';
 import { emitSnippetsChange } from './snippetStore';
 import type { CapturedItem } from '../components/SnippetEditor';
+import { isRetryDue, nextRetryState } from './memoryRetry';
 
 // Match the imports.ts chunk size so ingested docs chunk the same way.
 const MAX_CHUNK_CHARS = 3500;
@@ -21,33 +22,6 @@ const MAX_CHUNK_CHARS = 3500;
 const ANALYZE_HEAD_CHARS = 12000;
 
 let running = false;
-
-// ── retry policy for transient enrichment failures ───────────────────────────
-// Gemini routinely answers 503 ("high demand") or 429 (quota) for a few seconds.
-// Treating those as permanent stranded 15 notes that had already been delivered
-// successfully: they were marked status:'error' with memoryPending cleared, so
-// no later pass ever looked at them again. Classify instead, and keep retryable
-// failures pending behind an exponential backoff.
-const MAX_MEMORY_RETRIES = 6;
-
-/** Backoff before attempt n (1-based): 30s, 1m, 2m, 4m, 8m, 16m — capped. */
-function retryBackoffMs(attempt: number): number {
-  return Math.min(30_000 * 2 ** (attempt - 1), 16 * 60_000);
-}
-
-/**
- * True for failures worth retrying: rate limits, server-side errors, and
- * transport failures. Anything else (a malformed request, a bad key, an
- * oversized payload) would fail identically forever, so it is marked as an
- * error immediately rather than looping.
- */
-export function isRetryableEnrichError(e: unknown): boolean {
-  const status = Number((e as any)?.status ?? (e as any)?.code ?? (e as any)?.error?.code);
-  if (Number.isFinite(status) && (status === 429 || (status >= 500 && status <= 599))) return true;
-  const msg = ((e as Error)?.message || String(e ?? '')).toLowerCase();
-  if (/\b(429|500|502|503|504)\b/.test(msg)) return true;
-  return /rate.?limit|quota|high demand|overload|timeout|timed out|socket|network|econn|enotfound|eai_again|fetch failed|unavailable/.test(msg);
-}
 
 /**
  * Enrich every pending ingested neuron. Safe to call repeatedly and concurrently
@@ -71,7 +45,7 @@ export async function enrichPendingMemory(): Promise<number> {
       // loop terminates instead of spinning on a note that is failing fast.
       const now = Date.now();
       const pending = all.filter(
-        (s) => s.memoryPending && s.status !== 'ready' && !(s.memoryRetryAt && s.memoryRetryAt > now),
+        (s) => s.memoryPending && s.status !== 'ready' && isRetryDue(s.memoryRetryAt, now),
       );
       if (!pending.length) break;
       for (const item of pending) {
@@ -82,23 +56,15 @@ export async function enrichPendingMemory(): Promise<number> {
           // (downstream reload is debounced, so this coalesces).
           emitSnippetsChange();
         } catch (e) {
-          const message = (e as Error)?.message || String(e);
-          const attempt = (item.memoryRetryCount ?? 0) + 1;
-          const retryable = isRetryableEnrichError(e) && attempt <= MAX_MEMORY_RETRIES;
+          // Retryable failures keep the item pending behind a backoff, on the
+          // same id, so a later sweep updates this row instead of duplicating it.
+          const next = nextRetryState(item.memoryRetryCount, e);
           console.error(
-            `[memory] enrich failed for ${item.id} (attempt ${attempt}${retryable ? ', will retry' : ', giving up'})`,
+            `[memory] enrich failed for ${item.id} (attempt ${next.memoryRetryCount}` +
+              `${next.memoryPending ? ', will retry' : ', giving up'})`,
             e,
           );
-          await db.putSnippet({
-            ...item,
-            // Stay 'analyzing' + pending while retryable so a later pass picks
-            // it up; only a permanent failure clears the flag and parks it.
-            status: retryable ? 'analyzing' : 'error',
-            error: retryable ? undefined : message,
-            memoryPending: retryable,
-            memoryRetryCount: attempt,
-            memoryRetryAt: retryable ? Date.now() + retryBackoffMs(attempt) : undefined,
-          });
+          await db.putSnippet({ ...item, ...next });
         }
       }
     }
