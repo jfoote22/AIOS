@@ -25,6 +25,7 @@ const os = require('node:os');
 const path = require('node:path');
 const sqliteStore = require('./sqlite-store.cjs');
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
+const { getModelId } = require('./modelstore.cjs');
 const { bearerToken, tokensEqual, localAuthHeaders, mobileProxyAllowed } = require('./http-security.cjs');
 
 const DEFAULT_PORT = 8766;
@@ -528,7 +529,7 @@ function buildApp() {
       };
 
       const result = await client.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: getModelId('gemini'),
         contents: [{
           role: 'user',
           parts: [

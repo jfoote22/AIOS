@@ -1,5 +1,7 @@
 // Curated text/vision generation; no caller-supplied tools, URLs, API endpoints,
 // credentials, or arbitrary SDK options cross this boundary.
+const { getModelId } = require('./modelstore.cjs');
+
 function generationInput(body) {
   if (!body || !Array.isArray(body.contents) || !body.contents.length || body.contents.length > 200) {
     throw new Error('Expected 1–200 content messages.');
@@ -34,7 +36,7 @@ function generationInput(body) {
     }
     config.systemInstruction = input.systemInstruction;
   }
-  return { model: 'gemini-2.5-flash', contents, config };
+  return { model: getModelId('gemini'), contents, config };
 }
 
 function registerGeminiGeneration(app, { getProviderKey }) {

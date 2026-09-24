@@ -5,6 +5,7 @@ const http = require('node:http');
 const { localApiGuard, localAuthHeaders, bearerToken, tokensEqual, mobileProxyAllowed } = require('../electron/http-security.cjs');
 const { noToolsPolicy, executionPolicy, agentEnvironment, assertAgentResult } = require('../electron/agent-policy.cjs');
 const { generationInput, registerGeminiGeneration } = require('../electron/gemini-generation.cjs');
+const { getModelId } = require('../electron/modelstore.cjs');
 const { isPublicAddress, resolvePublicUrl, createPublicFetcher } = require('../electron/public-fetch.cjs');
 
 async function withServer(handler, run) {
@@ -120,7 +121,11 @@ test('SDK failure results cannot be reported as successful runs', () => {
 test('Gemini boundary strips arbitrary SDK options and rejects remote file references', () => {
   const input = generationInput({ model: 'untrusted', contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
     config: { tools: [{ googleSearch: {} }], httpOptions: { baseUrl: 'http://attacker.example' }, responseMimeType: 'application/json' } });
-  assert.equal(input.model, 'gemini-2.5-flash');
+  // The model comes from the model store, not the caller — assert the
+  // configured value rather than a pinned id, so this keeps testing the
+  // security property (caller input is ignored) without re-pinning a model.
+  assert.equal(input.model, getModelId('gemini'));
+  assert.notEqual(input.model, 'untrusted');
   assert.equal(input.config.tools, undefined);
   assert.equal(input.config.httpOptions, undefined);
   assert.throws(() => generationInput({ contents: [{ role: 'user', parts: [{ fileData: { fileUri: 'http://localhost' } }] }] }), /inline/);

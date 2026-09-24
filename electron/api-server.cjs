@@ -14,6 +14,7 @@ const { noToolsPolicy, executionPolicy, assertAgentResult } = require('./agent-p
 const { fileAccess } = require('./file-access.cjs');
 
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
+const { promptStream } = require('./agent-prompt.cjs');
 const { getModelId, setModelId } = require('./modelstore.cjs');
 const extract = require('./extract.cjs');
 const research = require('./research.cjs');
@@ -70,7 +71,7 @@ async function buildVisionExtractor() {
     return async (buf, ext) => {
       const mimeType = VISION_EXT_MIME[ext] || 'application/octet-stream';
       const result = await client.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: getModelId('gemini'),
         contents: [{
           role: 'user',
           parts: [
@@ -599,7 +600,7 @@ function start({ development = false, approveAgentTool } = {}) {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: userPrompt,
+          prompt: promptStream(userPrompt),
           options: {
             model: modelId,
             systemPrompt: sysParts.join('\n'),
@@ -749,7 +750,7 @@ function start({ development = false, approveAgentTool } = {}) {
       res.setHeader('Cache-Control', 'no-cache');
 
       const stream = query({
-        prompt,
+        prompt: promptStream(prompt),
         options: {
           model: modelId,
           systemPrompt: withContext('You are a helpful AI assistant. Respond conversationally and concisely.', context),
@@ -836,7 +837,7 @@ function start({ development = false, approveAgentTool } = {}) {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: `${systemPrompt}\n\n${userPrompt}`,
+          prompt: promptStream(`${systemPrompt}\n\n${userPrompt}`),
           options: {
             model: modelId,
             systemPrompt,
@@ -927,7 +928,7 @@ function start({ development = false, approveAgentTool } = {}) {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: userPrompt,
+          prompt: promptStream(userPrompt),
           options: { model: modelId, systemPrompt, ...noToolsPolicy() },
         });
         for await (const msg of stream) {
@@ -1099,7 +1100,7 @@ function start({ development = false, approveAgentTool } = {}) {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: userPrompt,
+          prompt: promptStream(userPrompt),
           options: {
             model: modelId,
             systemPrompt: sysParts.join('\n'),
@@ -1217,7 +1218,7 @@ function start({ development = false, approveAgentTool } = {}) {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: userPrompt,
+          prompt: promptStream(userPrompt),
           options: {
             model: modelId,
             systemPrompt: sysParts.join('\n'),
@@ -1466,7 +1467,7 @@ function start({ development = false, approveAgentTool } = {}) {
       writeText(`• Agent: ${agent.name || agent.slug}\n• Model: ${modelOverride || 'inherit'}\n• Tools: ${allowed.join(', ') || '(none)'} (desktop approval per use)\n• Installed skills/hooks: not loaded automatically\n• Cwd: ${cwd || '(default)'}\n\n`);
 
       const stream = query({
-        prompt: taskPrompt,
+        prompt: promptStream(taskPrompt),
         options: {
           model: modelOverride,
           systemPrompt: agent.systemPrompt,
@@ -1583,7 +1584,7 @@ function start({ development = false, approveAgentTool } = {}) {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: userPrompt,
+          prompt: promptStream(userPrompt),
           options: { model: modelId, systemPrompt, ...noToolsPolicy() },
         });
         for await (const msg of stream) {
