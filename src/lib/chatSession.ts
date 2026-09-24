@@ -118,6 +118,13 @@ export class ChatSessions {
     if (!this.sessions.has(id)) this.sessions.set(id, new ChatSession(messages));
     return this.sessions.get(id)!;
   }
+  /**
+   * The existing session for `id`, or undefined — without creating one.
+   * Saving needs this: get() would manufacture an empty session for a thread
+   * that was never opened, and that empty snapshot would then overwrite the
+   * messages restored from disk.
+   */
+  peek(id: string) { return this.sessions.get(id); }
   remove(id: string) { this.sessions.get(id)?.stop(); this.sessions.delete(id); }
   stopAll() { for (const session of this.sessions.values()) session.stop(); }
   clear() {

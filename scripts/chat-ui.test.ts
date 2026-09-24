@@ -32,7 +32,7 @@ g.IS_REACT_ACT_ENVIRONMENT = true;
 
 const { createElement, useState, act } = await import('react');
 const { createRoot } = await import('react-dom/client');
-const { ChatSessionProvider, useChat } = await import('../src/lib/useChat.ts');
+const { ChatSessionProvider, useChat, useChatSessions } = await import('../src/lib/useChat.ts');
 
 const FINISH = 'd:{"finishReason":"stop","usage":{"promptTokens":1,"completionTokens":1}}\n';
 const HEADERS = { 'x-vercel-ai-data-stream': 'v1' };
@@ -225,4 +225,60 @@ test('stopping mid-stream leaves the partial answer on screen and clears loading
   await act(async () => { chat.setInput('next'); chat.handleSubmit(); });
   await flush();
   assert.equal(chat.isLoading, true, 'a new send works right after a stop');
+});
+
+test('an unmounted thread keeps its messages, so saving a collapsed row is not lossy', async () => {
+  // The save path used to read messages through a ref that ThreadPanel deletes
+  // on unmount, falling back to `threads[].messages` — which nothing ever
+  // populates. Collapsing a row or putting another thread fullscreen unmounts
+  // panels, so any thread not visibly on screen was saved EMPTY and came back
+  // needing to be re-run. Saving now reads the session registry, which outlives
+  // the component.
+  const { pending } = installFetch();
+  const chats: Record<string, any> = {};
+  let sessions: any;
+  let showSecond: (v: boolean) => void = () => {};
+
+  function Harness() {
+    const [shown, set] = useState(true);
+    showSecond = set;
+    return createElement(
+      ChatSessionProvider,
+      null,
+      createElement(Probe, null),
+      createElement(Panel, { id: 'kept', sink: (c: any) => { chats.kept = c; } }),
+      shown ? createElement(Panel, { id: 'hidden', sink: (c: any) => { chats.hidden = c; } }) : null,
+    );
+  }
+  // Reaches the same registry ThreadedChat reads when saving.
+  function Probe() {
+    sessions = useChatSessions();
+    return null;
+  }
+
+  mount(createElement(Harness, null));
+
+  await act(async () => { chats.kept.append({ role: 'user', content: 'Q1' }); });
+  await act(async () => { chats.hidden.append({ role: 'user', content: 'Q2' }); });
+  await flush();
+  act(() => { pending[0].push('first answer'); pending[1].push('second answer'); });
+  await flush();
+  act(() => { pending[0].finish(); pending[1].finish(); });
+  await flush();
+
+  // Collapse the row / go fullscreen elsewhere: the second panel unmounts.
+  await act(async () => { showSecond(false); });
+  await flush();
+
+  const kept = sessions.peek('kept')?.getSnapshot().messages ?? [];
+  const hidden = sessions.peek('hidden')?.getSnapshot().messages ?? [];
+  assert.deepEqual(kept.map((m: any) => m.content), ['Q1', 'first answer']);
+  assert.deepEqual(
+    hidden.map((m: any) => m.content), ['Q2', 'second answer'],
+    'an unmounted thread must still yield its messages, or saving loses it',
+  );
+
+  // peek must not fabricate a session for a thread that was never opened —
+  // an empty snapshot would overwrite messages restored from disk.
+  assert.equal(sessions.peek('never-opened'), undefined);
 });

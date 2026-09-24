@@ -1066,31 +1066,43 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     }
   };
 
+  // Messages for a thread, whether or not its panel is currently mounted.
+  //
+  // ThreadPanel deletes its entry from threadChatRefs on unmount, and a thread's
+  // live messages exist only in its chat session — nothing writes them back into
+  // `threads` state. So reading through the refs meant any thread that was not
+  // visibly mounted at save time was saved EMPTY: collapsing a row, or putting
+  // another thread fullscreen, both unmount panels. Only the threads on screen
+  // survived a save/reload cycle.
+  //
+  // The session registry is keyed by thread id and outlives the component, so it
+  // is the honest source. peek() rather than get() so a thread that was never
+  // opened does not get an empty session created for it, which would then
+  // overwrite the messages restored from disk.
+  const messagesForThread = (thread: Thread): Message[] => {
+    const live = chatSessions.peek(thread.id)?.getSnapshot().messages;
+    if (live && live.length > 0) {
+      return live.map((msg: any) => ({
+        id: msg.id,
+        content: msg.content,
+        role: msg.role,
+        timestamp: msg.timestamp || Date.now(),
+      }));
+    }
+    if (threadMessagesToLoad[thread.id]?.length) return threadMessagesToLoad[thread.id];
+    return thread.messages || [];
+  };
+
   // Force update thread messages before saving
   const forceUpdateThreadMessages = () => {
     console.log('🔄 Force updating thread messages before save...');
     
     // Update thread messages from live chat instances
     setThreads(prev => prev.map(thread => {
-      const threadChatInstance = threadChatRefs.current[thread.id];
-      
-      if (threadChatInstance && threadChatInstance.messages) {
-        const updatedMessages = threadChatInstance.messages.map((msg: any) => ({
-          id: msg.id,
-          content: msg.content,
-          role: msg.role,
-          timestamp: msg.timestamp || Date.now(),
-        }));
-        
-        console.log(`🔄 Updated thread ${thread.id} with ${updatedMessages.length} messages`);
-        
-        return {
-          ...thread,
-          messages: updatedMessages,
-        };
-      }
-      
-      return thread;
+      const messages = messagesForThread(thread);
+      if (messages === thread.messages) return thread;
+      console.log(`🔄 Updated thread ${thread.id} with ${messages.length} messages`);
+      return { ...thread, messages };
     }));
   };
 
@@ -1098,31 +1110,9 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const getCurrentState = () => {
     // Collect messages from all thread chat instances with improved fallback handling
     const threadsWithMessages = threads.map(thread => {
-      const threadChatInstance = threadChatRefs.current[thread.id];
-      let currentMessages = thread.messages || [];
-      let messageSource = 'static';
-      
-      // If we have a live chat instance, get its current messages
-      if (threadChatInstance && threadChatInstance.messages) {
-        currentMessages = threadChatInstance.messages.map((msg: any) => ({
-          id: msg.id,
-          content: msg.content,
-          role: msg.role,
-          timestamp: msg.timestamp || Date.now(),
-        }));
-        messageSource = 'live';
-      } else if (threadMessagesToLoad[thread.id]) {
-        // Fallback to messages that were queued for loading
-        currentMessages = threadMessagesToLoad[thread.id];
-        messageSource = 'queued';
-      }
-      
-      console.log(`📊 Thread ${thread.id}: ${currentMessages.length} messages from ${messageSource} source`);
-      
-      return {
-        ...thread,
-        messages: currentMessages,
-      };
+      const currentMessages = messagesForThread(thread);
+      console.log(`📊 Thread ${thread.id}: ${currentMessages.length} messages`);
+      return { ...thread, messages: currentMessages };
     });
 
     // Enhanced logging with source information
