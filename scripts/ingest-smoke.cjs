@@ -49,7 +49,20 @@ app.whenReady().then(async () => {
   const store = require('../electron/sqlite-store.cjs');
   store.init(path.join(profile, 'test.db'));
 
-  const keystore = require('../electron/keystore.cjs');
+  // Headless Linux CI has no Secret Service and AIOS rejects basic_text, so use
+  // an in-memory credential provider there, as security-smoke does. Must be
+  // swapped in before memory-ingest destructures it. Desktops keep the real one.
+  let keystore = require('../electron/keystore.cjs');
+  if (!keystore.isSecureStorageAvailable()) {
+    const keys = new Map();
+    keystore = {
+      getProviderKey: id => keys.get(id) || '',
+      setProviderKey: (id, value) => { if (value) keys.set(id, value); else keys.delete(id); },
+      listConfiguredProviders: () => [...keys.keys()],
+      isSecureStorageAvailable: () => false,
+    };
+    require.cache[require.resolve('../electron/keystore.cjs')].exports = keystore;
+  }
   const ingest = require('../electron/memory-ingest.cjs');
 
   // Never the real 8765 — a developer's AIOS is usually holding it.
