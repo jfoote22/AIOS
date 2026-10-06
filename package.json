@@ -139,5 +139,8 @@
       ],
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
+  },
+  "overrides": {
+    "shell-quote": "^1.11.0"
   }
 }
