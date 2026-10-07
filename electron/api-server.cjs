@@ -15,6 +15,7 @@ const { fileAccess } = require('./file-access.cjs');
 
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
 const { promptStream } = require('./agent-prompt.cjs');
+const { loadClaudeSdk, codexOptions } = require('./sdk-binaries.cjs');
 const { getModelId, setModelId } = require('./modelstore.cjs');
 const extract = require('./extract.cjs');
 const research = require('./research.cjs');
@@ -597,7 +598,7 @@ function start({ development = false, approveAgentTool } = {}) {
 
       let raw = '';
       if (authMode === 'subscription') {
-        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const { query } = await loadClaudeSdk();
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
           prompt: promptStream(userPrompt),
@@ -743,7 +744,7 @@ function start({ development = false, approveAgentTool } = {}) {
       const slot = ANTHROPIC_SLOTS[variant] || 'claude';
       const modelId = getModelId(slot);
 
-      const { query } = await import('@anthropic-ai/claude-agent-sdk');
+      const { query } = await loadClaudeSdk();
 
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.setHeader('x-vercel-ai-data-stream', 'v1');
@@ -834,7 +835,7 @@ function start({ development = false, approveAgentTool } = {}) {
       let raw = '';
 
       if (authMode === 'subscription') {
-        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const { query } = await loadClaudeSdk();
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
           prompt: promptStream(`${systemPrompt}\n\n${userPrompt}`),
@@ -925,7 +926,7 @@ function start({ development = false, approveAgentTool } = {}) {
 
       let raw = '';
       if (authMode === 'subscription') {
-        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const { query } = await loadClaudeSdk();
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
           prompt: promptStream(userPrompt),
@@ -1097,7 +1098,7 @@ function start({ development = false, approveAgentTool } = {}) {
 
       let raw = '';
       if (authMode === 'subscription') {
-        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const { query } = await loadClaudeSdk();
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
           prompt: promptStream(userPrompt),
@@ -1215,7 +1216,7 @@ function start({ development = false, approveAgentTool } = {}) {
 
       let raw = '';
       if (authMode === 'subscription') {
-        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const { query } = await loadClaudeSdk();
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
           prompt: promptStream(userPrompt),
@@ -1459,7 +1460,7 @@ function start({ development = false, approveAgentTool } = {}) {
         apiKey = key;
       }
 
-      const { query } = await import('@anthropic-ai/claude-agent-sdk');
+      const { query } = await loadClaudeSdk();
       const modelOverride = (agent.model && agent.model !== 'inherit') ? agent.model : (getModelId('claude') || getModelId('anthropic'));
       const allowed = Array.isArray(agent.allowedTools) ? agent.allowedTools : [];
       const cwd = (agent.workingDir && typeof agent.workingDir === 'string') ? agent.workingDir : undefined;
@@ -1581,7 +1582,7 @@ function start({ development = false, approveAgentTool } = {}) {
 
       let raw = '';
       if (authMode === 'subscription') {
-        const { query } = await import('@anthropic-ai/claude-agent-sdk');
+        const { query } = await loadClaudeSdk();
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
           prompt: promptStream(userPrompt),
@@ -1646,7 +1647,7 @@ function start({ development = false, approveAgentTool } = {}) {
       const codexModelOverride = (process.env.AIOS_CODEX_MODEL || '').trim();
 
       const { Codex } = await import('@openai/codex-sdk');
-      const codex = new Codex();
+      const codex = new Codex(codexOptions());
       const thread = codex.startThread({
         ...(codexModelOverride ? { model: codexModelOverride } : {}),
         // Lock it down so Codex behaves like chat, not a coding agent:
