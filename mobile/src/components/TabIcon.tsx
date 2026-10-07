@@ -3,10 +3,10 @@ import { Text } from 'react-native';
 
 // Lightweight emoji tab icons (no native icon font dependency needed).
 const GLYPHS: Record<string, string> = {
+  Home: '💬',
   Brain: '🧠',
   Dives: '🔍',
   Build: '🛠️',
-  Terminal: '⌨️',
   More: '⋯',
 };
 

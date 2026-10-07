@@ -275,6 +275,74 @@ export const Research = {
     post('/api/proxy/research/find-videos', { context }),
 };
 
+// ── Howie (Hermes agent) ─────────────────────────────────────────────────────
+// Non-streaming: the desktop forwards to the configured Hermes model and
+// returns the whole reply.
+export const Hermes = {
+  chat: (messages: ChatMessage[]): Promise<{ content: string }> =>
+    post('/api/proxy/hermes/chat', { messages }),
+};
+
+// ── Ask Second Brain ─────────────────────────────────────────────────────────
+// Streams a grounded answer in the chat data-stream format. The neurons it
+// drew on arrive first, in the x-aios-sources response header.
+export interface AskSource { n: number; id: string; title: string }
+
+export function streamAsk(
+  question: string,
+  history: ChatMessage[],
+  handlers: {
+    onSources: (sources: AskSource[]) => void;
+    onDelta: (text: string) => void;
+    onDone: () => void;
+    onError: (err: string) => void;
+  },
+): () => void {
+  if (!creds) { handlers.onError('Not paired.'); return () => {}; }
+  const xhr = new XMLHttpRequest();
+  let seen = 0;
+  let sourcesSent = false;
+  const flush = (chunk: string) => {
+    for (const line of chunk.split('\n')) {
+      const i = line.indexOf(':');
+      if (i < 0) continue;
+      const type = line.slice(0, i);
+      const rest = line.slice(i + 1);
+      if (!rest) continue;
+      try {
+        if (type === '0') handlers.onDelta(JSON.parse(rest));
+        else if (type === '3') handlers.onError(JSON.parse(rest));
+      } catch {}
+    }
+  };
+  xhr.open('POST', `${creds.url}/api/mobile/ask`);
+  xhr.setRequestHeader('Authorization', `Bearer ${creds.token}`);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.onreadystatechange = () => {
+    if (xhr.readyState >= 2 && !sourcesSent && xhr.status < 400) {
+      const raw = xhr.getResponseHeader('x-aios-sources');
+      if (raw) {
+        sourcesSent = true;
+        try { handlers.onSources(JSON.parse(decodeURIComponent(raw))); } catch {}
+      }
+    }
+    if (xhr.readyState >= 3 && xhr.status < 400) {
+      const fresh = (xhr.responseText || '').slice(seen);
+      const cut = fresh.lastIndexOf('\n');
+      if (cut >= 0) { flush(fresh.slice(0, cut + 1)); seen += cut + 1; }
+    }
+    if (xhr.readyState === 4) {
+      if (xhr.status >= 400) { handlers.onError(`HTTP ${xhr.status}${errorHint(xhr)}`); return; }
+      const tail = (xhr.responseText || '').slice(seen);
+      if (tail) flush(tail + '\n');
+      handlers.onDone();
+    }
+  };
+  xhr.onerror = () => handlers.onError('Network error.');
+  xhr.send(JSON.stringify({ question, history }));
+  return () => { try { xhr.abort(); } catch {} };
+}
+
 // Autonomous Deep Research over a chunked NDJSON stream. Emits live status and
 // the report as it's written (report-delta), then the final report + sources.
 export function streamDeepResearch(
@@ -353,14 +421,3 @@ export function streamDeepResearch(
   return () => { try { xhr.abort(); } catch {} };
 }
 
-// ── terminal control (SSE handled separately in TerminalScreen) ──────────────
-export const Term = {
-  list: (): Promise<{ available: boolean; items: any[] }> => get('/api/mobile/term'),
-  spawn: (opts: { cols?: number; rows?: number; cwd?: string; shell?: string } = {}) =>
-    post('/api/mobile/term/spawn', opts),
-  input: (id: string, data: string) => post(`/api/mobile/term/${id}/input`, { data }),
-  resize: (id: string, cols: number, rows: number) => post(`/api/mobile/term/${id}/resize`, { cols, rows }),
-  kill: (id: string) => post(`/api/mobile/term/${id}/kill`),
-  streamUrl: (id: string) => `${creds!.url}/api/mobile/term/${encodeURIComponent(id)}/stream`,
-  streamHeaders: () => authHeaders(),
-};

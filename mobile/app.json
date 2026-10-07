@@ -17,7 +17,10 @@
       "package": "com.aios.mobile",
       "adaptiveIcon": {
         "backgroundColor": "#09090b"
-      }
+      },
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "plugins": [
       [
@@ -43,6 +46,34 @@
           "android": {
             "usesCleartextTraffic": true
           }
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "AIOS reads your latest screenshot to send it to Second Brain.",
+          "savePhotosPermission": false,
+          "isAccessMediaLocationEnabled": false,
+          "granularPermissions": [
+            "photo"
+          ]
+        }
+      ],
+      [
+        "expo-share-intent",
+        {
+          "androidIntentFilters": [
+            "image/*"
+          ],
+          "disableIOS": true
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "AIOS uses the camera to scan your desktop pairing QR code and to photograph things for Second Brain.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
         }
       ]
     ],

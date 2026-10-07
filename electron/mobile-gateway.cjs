@@ -26,6 +26,7 @@ const path = require('node:path');
 const sqliteStore = require('./sqlite-store.cjs');
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
 const { getModelId } = require('./modelstore.cjs');
+const { claudeGenerate, parseJsonReply } = require('./claude-generate.cjs');
 const { bearerToken, tokensEqual, localAuthHeaders, mobileProxyAllowed } = require('./http-security.cjs');
 
 const DEFAULT_PORT = 8766;
@@ -265,6 +266,130 @@ function forwardJson(res, path, bodyObj) {
   upstream.end(payload);
 }
 
+// POST JSON to a loopback api-server endpoint and resolve with its parsed JSON
+// body. Rejects with the upstream { error } message on a non-2xx status.
+function postLocalJson(path, bodyObj) {
+  return new Promise((resolve, reject) => {
+    if (!apiPort) return reject(new Error('API server not available.'));
+    const payload = JSON.stringify(bodyObj);
+    const upstream = http.request(
+      {
+        host: '127.0.0.1', port: apiPort, method: 'POST', path,
+        headers: { ...localAuthHeaders(), 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      },
+      (up) => {
+        let text = '';
+        up.setEncoding('utf8');
+        up.on('data', (c) => { text += c; });
+        up.on('end', () => {
+          let body = null;
+          try { body = text ? JSON.parse(text) : null; } catch {}
+          if ((up.statusCode || 500) >= 400) return reject(new Error(body?.error || `HTTP ${up.statusCode}`));
+          resolve(body);
+        });
+      },
+    );
+    upstream.on('error', reject);
+    upstream.end(payload);
+  });
+}
+
+function cosine(a, b) {
+  if (!a?.length || !b?.length || a.length !== b.length) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  const d = Math.sqrt(na) * Math.sqrt(nb);
+  return d === 0 ? 0 : dot / d;
+}
+
+// Ask Second Brain retrieval — the desktop AskBrain pipeline (src/lib/ai.ts):
+// embed the question, rank every neuron by cosine over its stored embedding,
+// fall back to keyword matching when nothing is embedded yet.
+async function retrieveForQuestion(question, limit = 8) {
+  const all = sqliteStore.call('getAllSnippets', []).filter((s) => s && s.status !== 'error');
+  let qvec = [];
+  try {
+    const out = await postLocalJson('/api/embeddings', { contents: [question.slice(0, 8000)] });
+    qvec = out?.embeddings?.[0] || [];
+  } catch {}
+  const ranked = qvec.length
+    ? all
+      .filter((s) => Array.isArray(s.embedding) && s.embedding.length === qvec.length)
+      .map((s) => ({ s, sim: cosine(qvec, s.embedding) }))
+      .sort((a, b) => b.sim - a.sim)
+      .slice(0, limit)
+      .map((x) => x.s)
+    : [];
+  return ranked.length ? ranked : all.filter((s) => matchesSearch(s, question)).slice(0, limit);
+}
+
+// ── OCR providers ────────────────────────────────────────────────────────────
+
+const OCR_INSTRUCTIONS = 'You are the AI curator for "AIOS Vault" — a personal knowledge capture tool. The user has just captured this screenshot. Analyze it and return structured metadata so it can be filed and searched later.\n\nBe specific and faithful to what is actually visible. Do not invent details. If the image is mostly empty or unreadable, say so honestly in the summary.';
+
+// Provider error bodies are often raw JSON; keep the human-readable message.
+function shortError(e) {
+  const raw = String(e?.message || e || 'failed');
+  try { const j = JSON.parse(raw); return j?.error?.message || raw; } catch { return raw.slice(0, 300); }
+}
+
+function normalizeOcr(parsed) {
+  const allowed = new Set(['link', 'number', 'address', 'info']);
+  return {
+    title: String(parsed.title || 'Untitled capture'),
+    summary: String(parsed.summary || ''),
+    category: String(parsed.category || 'Other'),
+    source: String(parsed.source || ''),
+    tags: Array.isArray(parsed.tags) ? parsed.tags.map(String) : [],
+    entities: (Array.isArray(parsed.entities) ? parsed.entities : [])
+      .map((e) => ({ type: allowed.has(e?.type) ? e.type : 'info', label: String(e?.label || ''), value: String(e?.value || '') })),
+    extractedText: String(parsed.extractedText || ''),
+  };
+}
+
+async function geminiOcr(image) {
+  const key = getProviderKey('gemini');
+  if (!key) throw new Error('no Gemini key configured');
+  const { GoogleGenAI, Type } = await import('@google/genai');
+  const responseSchema = {
+    type: Type.OBJECT,
+    properties: {
+      title: { type: Type.STRING },
+      summary: { type: Type.STRING },
+      category: { type: Type.STRING },
+      source: { type: Type.STRING },
+      tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+      entities: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: { type: { type: Type.STRING }, label: { type: Type.STRING }, value: { type: Type.STRING } },
+          required: ['type', 'label', 'value'],
+        },
+      },
+      extractedText: { type: Type.STRING },
+    },
+    required: ['title', 'summary', 'category', 'source', 'tags', 'entities', 'extractedText'],
+  };
+  const result = await new GoogleGenAI({ apiKey: key }).models.generateContent({
+    model: getModelId('gemini'),
+    contents: [{ role: 'user', parts: [{ inlineData: { mimeType: image.mimeType, data: image.data } }, { text: OCR_INSTRUCTIONS }] }],
+    config: { responseMimeType: 'application/json', responseSchema },
+  });
+  if (!result.text) throw new Error('Gemini returned no content.');
+  return JSON.parse(result.text);
+}
+
+async function claudeOcr(image) {
+  const reply = await claudeGenerate({
+    authMode: authModeFor('anthropic'),
+    system: 'You extract structured metadata from screenshots. Reply with a single JSON object and nothing else.',
+    text: `${OCR_INSTRUCTIONS}\n\nReturn exactly this JSON shape:\n{"title": string, "summary": string, "category": string, "source": string, "tags": string[], "entities": [{"type": "link"|"number"|"address"|"info", "label": string, "value": string}], "extractedText": string}\n\nextractedText is the full verbatim text visible in the image.`,
+    image,
+  });
+  return parseJsonReply(reply);
+}
+
 // ── data shaping helpers ─────────────────────────────────────────────────────
 
 // Strip the heavy base64 image fields for list payloads; keep a flag so the
@@ -491,66 +616,24 @@ function buildApp() {
   // The shared /api/vision/analyze-snip route uses OpenAI; the desktop's own
   // snipping uses Gemini 2.5 Flash. We mirror the desktop here so mobile OCR is
   // consistent (and doesn't depend on the OpenAI model slot).
+  // Screenshot OCR + filing metadata. Gemini first (the desktop's snipping
+  // model); when it is unavailable — no key, no credits, outage — Claude reads
+  // the image instead, on the subscription or the Anthropic key per auth mode.
   app.post('/api/mobile/ocr', requireToken, async (req, res) => {
-    try {
-      const imageDataUrl = req.body && typeof req.body.imageDataUrl === 'string' ? req.body.imageDataUrl : '';
-      const m = /^data:([^;]+);base64,(.*)$/.exec(imageDataUrl);
-      if (!m) return res.status(400).json({ error: 'imageDataUrl (a data:...;base64 URL) is required.' });
-
-      const key = getProviderKey('gemini');
-      if (!key) return res.status(400).json({ error: 'Gemini key not configured on the desktop (Models tab).' });
-
-      const { GoogleGenAI, Type } = await import('@google/genai');
-      const client = new GoogleGenAI({ apiKey: key });
-
-      const responseSchema = {
-        type: Type.OBJECT,
-        properties: {
-          title: { type: Type.STRING },
-          summary: { type: Type.STRING },
-          category: { type: Type.STRING },
-          source: { type: Type.STRING },
-          tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-          entities: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                type: { type: Type.STRING },
-                label: { type: Type.STRING },
-                value: { type: Type.STRING },
-              },
-              required: ['type', 'label', 'value'],
-            },
-          },
-          extractedText: { type: Type.STRING },
-        },
-        required: ['title', 'summary', 'category', 'source', 'tags', 'entities', 'extractedText'],
-      };
-
-      const result = await client.models.generateContent({
-        model: getModelId('gemini'),
-        contents: [{
-          role: 'user',
-          parts: [
-            { inlineData: { mimeType: m[1], data: m[2] } },
-            { text: `You are the AI curator for "AIOS Vault" — a personal knowledge capture tool. The user has just captured this screenshot. Analyze it and return structured metadata so it can be filed and searched later.\n\nBe specific and faithful to what is actually visible. Do not invent details. If the image is mostly empty or unreadable, say so honestly in the summary.` },
-          ],
-        }],
-        config: { responseMimeType: 'application/json', responseSchema },
-      });
-
-      const text = result.text;
-      if (!text) return res.status(502).json({ error: 'Gemini returned no content.' });
-      const parsed = JSON.parse(text);
-      const allowed = new Set(['link', 'number', 'address', 'info']);
-      parsed.entities = (parsed.entities || []).map((e) => ({ ...e, type: allowed.has(e?.type) ? e.type : 'info' }));
-      parsed.tags = Array.isArray(parsed.tags) ? parsed.tags : [];
-      parsed.extractedText = parsed.extractedText || '';
-      res.json(parsed);
-    } catch (e) {
-      res.status(500).json({ error: e?.message || String(e) });
+    const imageDataUrl = req.body && typeof req.body.imageDataUrl === 'string' ? req.body.imageDataUrl : '';
+    const m = /^data:([^;]+);base64,(.*)$/.exec(imageDataUrl);
+    if (!m) return res.status(400).json({ error: 'imageDataUrl (a data:...;base64 URL) is required.' });
+    const image = { mimeType: m[1], data: m[2] };
+    const failures = [];
+    for (const [name, run] of [['Gemini', geminiOcr], ['Claude', claudeOcr]]) {
+      try {
+        const parsed = normalizeOcr(await run(image));
+        return res.json({ ...parsed, ocrProvider: name });
+      } catch (e) {
+        failures.push(`${name}: ${shortError(e)}`);
+      }
     }
+    res.status(502).json({ error: `OCR failed — ${failures.join(' | ')}` });
   });
 
   // ── Chat router (auth-aware): picks the right upstream per model ─────────
@@ -581,6 +664,81 @@ function buildApp() {
       totalWords: Number.isFinite(b.totalWords) ? b.totalWords : 1200,
       authMode: authModeFor('anthropic'),
     });
+  });
+
+  // Ask Second Brain: retrieve the closest neurons, then stream a grounded
+  // Gemini answer in the same 0:/3:/d: data-stream format as /api/mobile/chat.
+  // The cited neurons travel in the x-aios-sources header so the client can
+  // link them before the answer finishes. Body: { question, history? }.
+  app.post('/api/mobile/ask', requireToken, async (req, res) => {
+    const b = req.body && typeof req.body === 'object' ? req.body : {};
+    const question = typeof b.question === 'string' ? b.question.trim() : '';
+    if (!question) return res.status(400).json({ error: 'question is required.' });
+    const history = (Array.isArray(b.history) ? b.history : [])
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      .slice(-10);
+    const key = getProviderKey('gemini');
+    let aborted = false;
+    res.on('close', () => { aborted = true; });
+    try {
+      const items = await retrieveForQuestion(question);
+      const contextBlock = items.length
+        ? items.map((c, i) => [
+          `[Snip ${i + 1}] (captured ${new Date(c.timestamp || Date.now()).toLocaleString()})`,
+          `Title: ${c.title || '(no title)'}`,
+          `Category: ${c.category || ''} | Source: ${c.source || ''}`,
+          `Tags: ${(c.tags || []).join(', ') || '(none)'}`,
+          `Summary: ${c.summary || ''}`,
+          `Extracted text: ${(c.extractedText || '(no text)').slice(0, 1500)}`,
+        ].join('\n')).join('\n\n')
+        : '(The vault has no relevant snips for this question.)';
+      const systemInstruction = `You are the personal AI assistant for "AIOS Vault" — a private knowledge base of screenshots and notes the user has captured over time. Answer the user's question using ONLY the snips provided as context. If the answer is not in the context, say so honestly and suggest what they could capture or search for. When you reference information, cite which snip it came from like [Snip 2]. Keep answers concise and useful. Today's date is ${new Date().toLocaleDateString()}.`;
+      const contents = [
+        ...history.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+        { role: 'user', parts: [{ text: `Context from my vault (top matches for my question):\n\n${contextBlock}\n\nMy question: ${question}` }] },
+      ];
+
+      const sources = items.map((s, i) => ({ n: i + 1, id: s.id, title: s.title || 'Untitled' }));
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('x-vercel-ai-data-stream', 'v1');
+      res.setHeader('x-aios-sources', encodeURIComponent(JSON.stringify(sources)));
+      res.setHeader('Cache-Control', 'no-cache');
+
+      // Gemini streams; if it cannot start (no key, no credits) Claude answers
+      // in one piece instead.
+      let stream = null;
+      if (key) {
+        try {
+          const { GoogleGenAI } = await import('@google/genai');
+          stream = await new GoogleGenAI({ apiKey: key }).models.generateContentStream({
+            model: 'gemini-2.5-flash',
+            contents,
+            config: { systemInstruction },
+          });
+        } catch { stream = null; }
+      }
+      if (stream) {
+        for await (const chunk of stream) {
+          if (aborted) return;
+          if (chunk.text) res.write(`0:${JSON.stringify(chunk.text)}\n`);
+        }
+      } else {
+        const transcript = history.map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${m.content}`).join('\n\n');
+        const answer = await claudeGenerate({
+          authMode: authModeFor('anthropic'),
+          system: systemInstruction,
+          text: `${transcript ? `Earlier conversation:\n${transcript}\n\n` : ''}Context from my vault (top matches for my question):\n\n${contextBlock}\n\nMy question: ${question}`,
+        });
+        if (aborted) return;
+        res.write(`0:${JSON.stringify(answer)}\n`);
+      }
+      res.write(`d:${JSON.stringify({ finishReason: 'stop' })}\n`);
+      res.end();
+    } catch (e) {
+      const message = e?.message || 'Ask Second Brain failed.';
+      if (!res.headersSent) res.status(502).json({ error: message });
+      else { try { res.write(`3:${JSON.stringify(message)}\n`); res.end(); } catch {} }
+    }
   });
 
   // ── DeepDives: threads + messages ───────────────────────────────────────

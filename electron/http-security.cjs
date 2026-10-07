@@ -56,6 +56,7 @@ function localApiGuard({ development = false } = {}) {
 // arbitrary agent execution, or cancellation of other clients' runs.
 const MOBILE_PROXY_POST = new Set([
   'agents/draft', 'skills/draft', 'research/find-links', 'research/find-videos',
+  'hermes/chat',
 ]);
 function mobileProxyAllowed(method, path) {
   return method === 'POST' && MOBILE_PROXY_POST.has(path);

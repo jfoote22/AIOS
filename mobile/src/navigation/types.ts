@@ -1,10 +1,10 @@
 import type { NavigatorScreenParams } from '@react-navigation/native';
 
 export type TabsParamList = {
+  Home: undefined;
   Brain: undefined;
   Dives: undefined;
   Build: undefined;
-  Terminal: undefined;
   More: undefined;
 };
 
@@ -15,6 +15,6 @@ export type RootStackParamList = {
   DiveChat: { id?: string; title?: string };
   NewAgent: undefined;
   NewSkill: undefined;
-  Capture: undefined;
+  Capture: { imageUri?: string; mimeType?: string } | undefined;
   QuickAction: { text?: string } | undefined;
 };

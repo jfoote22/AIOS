@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import QRCode from 'qrcode';
 import { CheckCircle2, Copy, Inbox, KeyRound, Loader2, RefreshCw, Save, Server, Smartphone, XCircle } from 'lucide-react';
 import { apiUrl, initApiBase } from '../lib/apiBase';
 import type { MemoryIngestStatus, MobileGatewayStatus } from '../electron';
@@ -126,6 +127,17 @@ export default function HermesSettingsTab() {
   const pairingCode = mob && mob.token
     ? btoa(JSON.stringify({ url: mobUrl, token: mob.token }))
     : '';
+
+  // The same pairing code as a QR, for the phone's "Scan QR" pairing.
+  const [pairingQr, setPairingQr] = useState('');
+  useEffect(() => {
+    if (!pairingCode) { setPairingQr(''); return; }
+    let live = true;
+    QRCode.toDataURL(pairingCode, { margin: 1, width: 220, errorCorrectionLevel: 'M' })
+      .then((url) => { if (live) setPairingQr(url); })
+      .catch(() => { if (live) setPairingQr(''); });
+    return () => { live = false; };
+  }, [pairingCode]);
 
   const ingestUrl = mem ? `http://${mem.address}:${mem.port}/api/memory/ingest` : '';
   const curlSnippet = mem
@@ -421,9 +433,14 @@ export default function HermesSettingsTab() {
                     Copy
                   </button>
                 </div>
-                <code className="mt-1 block break-all bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-[11px] font-mono text-zinc-400">{pairingCode || '—'}</code>
+                {pairingQr && (
+                  <div className="mt-2 flex justify-center">
+                    <img src={pairingQr} alt="Pairing QR code" width={220} height={220} className="rounded-lg bg-white p-2" />
+                  </div>
+                )}
+                <code className="mt-2 block break-all bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-[11px] font-mono text-zinc-400">{pairingCode || '—'}</code>
                 <p className="mt-1 text-[10px] text-zinc-600 leading-relaxed">
-                  In the AIOS app, tap <span className="text-zinc-400">Pair → Paste code</span> and paste this.
+                  In the AIOS app, tap <span className="text-zinc-400">Scan QR</span> and point it at this code, or paste the code.
                   It bundles the URL + token. Regenerating the token invalidates paired devices.
                 </p>
               </div>

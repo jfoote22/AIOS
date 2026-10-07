@@ -1,10 +1,12 @@
 import React from 'react';
 import { ActivityIndicator, Text, View } from 'react-native';
-import { NavigationContainer, DarkTheme } from '@react-navigation/native';
+import { NavigationContainer, DarkTheme, useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { StatusBar } from 'expo-status-bar';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
 
 import { AuthProvider, useAuth } from './src/store/auth';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
@@ -19,7 +21,7 @@ import DiveChatScreen from './src/screens/DiveChatScreen';
 import BuildScreen from './src/screens/BuildScreen';
 import NewAgentScreen from './src/screens/NewAgentScreen';
 import NewSkillScreen from './src/screens/NewSkillScreen';
-import TerminalScreen from './src/screens/TerminalScreen';
+import HomeScreen from './src/screens/HomeScreen';
 import CaptureScreen from './src/screens/CaptureScreen';
 import QuickActionScreen from './src/screens/QuickActionScreen';
 import MoreScreen from './src/screens/MoreScreen';
@@ -48,24 +50,41 @@ const screenHeader = {
 };
 
 function Tabs() {
+  // Edge-to-edge Android draws under the system navigation bar; pad the tab
+  // bar by that inset instead of a fixed height so its buttons stay tappable.
+  const insets = useSafeAreaInsets();
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         ...screenHeader,
-        tabBarStyle: { backgroundColor: theme.surface, borderTopColor: theme.border, height: 60, paddingBottom: 8, paddingTop: 6 },
+        tabBarStyle: { backgroundColor: theme.surface, borderTopColor: theme.border, height: 56 + insets.bottom, paddingBottom: insets.bottom + 4, paddingTop: 6 },
         tabBarActiveTintColor: theme.accent,
         tabBarInactiveTintColor: theme.textFaint,
         tabBarIcon: ({ color }) => <TabIcon route={route.name} color={color} />,
       })}
     >
-      {/* Landing tab: full-bleed 3D brain — the screen draws its own chrome. */}
+      {/* Landing tab: Howie / Ask Second Brain chat under a collapsible 3D brain. */}
+      <Tab.Screen name="Home" component={HomeScreen} options={{ title: 'Home', headerShown: false }} />
       <Tab.Screen name="Brain" component={BrainScreen} options={{ title: 'Second Brain', headerShown: false }} />
       <Tab.Screen name="Dives" component={DivesScreen} options={{ title: 'DeepDives' }} />
       <Tab.Screen name="Build" component={BuildScreen} options={{ title: 'Build' }} />
-      <Tab.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal' }} />
       <Tab.Screen name="More" component={MoreScreen} options={{ title: 'More' }} />
     </Tab.Navigator>
   );
+}
+
+// An image shared to AIOS from Android's share sheet opens Capture, which OCRs
+// it and saves it straight to Second Brain.
+function ShareIntentRouter() {
+  const nav = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+  const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntentContext();
+  React.useEffect(() => {
+    if (!hasShareIntent) return;
+    const file = shareIntent.files?.find((f) => (f.mimeType || '').startsWith('image/'));
+    if (file) nav.navigate('Capture', { imageUri: file.path, mimeType: file.mimeType });
+    resetShareIntent();
+  }, [hasShareIntent, shareIntent, resetShareIntent, nav]);
+  return null;
 }
 
 function Root() {
@@ -87,7 +106,9 @@ function Root() {
           <Stack.Screen name="Pair" component={PairScreen} options={{ headerShown: false }} />
         ) : (
           <>
-            <Stack.Screen name="Tabs" component={Tabs} options={{ headerShown: false }} />
+            <Stack.Screen name="Tabs" options={{ headerShown: false }}>
+              {() => <><ShareIntentRouter /><Tabs /></>}
+            </Stack.Screen>
             <Stack.Screen name="SnippetDetail" component={SnippetDetailScreen} options={{ title: 'Neuron' }} />
             <Stack.Screen name="DiveChat" component={DiveChatScreen} options={{ title: 'DeepDive' }} />
             <Stack.Screen name="NewAgent" component={NewAgentScreen} options={{ title: 'New Agent' }} />
@@ -103,6 +124,7 @@ function Root() {
 
 export default function App() {
   return (
+    <ShareIntentProvider>
     <SafeAreaProvider>
       <StatusBar style="light" />
       <ErrorBoundary>
@@ -111,5 +133,6 @@ export default function App() {
         </AuthProvider>
       </ErrorBoundary>
     </SafeAreaProvider>
+    </ShareIntentProvider>
   );
 }

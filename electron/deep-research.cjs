@@ -14,6 +14,7 @@ const research = require('./research.cjs');
 const extract = require('./extract.cjs');
 const { getProviderKey } = require('./keystore.cjs');
 const { promptStream } = require('./agent-prompt.cjs');
+const { loadClaudeSdk } = require('./sdk-binaries.cjs');
 const { noToolsPolicy, assertAgentResult } = require('./agent-policy.cjs');
 const { getModelId } = require('./modelstore.cjs');
 
@@ -109,7 +110,7 @@ async function geminiGenerate(prompt, { search = false } = {}) {
 async function claudeStream({ system, user, authMode, onDelta, signal }) {
   let full = '';
   if (authMode === 'subscription') {
-    const { query } = await import('@anthropic-ai/claude-agent-sdk');
+    const { query } = await loadClaudeSdk();
     const modelId = getModelId('claude') || getModelId('anthropic');
     const stream = query({
       prompt: promptStream(`${system}\n\n${user}`),

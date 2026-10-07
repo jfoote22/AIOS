@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../store/auth';
 import { Button, Field, ErrorBanner } from '../components/ui';
@@ -8,7 +9,10 @@ import { theme } from '../theme';
 
 export default function PairScreen() {
   const { pairWithCode, pairWithUrl } = useAuth();
-  const [mode, setMode] = useState<'code' | 'manual'>('code');
+  const [mode, setMode] = useState<'scan' | 'code' | 'manual'>('scan');
+  const [permission, requestPermission] = useCameraPermissions();
+  // The camera fires many events per QR; only act on the first until it fails.
+  const scanning = useRef(false);
   const [code, setCode] = useState('');
   const [url, setUrl] = useState('http://');
   const [token, setToken] = useState('');
@@ -18,6 +22,21 @@ export default function PairScreen() {
   const pasteCode = async () => {
     const t = await Clipboard.getStringAsync();
     if (t) setCode(t.trim());
+  };
+
+  const onScanned = async ({ data }: { data: string }) => {
+    if (scanning.current || busy) return;
+    scanning.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await pairWithCode(data);
+    } catch (e: any) {
+      setError(e?.message || 'That QR code did not pair. Scan the code under Settings → Mobile companion on the desktop.');
+      setTimeout(() => { scanning.current = false; }, 1500);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const submit = async () => {
@@ -41,17 +60,35 @@ export default function PairScreen() {
           <Text style={styles.subtitle}>Connect to your desktop</Text>
           <Text style={styles.help}>
             On the desktop, open <Text style={styles.b}>Settings → Hermes Gateway → Mobile companion</Text>,
-            enable it, then copy the pairing code.
+            enable it, then scan its QR code.
           </Text>
 
           <View style={styles.tabs}>
+            <Tab label="Scan QR" active={mode === 'scan'} onPress={() => setMode('scan')} />
             <Tab label="Pairing code" active={mode === 'code'} onPress={() => setMode('code')} />
             <Tab label="Manual" active={mode === 'manual'} onPress={() => setMode('manual')} />
           </View>
 
           <ErrorBanner text={error} />
 
-          {mode === 'code' ? (
+          {mode === 'scan' ? (
+            !permission?.granted ? (
+              <View style={{ gap: 12 }}>
+                <Text style={styles.help}>AIOS needs the camera to read the pairing QR code.</Text>
+                <Button title="Allow camera" onPress={requestPermission} />
+              </View>
+            ) : (
+              <View style={styles.scanner}>
+                <CameraView
+                  style={StyleSheet.absoluteFill}
+                  facing="back"
+                  barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+                  onBarcodeScanned={busy ? undefined : onScanned}
+                />
+                <Text style={styles.scanHint}>{busy ? 'Connecting…' : 'Point at the QR code on your desktop'}</Text>
+              </View>
+            )
+          ) : mode === 'code' ? (
             <View style={{ gap: 12 }}>
               <Field
                 label="Pairing code"
@@ -87,8 +124,12 @@ export default function PairScreen() {
             </View>
           )}
 
-          <View style={{ height: 20 }} />
-          <Button title="Connect" onPress={submit} loading={busy} />
+          {mode !== 'scan' ? (
+            <>
+              <View style={{ height: 20 }} />
+              <Button title="Connect" onPress={submit} loading={busy} />
+            </>
+          ) : null}
 
           <Text style={styles.footnote}>
             Away from home? Put both devices on the same Tailscale/VPN and use that IP.
@@ -120,5 +161,7 @@ const styles = StyleSheet.create({
   tabs: { flexDirection: 'row', gap: 8, marginBottom: 16 },
   tab: { color: theme.textFaint, paddingVertical: 8, paddingHorizontal: 14, borderRadius: 999, backgroundColor: theme.surface, overflow: 'hidden', fontSize: 13 },
   tabActive: { color: '#fff', backgroundColor: theme.accentDim },
+  scanner: { height: 300, borderRadius: 16, overflow: 'hidden', backgroundColor: '#000', justifyContent: 'flex-end' },
+  scanHint: { color: '#fff', textAlign: 'center', padding: 10, backgroundColor: 'rgba(0,0,0,0.55)', fontSize: 13 },
   footnote: { color: theme.textFaint, fontSize: 12, textAlign: 'center', marginTop: 24, lineHeight: 18 },
 });
