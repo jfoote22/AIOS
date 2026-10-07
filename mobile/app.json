@@ -17,7 +17,10 @@
       "package": "com.aios.mobile",
       "adaptiveIcon": {
         "backgroundColor": "#09090b"
-      }
+      },
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "plugins": [
       [
@@ -63,6 +66,14 @@
             "image/*"
           ],
           "disableIOS": true
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "AIOS uses the camera to scan your desktop pairing QR code and to photograph things for Second Brain.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
         }
       ]
     ],
