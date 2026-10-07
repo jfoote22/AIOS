@@ -6,11 +6,6 @@
     "orientation": "portrait",
     "scheme": "aios",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
-    "splash": {
-      "resizeMode": "contain",
-      "backgroundColor": "#09090b"
-    },
     "assetBundlePatterns": [
       "**/*"
     ],
@@ -33,6 +28,13 @@
       ],
       "expo-asset",
       "expo-secure-store",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#09090b",
+          "resizeMode": "contain"
+        }
+      ],
       [
         "expo-build-properties",
         {
