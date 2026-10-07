@@ -13,7 +13,7 @@
 // the real CLI: a single-message iterable completes the turn and the stream ends.
 
 /**
- * Wrap prompt text as the SDK's streaming-input form.
+ * Wrap prompt text (or content blocks) as the SDK's streaming-input form.
  *
  * Yields exactly one user message and completes, which the SDK treats as the end
  * of input for this turn. Use everywhere instead of a bare string: prompt size
@@ -21,7 +21,9 @@
  * exceed the limit given a long enough dive.
  */
 function promptStream(text) {
-  const content = typeof text === 'string' ? text : String(text ?? '');
+  // An array is passed through as Anthropic content blocks (e.g. an image block
+  // followed by a text block); anything else becomes plain text.
+  const content = typeof text === 'string' || Array.isArray(text) ? text : String(text ?? '');
   return (async function* () {
     yield {
       type: 'user',
