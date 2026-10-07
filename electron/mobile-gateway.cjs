@@ -265,6 +265,63 @@ function forwardJson(res, path, bodyObj) {
   upstream.end(payload);
 }
 
+// POST JSON to a loopback api-server endpoint and resolve with its parsed JSON
+// body. Rejects with the upstream { error } message on a non-2xx status.
+function postLocalJson(path, bodyObj) {
+  return new Promise((resolve, reject) => {
+    if (!apiPort) return reject(new Error('API server not available.'));
+    const payload = JSON.stringify(bodyObj);
+    const upstream = http.request(
+      {
+        host: '127.0.0.1', port: apiPort, method: 'POST', path,
+        headers: { ...localAuthHeaders(), 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      },
+      (up) => {
+        let text = '';
+        up.setEncoding('utf8');
+        up.on('data', (c) => { text += c; });
+        up.on('end', () => {
+          let body = null;
+          try { body = text ? JSON.parse(text) : null; } catch {}
+          if ((up.statusCode || 500) >= 400) return reject(new Error(body?.error || `HTTP ${up.statusCode}`));
+          resolve(body);
+        });
+      },
+    );
+    upstream.on('error', reject);
+    upstream.end(payload);
+  });
+}
+
+function cosine(a, b) {
+  if (!a?.length || !b?.length || a.length !== b.length) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  const d = Math.sqrt(na) * Math.sqrt(nb);
+  return d === 0 ? 0 : dot / d;
+}
+
+// Ask Second Brain retrieval — the desktop AskBrain pipeline (src/lib/ai.ts):
+// embed the question, rank every neuron by cosine over its stored embedding,
+// fall back to keyword matching when nothing is embedded yet.
+async function retrieveForQuestion(question, limit = 8) {
+  const all = sqliteStore.call('getAllSnippets', []).filter((s) => s && s.status !== 'error');
+  let qvec = [];
+  try {
+    const out = await postLocalJson('/api/embeddings', { contents: [question.slice(0, 8000)] });
+    qvec = out?.embeddings?.[0] || [];
+  } catch {}
+  const ranked = qvec.length
+    ? all
+      .filter((s) => Array.isArray(s.embedding) && s.embedding.length === qvec.length)
+      .map((s) => ({ s, sim: cosine(qvec, s.embedding) }))
+      .sort((a, b) => b.sim - a.sim)
+      .slice(0, limit)
+      .map((x) => x.s)
+    : [];
+  return ranked.length ? ranked : all.filter((s) => matchesSearch(s, question)).slice(0, limit);
+}
+
 // ── data shaping helpers ─────────────────────────────────────────────────────
 
 // Strip the heavy base64 image fields for list payloads; keep a flag so the
@@ -581,6 +638,65 @@ function buildApp() {
       totalWords: Number.isFinite(b.totalWords) ? b.totalWords : 1200,
       authMode: authModeFor('anthropic'),
     });
+  });
+
+  // Ask Second Brain: retrieve the closest neurons, then stream a grounded
+  // Gemini answer in the same 0:/3:/d: data-stream format as /api/mobile/chat.
+  // The cited neurons travel in the x-aios-sources header so the client can
+  // link them before the answer finishes. Body: { question, history? }.
+  app.post('/api/mobile/ask', requireToken, async (req, res) => {
+    const b = req.body && typeof req.body === 'object' ? req.body : {};
+    const question = typeof b.question === 'string' ? b.question.trim() : '';
+    if (!question) return res.status(400).json({ error: 'question is required.' });
+    const history = (Array.isArray(b.history) ? b.history : [])
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      .slice(-10);
+    const key = getProviderKey('gemini');
+    if (!key) return res.status(400).json({ error: 'Gemini key not configured on the desktop. Add it in the Models tab.' });
+
+    let aborted = false;
+    res.on('close', () => { aborted = true; });
+    try {
+      const items = await retrieveForQuestion(question);
+      const contextBlock = items.length
+        ? items.map((c, i) => [
+          `[Snip ${i + 1}] (captured ${new Date(c.timestamp || Date.now()).toLocaleString()})`,
+          `Title: ${c.title || '(no title)'}`,
+          `Category: ${c.category || ''} | Source: ${c.source || ''}`,
+          `Tags: ${(c.tags || []).join(', ') || '(none)'}`,
+          `Summary: ${c.summary || ''}`,
+          `Extracted text: ${(c.extractedText || '(no text)').slice(0, 1500)}`,
+        ].join('\n')).join('\n\n')
+        : '(The vault has no relevant snips for this question.)';
+      const systemInstruction = `You are the personal AI assistant for "AIOS Vault" — a private knowledge base of screenshots and notes the user has captured over time. Answer the user's question using ONLY the snips provided as context. If the answer is not in the context, say so honestly and suggest what they could capture or search for. When you reference information, cite which snip it came from like [Snip 2]. Keep answers concise and useful. Today's date is ${new Date().toLocaleDateString()}.`;
+      const contents = [
+        ...history.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+        { role: 'user', parts: [{ text: `Context from my vault (top matches for my question):\n\n${contextBlock}\n\nMy question: ${question}` }] },
+      ];
+
+      const sources = items.map((s, i) => ({ n: i + 1, id: s.id, title: s.title || 'Untitled' }));
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('x-vercel-ai-data-stream', 'v1');
+      res.setHeader('x-aios-sources', encodeURIComponent(JSON.stringify(sources)));
+      res.setHeader('Cache-Control', 'no-cache');
+
+      const { GoogleGenAI } = await import('@google/genai');
+      const stream = await new GoogleGenAI({ apiKey: key }).models.generateContentStream({
+        model: 'gemini-2.5-flash',
+        contents,
+        config: { systemInstruction },
+      });
+      for await (const chunk of stream) {
+        if (aborted) return;
+        if (chunk.text) res.write(`0:${JSON.stringify(chunk.text)}\n`);
+      }
+      res.write(`d:${JSON.stringify({ finishReason: 'stop' })}\n`);
+      res.end();
+    } catch (e) {
+      const message = e?.message || 'Ask Second Brain failed.';
+      if (!res.headersSent) res.status(502).json({ error: message });
+      else { try { res.write(`3:${JSON.stringify(message)}\n`); res.end(); } catch {} }
+    }
   });
 
   // ── DeepDives: threads + messages ───────────────────────────────────────
