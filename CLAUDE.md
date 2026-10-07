@@ -10,7 +10,7 @@ The README and `docs/PROGRESS.md` describe earlier phases and are partly stale (
 
 ## Commands
 
-Current handoff: `docs/SHIP-HANDOFF.md` (2026-09-19). Pick one H01–H06 task; the owner requested a clean stop and a private Windows test build before more broad implementation. `docs/SHIP-STATUS.md` records actual completion and limitations.
+Current state: v1.5.1 released 2026-10-06; H01–H05 in `docs/SHIP-HANDOFF.md` are done, and the next work is H06 (the B07+ packets in `docs/SHIP-BACKLOG.md`) when the owner resumes it. `docs/SHIP-STATUS.md` records actual completion and limitations.
 
 ```powershell
 npm install              # postinstall auto-runs electron-rebuild for native modules

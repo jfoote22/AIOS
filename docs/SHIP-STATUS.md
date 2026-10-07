@@ -1,6 +1,23 @@
 # AIOS implementation status
 
-Updated 2026-09-19. **Three hardening batches implemented; not ready for public release.** Start with [the v1.4.0 agent handoff](SHIP-HANDOFF.md) for current, bounded tasks.
+Updated 2026-10-06. **v1.5.0 and v1.5.1 released (unsigned); not GA.** H01–H05 from [the handoff](SHIP-HANDOFF.md) are done; the next work is H06 (the B07+ backlog) — see "2026-10-06 releases" below.
+
+## 2026-10-06 releases
+
+**v1.5.0** (`159fa29`, PR #1) shipped the three hardening batches below plus the 2026-09-22..24 model/bug fixes.
+- H01: fresh-clone `npm ci`/check/test:electron/dist on Windows. Cleared the critical/high npm advisories published after 9/19 (`proxy-addr`, `shell-quote` override, `source-map-js`, `http-cache-semantics`). Remaining: 9 moderate, all `sprintf-js` with no patched release.
+- H04: Verify and Release pass on Windows x64, macOS arm64 and Linux x64. CI found and fixed: node-pty 1.1.0's macOS `spawn-helper` shipped without its execute bit (every fresh macOS install's terminal failed); Ubuntu 24.04 runners need the Chromium SUID sandbox helper configured; ingest-smoke needed an in-memory credential store without a keyring. The macOS DMG step can flake (`hdiutil` "Unable to shrink"); re-run the job.
+
+**H05** (PR #2): mobile on Expo SDK 57 / React Native 0.86 / React 19. Mobile audit 68 → 23 findings (0 critical; remainder is build tooling with no fix). `markdown-it`/`linkify-it` overridden for a shipped DoS. Device-tested on Android.
+
+**v1.5.1** (PR #3):
+- Installed builds could not run any subscription Claude/Codex call: the SDKs launched their CLIs from inside `app.asar`. `electron/sdk-binaries.cjs` points them at `app.asar.unpacked`.
+- Phone OCR and Ask Second Brain fall back to Claude (subscription via the Agent SDK, or the Anthropic key) when Gemini fails; `electron/claude-generate.cjs`. Desktop snipping OCR and embeddings still require Gemini.
+- Mobile: Home tab (collapsible 3D brain over a Howie/Hermes and Ask Second Brain chat), share-an-image-to-AIOS capture, latest-screenshot capture, QR pairing (desktop renders the code as a QR), tab bar inset fix, terminal tab removed. Gateway adds `POST /api/mobile/ask` and allows `hermes/chat` through the proxy.
+
+Known open items: quitting from the tray can leave windowless AIOS processes running; Grok in subscription mode needs `grok login` on the desktop; installers are unsigned.
+
+## Earlier batches (2026-09-19)
 
 This is the execution record for [SHIP-BACKLOG.md](SHIP-BACKLOG.md), not a replacement roadmap. No vault encryption, multi-device sync, offline OCR, video pipeline, signed installers, or launch/billing system is claimed by this batch. No production user data or paid provider sessions were used for testing.
 

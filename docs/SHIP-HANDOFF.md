@@ -1,5 +1,7 @@
 # AIOS v1.4.0 — handoff to the next agent
 
+> **2026-10-06:** H01–H05 are complete and shipped in v1.5.0/v1.5.1 — see the "2026-10-06 releases" section of [SHIP-STATUS.md](SHIP-STATUS.md). Only H06 remains. The text below is the original 2026-09-19 handoff.
+
 Updated 2026-09-19. The owner requested a clean stopping point to limit usage. Pick one bounded task below; do not resume the entire roadmap autonomously.
 
 ## Resume here
