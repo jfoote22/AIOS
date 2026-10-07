@@ -12,6 +12,7 @@
 
 import * as db from './db';
 import { apiUrl } from './apiBase';
+import { ensureWorkspaceAccess } from './fileAccess';
 import { getAnthropicAuthMode } from './authMode';
 
 export interface SkillDef {
@@ -101,6 +102,7 @@ export async function saveSkill(skill: SkillDef, opts?: { fallbackWorkingDir?: s
     return { filePath: null, warning: 'No working directory or board project root set — skipped SKILL.md write.' };
   }
   try {
+    await ensureWorkspaceAccess(writeDir);
     const res = await fetch(apiUrl('/api/skills/write-md'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -125,6 +127,7 @@ export async function deleteSkill(id: string, opts?: { alsoDeleteFiles?: boolean
   await db.removeSkill(id);
   if (opts?.alsoDeleteFiles && opts.workingDir && opts.slug) {
     try {
+      await ensureWorkspaceAccess(opts.workingDir);
       await fetch(apiUrl('/api/skills/delete-md'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

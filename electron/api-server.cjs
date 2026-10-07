@@ -1,5 +1,5 @@
 // Local Express server that emulates DeepDive's Next.js API routes.
-// Bound to 127.0.0.1 on a random port; only the main window can reach it.
+// Bound to loopback and authenticated with a main-process-only credential.
 // API keys are pulled per-request from the encrypted key store.
 
 const express = require('express');
@@ -8,15 +8,13 @@ const fsSync = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const cors = (req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-};
+const { localApiGuard } = require('./http-security.cjs');
+const { registerGeminiGeneration } = require('./gemini-generation.cjs');
+const { noToolsPolicy, executionPolicy, assertAgentResult } = require('./agent-policy.cjs');
+const { fileAccess } = require('./file-access.cjs');
 
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
+const { promptStream } = require('./agent-prompt.cjs');
 const { getModelId, setModelId } = require('./modelstore.cjs');
 const extract = require('./extract.cjs');
 const research = require('./research.cjs');
@@ -40,29 +38,8 @@ function withContext(base, context) {
 }
 
 function streamHandler(buildModel, defaultSystem) {
-  return async (req, res) => {
-    try {
-      const { messages, showReasoning = false, mode = 'normal', variant, context } = req.body || {};
-      const { ai, createOpenAI, createAnthropic } = await loadAi();
-      const { model, system, steer } = buildModel({ showReasoning, mode, variant, createOpenAI, createAnthropic });
-      const result = await ai.streamText({
-        model,
-        messages: ai.convertToCoreMessages(appendSteer(messages, steer)),
-        system: withContext(system ?? defaultSystem, context),
-        maxTokens: 4000,
-      });
-      result.pipeDataStreamToResponse(res);
-    } catch (err) {
-      console.error('API stream error:', err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: err?.message || 'Stream failed' });
-      } else {
-        res.end();
-      }
-    }
-  };
+  return require('./chat-stream.cjs').createChatStreamHandler({ buildModel, defaultSystem, loadAi, withContext, appendSteer });
 }
-
 const VISION_EXT_MIME = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -94,7 +71,7 @@ async function buildVisionExtractor() {
     return async (buf, ext) => {
       const mimeType = VISION_EXT_MIME[ext] || 'application/octet-stream';
       const result = await client.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: getModelId('gemini'),
         contents: [{
           role: 'user',
           parts: [
@@ -134,7 +111,72 @@ async function buildVisionExtractor() {
   return null;
 }
 
-function buildGrokSystemPrompt({ showReasoning, mode }) {
+// ── Persona: a provider-neutral style layer ──────────────────────────────────
+// Personas apply to EVERY provider, not just Grok. The user picks one style and
+// gets it whether the reply comes from Claude, ChatGPT, Grok or Gemini, so the
+// assistant's voice does not change when they switch models mid-conversation.
+//
+// Persona is chosen per-message and can change mid-conversation. The model sees
+// its own earlier replies in the history and tends to keep imitating their
+// style, so every persona ends with an explicit override clause telling it to
+// ignore the tone/format of prior messages from THIS reply on.
+const PERSONA_OVERRIDE =
+  ' IMPORTANT: This style governs your next reply and every reply after it. ' +
+  'Ignore and override the tone, length, and formatting of any earlier ' +
+  'messages in this conversation — even if your own previous answers used a ' +
+  'completely different style. Switch fully to this style now.';
+
+function buildPersonaSystem(persona) {
+  switch (persona) {
+    case 'fun':      return "Answer in Fun mode — witty and irreverent, in the spirit of the Hitchhiker's Guide to the Galaxy. Lean into clever jokes, playful sarcasm, and entertaining asides while staying genuinely helpful and accurate." + PERSONA_OVERRIDE;
+    case 'creative': return 'Answer in Creative mode. Think laterally: offer imaginative, original, out-of-the-box ideas, vivid analogies, and unexpected angles, while keeping the underlying substance accurate and useful.' + PERSONA_OVERRIDE;
+    case 'precise':  return 'Answer in Precise mode. Prioritize accuracy and clarity: give well-structured, detailed, factual answers in complete sentences. Be thorough and specific, define key terms, and avoid humor, hedging, and filler.' + PERSONA_OVERRIDE;
+    case 'caveman':  return 'Answer in Caveman mode. Talk like primitive caveman: very short, blunt sentences. Few words. Drop "the", "a", "is", and filler. Grunt-style speech — but answer must still be correct, efficient, and effective. Example: "Code broke. Missing comma line 5. Add comma. Fixed. Good."' + PERSONA_OVERRIDE;
+    default:         return 'Answer in Normal mode: clear, well-structured responses in full sentences with a light touch of wit when it fits.' + PERSONA_OVERRIDE;
+  }
+}
+
+// A short, recency-weighted style directive appended to ONLY the latest user
+// message. The system prompt sets the persona, but when a conversation was
+// started in one style (e.g. caveman) the model tends to keep imitating its own
+// earlier replies. Putting the directive on the most recent turn — the highest-
+// weighted position — reliably overrides that without touching the history.
+function buildPersonaSteer(persona) {
+  switch (persona) {
+    case 'fun':      return '[Answer THIS message in Fun mode: witty and playful with jokes — ignore the style of earlier replies.]';
+    case 'creative': return '[Answer THIS message in Creative mode: imaginative and out-of-the-box — ignore the style of earlier replies.]';
+    case 'precise':  return '[Answer THIS message in Precise mode: detailed, well-structured, factual, no filler — ignore the style of earlier replies.]';
+    case 'caveman':  return '[Answer THIS message in Caveman mode: very short, blunt, primitive grunt-speech — ignore the style of earlier replies.]';
+    default:         return '[Answer THIS message in Normal mode: clear, well-structured full sentences — ignore the style of earlier replies.]';
+  }
+}
+
+// Compose a route's own system prompt with the selected persona.
+function withPersona(base, persona) {
+  return `${base}
+
+${buildPersonaSystem(persona)}`;
+}
+
+// ── Grok response mode: how much work to do, orthogonal to persona ───────────
+// These mirror the mode names in xAI's own Grok interface. They are implemented
+// as system-prompt directives — the chat API takes a model id and messages, not
+// a mode parameter — so they shape how the configured Grok model answers. Heavy
+// in particular is a prompt directive, NOT xAI's paid multi-agent Heavy tier;
+// reaching that requires a model id that grants it, set in the Models tab.
+function buildGrokModeDirective(mode) {
+  switch (mode) {
+    case 'fast':   return 'Work in Fast mode: answer immediately and briefly — lead with the direct answer, skip preamble and restating the question. If something is genuinely uncertain, say so in a clause, not a paragraph.';
+    case 'expert': return 'Work in Expert mode: answer as a domain specialist writing for another specialist — precise terminology, explicit assumptions, quantities and tradeoffs where they matter, and the reasoning behind the conclusion rather than only the conclusion.';
+    case 'build':  return 'Work in Build mode: lead with working code, commands, or configuration rather than prose about them. State assumptions inline as comments, note the failure modes that actually bite, and keep explanation to what the reader needs to run it.';
+    case 'heavy':  return 'Work in Heavy mode: take the hardest reading of the question and work it thoroughly — consider several approaches before committing, check your own reasoning for errors, surface edge cases and where the answer could be wrong, then give a complete answer. Prefer being right and long over quick and thin.';
+    default:       return 'Work in Auto mode: judge the depth the question deserves and match it — brief for simple questions, thorough for hard ones.';
+  }
+}
+
+// The Think Mode transcript format is Grok-specific and replaces the normal
+// system prompt entirely, so it is checked before persona/mode composition.
+function buildGrokSystemPrompt({ showReasoning, mode, persona }) {
   if (showReasoning) {
     return `You are Grok4, a witty and helpful AI assistant created by X.AI. When responding, you MUST show your complete thinking process using this exact format:
 
@@ -151,38 +193,10 @@ function buildGrokSystemPrompt({ showReasoning, mode }) {
 
 Always show your work like on grok.com's Think Mode. Be thorough in your reasoning process, even for simple questions.`;
   }
-  // Persona is chosen per-message and can change mid-conversation. The model
-  // sees its own earlier replies in the history and tends to keep imitating
-  // their style, so every persona ends with an explicit override clause that
-  // tells it to ignore the tone/format of prior messages from THIS reply on.
-  const OVERRIDE =
-    ' IMPORTANT: This style governs your next reply and every reply after it. ' +
-    'Ignore and override the tone, length, and formatting of any earlier ' +
-    'messages in this conversation — even if your own previous answers used a ' +
-    'completely different style. Switch fully to this style now.';
-
-  switch (mode) {
-    case 'fun':      return "You are Grok4 in Fun mode — a witty, irreverent AI inspired by the Hitchhiker's Guide to the Galaxy. Lean into clever jokes, playful sarcasm, and entertaining asides while still being genuinely helpful and accurate." + OVERRIDE;
-    case 'creative': return 'You are Grok4 in Creative mode. Think laterally: offer imaginative, original, out-of-the-box ideas, vivid analogies, and unexpected angles, while keeping the underlying substance accurate and useful.' + OVERRIDE;
-    case 'precise':  return 'You are Grok4 in Precise mode. Prioritize accuracy and clarity: give well-structured, detailed, factual answers in complete sentences. Be thorough and specific, define key terms, and avoid humor, hedging, and filler.' + OVERRIDE;
-    case 'caveman':  return 'You are Grok4 in Caveman mode. Talk like primitive caveman: very short, blunt sentences. Few words. Drop "the", "a", "is", and filler. Grunt-style speech — but answer must still be correct, efficient, and effective. Example: "Code broke. Missing comma line 5. Add comma. Fixed. Good."' + OVERRIDE;
-    default:         return 'You are Grok4, a helpful AI assistant by xAI. Write clear, well-structured responses in full sentences with a light touch of wit when it fits.' + OVERRIDE;
-  }
-}
-
-// A short, recency-weighted style directive appended to ONLY the latest user
-// message. The system prompt sets the persona, but when a conversation was
-// started in one style (e.g. caveman) the model tends to keep imitating its own
-// earlier replies. Putting the directive on the most recent turn — the highest-
-// weighted position — reliably overrides that without touching the history.
-function buildGrokSteer(mode) {
-  switch (mode) {
-    case 'fun':      return '[Answer THIS message in Fun mode: witty and playful with jokes — ignore the style of earlier replies.]';
-    case 'creative': return '[Answer THIS message in Creative mode: imaginative and out-of-the-box — ignore the style of earlier replies.]';
-    case 'precise':  return '[Answer THIS message in Precise mode: detailed, well-structured, factual, no filler — ignore the style of earlier replies.]';
-    case 'caveman':  return '[Answer THIS message in Caveman mode: very short, blunt, primitive grunt-speech — ignore the style of earlier replies.]';
-    default:         return '[Answer THIS message in Normal mode: clear, well-structured full sentences — ignore the style of earlier replies.]';
-  }
+  return withPersona(
+    `You are Grok, a helpful AI assistant by xAI. ${buildGrokModeDirective(mode)}`,
+    persona,
+  );
 }
 
 // Return a copy of `messages` with `steer` appended to the most recent user
@@ -424,10 +438,12 @@ function aiosJobToHermesBody(job) {
   return body;
 }
 
-function start() {
+function start({ development = false, approveAgentTool } = {}) {
   const app = express();
-  app.use(cors);
+  app.disable('x-powered-by');
+  app.use(localApiGuard({ development }));
   app.use(express.json({ limit: '20mb' }));
+  registerGeminiGeneration(app, { getProviderKey });
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
@@ -584,12 +600,11 @@ function start() {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: userPrompt,
+          prompt: promptStream(userPrompt),
           options: {
             model: modelId,
             systemPrompt: sysParts.join('\n'),
-            allowedTools: [],
-            permissionMode: 'bypassPermissions',
+            ...noToolsPolicy(),
           },
         });
         for await (const msg of stream) {
@@ -597,14 +612,14 @@ function start() {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         const key = getProviderKey('anthropic');
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 1200,
@@ -626,32 +641,44 @@ function start() {
 
   // --- OpenAI chat (model ID configurable via Models tab) ---
   app.post('/api/openai/chat', streamHandler(
-    ({ createOpenAI }) => {
+    ({ persona, createOpenAI }) => {
       const key = getProviderKey('openai');
       if (!key) throw new Error('OpenAI key not configured. Add it in Models tab.');
       const client = createOpenAI({ apiKey: key });
-      return { model: client(getModelId('openai')), system: 'You are a helpful AI assistant' };
+      return {
+        model: client.chat(getModelId('openai')),
+        system: withPersona('You are a helpful AI assistant.', persona),
+        steer: buildPersonaSteer(persona),
+      };
     }
   ));
 
-  // --- Anthropic chat (model IDs for Opus/Sonnet variants configurable via Models tab) ---
+  // Anthropic request `variant` -> model-store slot. Each slot is configurable
+  // in the Models tab; unknown variants fall back to the Opus slot.
+  const ANTHROPIC_SLOTS = { opus: 'claude', sonnet: 'anthropic', fable: 'fable' };
+
+  // --- Anthropic chat (model IDs for Opus/Sonnet/Fable variants, configurable via Models tab) ---
   app.post('/api/anthropic/chat', streamHandler(
-    ({ variant, createAnthropic }) => {
+    ({ variant, persona, createAnthropic }) => {
       const key = getProviderKey('anthropic');
       if (!key) throw new Error('Anthropic key not configured. Add it in Models tab.');
       const client = createAnthropic({ apiKey: key });
-      const slot = variant === 'sonnet' ? 'anthropic' : 'claude';
-      return { model: client(getModelId(slot)), system: 'You are a helpful AI assistant. You provide thoughtful, accurate, and engaging responses.' };
+      const slot = ANTHROPIC_SLOTS[variant] || 'claude';
+      return {
+        model: client(getModelId(slot)),
+        system: withPersona('You are a helpful AI assistant. You provide thoughtful, accurate, and engaging responses.', persona),
+        steer: buildPersonaSteer(persona),
+      };
     }
   ));
 
   // --- Grok chat (X.AI, OpenAI-compatible; model ID configurable via Models tab) ---
   app.post('/api/grok/chat', streamHandler(
-    ({ showReasoning, mode, createOpenAI }) => {
+    ({ showReasoning, mode, persona, createOpenAI }) => {
       const key = getProviderKey('grok');
       if (!key) throw new Error('Grok (xAI) key not configured. Add it in Models tab.');
       const client = createOpenAI({ baseURL: 'https://api.x.ai/v1', apiKey: key });
-      return { model: client(getModelId('grok')), system: buildGrokSystemPrompt({ showReasoning, mode }), steer: buildGrokSteer(mode) };
+      return { model: client.chat(getModelId('grok')), system: buildGrokSystemPrompt({ showReasoning, mode, persona }), steer: buildPersonaSteer(persona) };
     }
   ));
 
@@ -713,7 +740,7 @@ function start() {
       ).join('\n\n');
       const prompt = history ? `${history}\n\nUser: ${last.content}` : last.content;
 
-      const slot = variant === 'sonnet' ? 'anthropic' : 'claude';
+      const slot = ANTHROPIC_SLOTS[variant] || 'claude';
       const modelId = getModelId(slot);
 
       const { query } = await import('@anthropic-ai/claude-agent-sdk');
@@ -723,12 +750,11 @@ function start() {
       res.setHeader('Cache-Control', 'no-cache');
 
       const stream = query({
-        prompt,
+        prompt: promptStream(prompt),
         options: {
           model: modelId,
           systemPrompt: withContext('You are a helpful AI assistant. Respond conversationally and concisely.', context),
-          allowedTools: [],
-          permissionMode: 'bypassPermissions',
+          ...noToolsPolicy(),
         },
       });
 
@@ -748,6 +774,7 @@ function start() {
             prevLen = full.length;
           }
         } else if (msg.type === 'result') {
+          assertAgentResult(msg);
           break;
         }
       }
@@ -810,12 +837,11 @@ function start() {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: `${systemPrompt}\n\n${userPrompt}`,
+          prompt: promptStream(`${systemPrompt}\n\n${userPrompt}`),
           options: {
             model: modelId,
             systemPrompt,
-            allowedTools: [],
-            permissionMode: 'bypassPermissions',
+            ...noToolsPolicy(),
           },
         });
         for await (const msg of stream) {
@@ -823,7 +849,7 @@ function start() {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         // API key path via @anthropic-ai/sdk
@@ -833,7 +859,7 @@ function start() {
         }
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 4096,
@@ -902,22 +928,22 @@ function start() {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: userPrompt,
-          options: { model: modelId, systemPrompt, allowedTools: [], permissionMode: 'bypassPermissions' },
+          prompt: promptStream(userPrompt),
+          options: { model: modelId, systemPrompt, ...noToolsPolicy() },
         });
         for await (const msg of stream) {
           if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         const key = getProviderKey('anthropic');
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 3072,
@@ -960,14 +986,11 @@ function start() {
         return res.status(400).json({ error: 'Slug must be lowercase alphanumeric + dashes.' });
       }
       const safeSlug = slug.slice(0, 60);
-      const dir = path.resolve(workingDir, '.claude', 'agents');
-      const file = path.join(dir, `${safeSlug}.md`);
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(file, markdown, 'utf8');
+      const file = await fileAccess.write(workingDir, `.claude/agents/${safeSlug}.md`, markdown);
       res.json({ path: file });
     } catch (err) {
       console.error('write-md error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to write agent file.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to write agent file.' });
     }
   });
 
@@ -976,12 +999,11 @@ function start() {
       const { slug, workingDir } = req.body || {};
       if (!slug || !workingDir) return res.status(400).json({ error: 'Missing slug or workingDir.' });
       if (!/^[a-z0-9-]+$/.test(slug)) return res.status(400).json({ error: 'Bad slug.' });
-      const file = path.resolve(workingDir, '.claude', 'agents', `${slug.slice(0, 60)}.md`);
-      try { await fs.unlink(file); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
-      res.json({ ok: true });
+      const trashPath = await fileAccess.trash(workingDir, `.claude/agents/${slug.slice(0, 60)}.md`);
+      res.json({ ok: true, trashPath });
     } catch (err) {
       console.error('delete-md error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to delete agent file.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to delete agent file.' });
     }
   });
 
@@ -998,14 +1020,11 @@ function start() {
       if (!project || typeof project !== 'object') {
         return res.status(400).json({ error: 'Missing project payload.' });
       }
-      const dir = path.resolve(projectRoot, '.aios');
-      const file = path.join(dir, 'project.json');
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(file, JSON.stringify(project, null, 2), 'utf8');
+      const file = await fileAccess.write(projectRoot, '.aios/project.json', JSON.stringify(project, null, 2), { scope: 'project', maxBytes: 10 * 1024 * 1024 });
       res.json({ path: file });
     } catch (err) {
       console.error('project save error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to save project.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to save project.' });
     }
   });
 
@@ -1015,10 +1034,10 @@ function start() {
       if (!projectRoot || typeof projectRoot !== 'string') {
         return res.status(400).json({ error: 'Missing projectRoot.' });
       }
-      const file = path.resolve(projectRoot, '.aios', 'project.json');
+      const file = await fileAccess.target(projectRoot, '.aios/project.json', 'project');
       let raw;
       try {
-        raw = await fs.readFile(file, 'utf8');
+        raw = (await fileAccess.read(projectRoot, '.aios/project.json', { scope: 'project', maxBytes: 10 * 1024 * 1024 })).toString('utf8');
       } catch (e) {
         if (e?.code === 'ENOENT') return res.json({ exists: false });
         throw e;
@@ -1032,7 +1051,7 @@ function start() {
       res.json({ exists: true, project, path: file });
     } catch (err) {
       console.error('project load error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to load project.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to load project.' });
     }
   });
 
@@ -1081,12 +1100,11 @@ function start() {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: userPrompt,
+          prompt: promptStream(userPrompt),
           options: {
             model: modelId,
             systemPrompt: sysParts.join('\n'),
-            allowedTools: [],
-            permissionMode: 'bypassPermissions',
+            ...noToolsPolicy(),
           },
         });
         for await (const msg of stream) {
@@ -1094,14 +1112,14 @@ function start() {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         const key = getProviderKey('anthropic');
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 1024,
@@ -1136,14 +1154,12 @@ function start() {
         return res.status(400).json({ error: 'Slug must be lowercase alphanumeric + dashes.' });
       }
       const safeSlug = slug.slice(0, 60);
-      const dir = path.resolve(workingDir, '.claude', 'skills', safeSlug);
-      const file = path.join(dir, 'SKILL.md');
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(file, markdown, 'utf8');
+      const file = await fileAccess.write(workingDir, `.claude/skills/${safeSlug}/SKILL.md`, markdown);
+      const dir = path.dirname(file);
       res.json({ path: file, dir });
     } catch (err) {
       console.error('skill write-md error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to write skill file.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to write skill file.' });
     }
   });
 
@@ -1152,13 +1168,12 @@ function start() {
       const { slug, workingDir } = req.body || {};
       if (!slug || !workingDir) return res.status(400).json({ error: 'Missing slug or workingDir.' });
       if (!/^[a-z0-9-]+$/.test(slug)) return res.status(400).json({ error: 'Bad slug.' });
-      // Remove the whole skill folder (SKILL.md + any supporting files).
-      const dir = path.resolve(workingDir, '.claude', 'skills', slug.slice(0, 60));
-      try { await fs.rm(dir, { recursive: true, force: true }); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
-      res.json({ ok: true });
+      // Move the complete folder into recoverable, workspace-local trash.
+      const trashPath = await fileAccess.trash(workingDir, `.claude/skills/${slug.slice(0, 60)}`);
+      res.json({ ok: true, trashPath });
     } catch (err) {
       console.error('skill delete-md error:', err);
-      res.status(500).json({ error: err?.message || 'Failed to delete skill folder.' });
+      res.status(err?.status || 500).json({ error: err?.message || 'Failed to delete skill folder.' });
     }
   });
 
@@ -1203,12 +1218,11 @@ function start() {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: userPrompt,
+          prompt: promptStream(userPrompt),
           options: {
             model: modelId,
             systemPrompt: sysParts.join('\n'),
-            allowedTools: [],
-            permissionMode: 'bypassPermissions',
+            ...noToolsPolicy(),
           },
         });
         for await (const msg of stream) {
@@ -1216,14 +1230,14 @@ function start() {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         const key = getProviderKey('anthropic');
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId,
           max_tokens: 1536,
@@ -1243,28 +1257,23 @@ function start() {
     }
   });
 
-  // --- IDE file ops: sandboxed read/write/list under a .claude/* folder ---
+  // --- IDE file ops: approved read/write/list under a .claude/* folder ---
   // Powers the "Editor" mode of the Agent/Skill creators. Every op takes an
   // absolute `root` (the agent/skill folder) plus a `relPath` within it. To
   // keep this from becoming an arbitrary-filesystem API, `root` MUST contain a
   // `.claude` path segment, and the resolved target MUST stay inside `root`.
+  // Main-process native approval grants workspace access; links are rejected.
+  // These path checks do not sandbox hostile same-user filesystem processes.
   const FS_MAX_ENTRIES = 2000;
-  function resolveClaudeTarget(root, relPath = '') {
-    if (!root || typeof root !== 'string') throw Object.assign(new Error('Missing root.'), { status: 400 });
-    const normRoot = path.resolve(root);
-    const segs = normRoot.split(/[\\/]+/);
-    if (!segs.includes('.claude')) {
-      throw Object.assign(new Error('root must live under a .claude folder.'), { status: 400 });
-    }
-    const target = path.resolve(normRoot, relPath || '');
-    const rel = path.relative(normRoot, target);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      throw Object.assign(new Error('Path escapes the sandbox root.'), { status: 400 });
-    }
+  async function resolveClaudeTarget(root, relPath = '') {
+    const normRoot = await fileAccess.target(root);
+    const target = await fileAccess.target(normRoot, relPath);
     return { normRoot, target };
   }
 
-  async function buildTree(absDir, relBase, budget) {
+  async function buildTree(root, relBase, budget) {
+    if (relBase.split('/').length > 32) { budget.truncated = true; return []; }
+    const absDir = await fileAccess.target(root, relBase);
     let entries;
     try {
       entries = await fs.readdir(absDir, { withFileTypes: true });
@@ -1288,7 +1297,7 @@ function start() {
           name: ent.name,
           path: relPath,
           type: 'dir',
-          children: await buildTree(path.join(absDir, ent.name), relPath, budget),
+          children: await buildTree(root, relPath, budget),
         });
       } else if (ent.isFile()) {
         out.push({ name: ent.name, path: relPath, type: 'file' });
@@ -1300,10 +1309,10 @@ function start() {
   app.post('/api/fs/tree', async (req, res) => {
     try {
       const { root } = req.body || {};
-      const { normRoot } = resolveClaudeTarget(root);
+      const { normRoot } = await resolveClaudeTarget(root);
       const budget = { count: 0 };
       const tree = await buildTree(normRoot, '', budget);
-      res.json({ root: normRoot, tree, truncated: budget.count >= FS_MAX_ENTRIES });
+      res.json({ root: normRoot, tree, truncated: budget.truncated || budget.count >= FS_MAX_ENTRIES });
     } catch (err) {
       res.status(err?.status || 500).json({ error: err?.message || 'Failed to read tree.' });
     }
@@ -1312,11 +1321,8 @@ function start() {
   app.post('/api/fs/read', async (req, res) => {
     try {
       const { root, relPath } = req.body || {};
-      const { target } = resolveClaudeTarget(root, relPath);
-      const stat = await fs.stat(target);
-      if (!stat.isFile()) return res.status(400).json({ error: 'Not a file.' });
-      if (stat.size > 2 * 1024 * 1024) return res.status(413).json({ error: 'File too large to edit here (>2 MB).' });
-      const buf = await fs.readFile(target);
+      await resolveClaudeTarget(root, relPath);
+      const buf = await fileAccess.read(root, relPath);
       // Reject binary-ish content so Monaco doesn't choke on a blob.
       if (buf.includes(0)) return res.status(415).json({ error: 'Binary file — not editable.' });
       res.json({ content: buf.toString('utf8') });
@@ -1330,9 +1336,8 @@ function start() {
     try {
       const { root, relPath, content } = req.body || {};
       if (typeof content !== 'string') return res.status(400).json({ error: 'Missing content.' });
-      const { target } = resolveClaudeTarget(root, relPath);
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, content, 'utf8');
+      await resolveClaudeTarget(root, relPath);
+      const target = await fileAccess.write(root, relPath, content);
       res.json({ ok: true, path: target });
     } catch (err) {
       res.status(err?.status || 500).json({ error: err?.message || 'Failed to write file.' });
@@ -1343,15 +1348,12 @@ function start() {
     try {
       const { root, relPath, kind = 'file' } = req.body || {};
       if (!relPath) return res.status(400).json({ error: 'Missing relPath.' });
-      const { target } = resolveClaudeTarget(root, relPath);
+      const { target } = await resolveClaudeTarget(root, relPath);
       if (kind === 'dir') {
-        await fs.mkdir(target, { recursive: true });
+        await fileAccess.mkdir(root, relPath);
       } else {
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        // Don't clobber an existing file.
-        const fh = await fs.open(target, 'wx').catch(e => { if (e?.code === 'EEXIST') return null; throw e; });
-        if (!fh) return res.status(409).json({ error: 'A file with that name already exists.' });
-        await fh.close();
+        try { await fileAccess.write(root, relPath, '', { exclusive: true }); }
+        catch (error) { if (error.code === 'EEXIST') return res.status(409).json({ error: 'A file with that name already exists.' }); throw error; }
       }
       res.json({ ok: true, path: target });
     } catch (err) {
@@ -1363,10 +1365,10 @@ function start() {
     try {
       const { root, relPath } = req.body || {};
       if (!relPath) return res.status(400).json({ error: 'Missing relPath.' });
-      const { normRoot, target } = resolveClaudeTarget(root, relPath);
+      const { normRoot, target } = await resolveClaudeTarget(root, relPath);
       if (target === normRoot) return res.status(400).json({ error: 'Refusing to delete the root folder here.' });
-      await fs.rm(target, { recursive: true, force: true });
-      res.json({ ok: true });
+      const trashPath = await fileAccess.trash(root, relPath);
+      res.json({ ok: true, trashPath });
     } catch (err) {
       res.status(err?.status || 500).json({ error: err?.message || 'Failed to delete entry.' });
     }
@@ -1376,10 +1378,9 @@ function start() {
     try {
       const { root, relPath, newRelPath } = req.body || {};
       if (!relPath || !newRelPath) return res.status(400).json({ error: 'Missing relPath or newRelPath.' });
-      const { target: from } = resolveClaudeTarget(root, relPath);
-      const { target: to } = resolveClaudeTarget(root, newRelPath);
-      await fs.mkdir(path.dirname(to), { recursive: true });
-      await fs.rename(from, to);
+      await resolveClaudeTarget(root, relPath);
+      await resolveClaudeTarget(root, newRelPath);
+      const to = await fileAccess.rename(root, relPath, newRelPath);
       res.json({ ok: true, path: to });
     } catch (err) {
       res.status(err?.status || 500).json({ error: err?.message || 'Failed to rename entry.' });
@@ -1401,12 +1402,14 @@ function start() {
     if (!runId || !card || !agent) {
       return res.status(400).json({ error: 'Missing runId, card, or agent.' });
     }
+    if (activeRuns.has(runId)) return res.status(409).json({ error: 'This run is already active.' });
     if (!agent.systemPrompt || !agent.systemPrompt.trim()) {
       return res.status(400).json({ error: 'Agent has no system prompt — fill it in the Agent Builder first.' });
     }
 
     const controller = new AbortController();
     activeRuns.set(runId, controller);
+    res.on('close', () => controller.abort());
 
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('x-vercel-ai-data-stream', 'v1');
@@ -1443,7 +1446,7 @@ function start() {
       // Both paths use the Claude Agent SDK so the agent gets real tool access.
       // API-key path also goes through Agent SDK (it picks up ANTHROPIC_API_KEY
       // from process env if no subscription is logged in).
-      const prevEnvKey = process.env.ANTHROPIC_API_KEY;
+      let apiKey;
       if (authMode !== 'subscription') {
         const key = getProviderKey('anthropic');
         if (!key) {
@@ -1453,7 +1456,7 @@ function start() {
           writeFinish('error');
           return res.end();
         }
-        process.env.ANTHROPIC_API_KEY = key;
+        apiKey = key;
       }
 
       const { query } = await import('@anthropic-ai/claude-agent-sdk');
@@ -1461,22 +1464,16 @@ function start() {
       const allowed = Array.isArray(agent.allowedTools) ? agent.allowedTools : [];
       const cwd = (agent.workingDir && typeof agent.workingDir === 'string') ? agent.workingDir : undefined;
 
-      writeText(`• Agent: ${agent.name || agent.slug}\n• Model: ${modelOverride || 'inherit'}\n• Tools: ${allowed.join(', ') || '(none)'}\n• Skills: all installed (~/.claude/skills + project)\n• Cwd: ${cwd || '(default)'}\n\n`);
+      writeText(`• Agent: ${agent.name || agent.slug}\n• Model: ${modelOverride || 'inherit'}\n• Tools: ${allowed.join(', ') || '(none)'} (desktop approval per use)\n• Installed skills/hooks: not loaded automatically\n• Cwd: ${cwd || '(default)'}\n\n`);
 
       const stream = query({
-        prompt: taskPrompt,
+        prompt: promptStream(taskPrompt),
         options: {
           model: modelOverride,
           systemPrompt: agent.systemPrompt,
-          allowedTools: allowed,
-          // Make every installed skill discoverable + invocable by any board
-          // agent. Per the Agent SDK, `skills: 'all'` is the single switch that
-          // turns skills on — it also wires the Skill tool, so we don't add it
-          // to each agent's allowedTools. settingSources loads ~/.claude (user)
-          // and the project's .claude (skills, subagents, CLAUDE.md).
-          skills: 'all',
-          settingSources: ['user', 'project'],
-          permissionMode: 'bypassPermissions',
+          ...executionPolicy({ tools: allowed, apiKey, signal: controller.signal,
+            approve: request => approveAgentTool?.({ ...request, agentName: agent.name || agent.slug, cwd, signal: controller.signal }),
+          }),
           cwd,
           abortController: controller,
         },
@@ -1520,13 +1517,9 @@ function start() {
           // Reset assistant counter so the next assistant message starts fresh
           assistantPrevLen = 0;
         } else if (msg.type === 'result') {
+          assertAgentResult(msg);
           break;
         }
-      }
-
-      if (authMode !== 'subscription') {
-        if (prevEnvKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-        else process.env.ANTHROPIC_API_KEY = prevEnvKey;
       }
 
       writeFinish(controller.signal.aborted ? 'canceled' : 'stop');
@@ -1591,22 +1584,22 @@ function start() {
         const { query } = await import('@anthropic-ai/claude-agent-sdk');
         const modelId = getModelId('claude') || getModelId('anthropic');
         const stream = query({
-          prompt: userPrompt,
-          options: { model: modelId, systemPrompt, allowedTools: [], permissionMode: 'bypassPermissions' },
+          prompt: promptStream(userPrompt),
+          options: { model: modelId, systemPrompt, ...noToolsPolicy() },
         });
         for await (const msg of stream) {
           if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
             for (const block of msg.message.content) {
               if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
             }
-          } else if (msg.type === 'result') break;
+          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
         }
       } else {
         const key = getProviderKey('anthropic');
         if (!key) return res.status(400).json({ error: 'Anthropic key not configured.' });
         const { default: Anthropic } = await import('@anthropic-ai/sdk');
         const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic') || 'claude-opus-4-8';
+        const modelId = getModelId('claude') || getModelId('anthropic');
         const response = await client.messages.create({
           model: modelId, max_tokens: 1024, system: systemPrompt,
           messages: [{ role: 'user', content: userPrompt }],
@@ -1725,7 +1718,7 @@ function start() {
   app.post('/api/grok-agent/chat', async (req, res) => {
     let child = null;
     try {
-      const { messages = [], showReasoning = false, mode = 'normal', context } = req.body || {};
+      const { messages = [], showReasoning = false, mode = 'auto', persona = 'normal', context } = req.body || {};
       const last = messages[messages.length - 1];
       if (!last || last.role !== 'user') {
         return res.status(400).json({ error: 'Last message must be from user.' });
@@ -1735,14 +1728,14 @@ function start() {
         `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`
       ).join('\n\n');
       // Recency reinforcement so a mid-conversation persona switch overrides the
-      // style of earlier replies (see appendSteer / buildGrokSteer).
-      const steeredLast = `${last.content}\n\n${buildGrokSteer(mode)}`;
+      // style of earlier replies (see appendSteer / buildPersonaSteer).
+      const steeredLast = `${last.content}\n\n${buildPersonaSteer(persona)}`;
       const prompt = history ? `${history}\n\nUser: ${steeredLast}` : steeredLast;
 
       // Reasoning is delivered via real `thought` events, so the system prompt
       // never needs the inline THINKING/ANSWER scaffold — pass showReasoning:false.
       // Any background context (e.g. a Deep Research report) is folded in too.
-      const systemPrompt = withContext(buildGrokSystemPrompt({ showReasoning: false, mode }), context);
+      const systemPrompt = withContext(buildGrokSystemPrompt({ showReasoning: false, mode, persona }), context);
 
       // Grok Build with a grok.com login auto-selects the model for the plan.
       // Override with AIOS_GROK_MODEL (e.g. `grok-composer-2.5-fast`) if desired.
@@ -1856,7 +1849,7 @@ function start() {
   // Vercel AI data-stream protocol (same streamPart codes as the CLI routes).
   app.post('/api/gemini/chat', async (req, res) => {
     try {
-      const { messages = [], context } = req.body || {};
+      const { messages = [], persona = 'normal', context } = req.body || {};
       const last = messages[messages.length - 1];
       if (!last || last.role !== 'user') {
         return res.status(400).json({ error: 'Last message must be from user.' });
@@ -1875,7 +1868,7 @@ function start() {
         parts: [{ text: String(m.content ?? '') }],
       }));
       const systemInstruction = withContext(
-        'You are a helpful AI assistant. Respond conversationally and concisely.',
+        withPersona('You are a helpful AI assistant. Respond conversationally and concisely.', persona),
         context,
       );
 
@@ -1919,8 +1912,8 @@ function start() {
   //     response. Unlike the old Gemini CLI there is NO `--output-format`/
   //     stream-json mode — `agy` emits PLAIN TEXT on stdout, so we relay stdout
   //     chunks directly as text deltas rather than parsing JSON events.
-  //   - `--dangerously-skip-permissions` auto-approves any tool request so a
-  //     stray tool call never blocks headless (replaces gemini's yolo/skip-trust).
+  //   - Permission bypass is deliberately not enabled. Tool requests without
+  //     an available approval flow must be denied by the CLI.
   //   - `--model` selects the model, only when AIOS_GEMINI_MODEL is set; otherwise
   //     `agy` auto-selects (defaults to current Gemini 3.x flash).
   //   - `--print-timeout` bounds how long print mode waits for a response.
@@ -1953,7 +1946,7 @@ function start() {
       // `--print` forces non-interactive single-shot mode; the conversation is
       // the trailing positional prompt. Keep the prompt LAST so the boolean flags
       // parse before agy reads the positional argument.
-      const flags = ['--print', '--dangerously-skip-permissions'];
+      const flags = ['--print'];
       if (geminiModelOverride) flags.push('--model', geminiModelOverride);
       flags.push(convo);
 
@@ -2024,11 +2017,6 @@ function start() {
       if (!res.headersSent) res.status(500).json({ error: message });
       else { try { res.write(streamPart('error', message)); } catch {} res.end(); }
     }
-  });
-
-  // --- Deepgram key fetch (renderer needs the key to talk to Deepgram directly) ---
-  app.get('/api/deepgram', (_req, res) => {
-    res.json({ key: getProviderKey('deepgram') || '' });
   });
 
   // --- Vision OCR / snippet analysis (currently OpenAI; matches Gemini analyzeSnip shape) ---
@@ -2159,7 +2147,7 @@ Be specific and faithful to what is actually visible. Do not invent details. If 
       res.json(result);
     } catch (e) {
       console.error('File extraction error:', e);
-      res.status(400).json({ error: e?.message || 'Failed to extract file' });
+      res.status(e?.status || 400).json({ error: e?.message || 'Failed to extract file' });
     }
   });
 

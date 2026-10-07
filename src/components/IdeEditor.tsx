@@ -161,7 +161,7 @@ export default function IdeEditor({ baseDir, sub, onChangeBaseDir, accent = 'ind
   const deleteEntry = async (path: string) => {
     const node = findNode(tree, path);
     const what = node?.type === 'dir' ? 'folder (and everything in it)' : 'file';
-    if (!confirm(`Delete ${what} "${path}"?`)) return;
+    if (!confirm(`Move ${what} "${path}" to the workspace .aios-trash folder? You can restore it manually from there.`)) return;
     setBusy(true); setError(null);
     try {
       await fsDelete(root, path);

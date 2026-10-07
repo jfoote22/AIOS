@@ -4,7 +4,24 @@ import path from 'path';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), {
+    name: 'aios-production-csp',
+    apply: 'build',
+    transformIndexHtml: () => [{
+      tag: 'meta', injectTo: 'head-prepend',
+      attrs: { 'http-equiv': 'Content-Security-Policy', content: [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: blob: https:",
+        "font-src 'self' data:",
+        "connect-src 'self' http://127.0.0.1:* https://api.github.com",
+        "worker-src 'self' blob:",
+        "media-src 'self' data: blob:",
+        "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-src 'none'",
+      ].join('; ') },
+    }],
+  }],
   base: './',
   resolve: {
     alias: {

@@ -1,9 +1,21 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 import { decode as atob } from 'base-64';
 import { setCreds, rawPing, type Creds } from '../api/client';
+import { createCredentialStorage, validateCreds } from './credentialStorage';
 
 const STORAGE_KEY = 'aios.creds.v1';
+const SECURE_KEY = 'aios.creds.v2';
+const SECURE_OPTIONS = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
+
+const credentialStorage = createCredentialStorage({
+  readSecure: () => SecureStore.getItemAsync(SECURE_KEY, SECURE_OPTIONS),
+  writeSecure: value => SecureStore.setItemAsync(SECURE_KEY, value, SECURE_OPTIONS),
+  deleteSecure: () => SecureStore.deleteItemAsync(SECURE_KEY, SECURE_OPTIONS),
+  readLegacy: () => AsyncStorage.getItem(STORAGE_KEY),
+  deleteLegacy: () => AsyncStorage.removeItem(STORAGE_KEY),
+});
 
 interface AuthState {
   creds: Creds | null;
@@ -40,9 +52,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     (async () => {
       try {
-        const raw = await AsyncStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          const c = JSON.parse(raw) as Creds;
+        const c = await credentialStorage.read();
+        if (c) {
           setCreds(c);
           setCredsState(c);
         }
@@ -55,11 +66,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const persist = useCallback(async (c: Creds) => {
+    c = validateCreds(c);
     // Verify the token actually works before saving.
     await rawPing(c.url, c.token);
+    await credentialStorage.write(c);
     setCreds(c);
     setCredsState(c);
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(c));
   }, []);
 
   const pairWithCode = useCallback(async (code: string) => {
@@ -72,9 +84,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [persist]);
 
   const unpair = useCallback(async () => {
+    await credentialStorage.clear();
     setCreds(null);
     setCredsState(null);
-    await AsyncStorage.removeItem(STORAGE_KEY);
   }, []);
 
   return (

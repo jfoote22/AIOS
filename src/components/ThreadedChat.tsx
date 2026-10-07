@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
-import { useChat } from 'ai/react';
+import { useChat, useChatSessions, ChatSessionProvider } from '../lib/useChat';
 import React from 'react';
 import {
   Search, Link2, Video, FileText, Target, MessageSquare, Scissors, Brain,
@@ -371,7 +371,41 @@ interface MobileSelection {
   threadId?: string;
 }
 
-type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'grok' | 'gemini';
+type ModelProvider = 'openai' | 'claude' | 'anthropic' | 'fable' | 'grok' | 'gemini';
+
+// Opus is the default: the frontier tier (Fable) costs roughly twice as much
+// per token for work that rarely needs it, and is one click away in the picker.
+// Which concrete model each tier resolves to is the model store's job, so this
+// does not need touching when a provider ships a new version.
+const DEFAULT_MODEL: ModelProvider = 'claude';
+
+// Response styles applied to whichever provider is selected.
+type Persona = 'normal' | 'fun' | 'creative' | 'precise' | 'caveman';
+const PERSONAS: Persona[] = ['normal', 'fun', 'creative', 'precise', 'caveman'];
+
+const MODEL_GROUPS: {
+  label: string;
+  dot: string;
+  tiers: { value: ModelProvider; label: string }[];
+}[] = [
+  {
+    label: 'Claude',
+    dot: 'bg-indigo-500',
+    // Fable is deliberately absent: it needs an Anthropic plan entitlement the
+    // owner's account does not have, so offering it only produced a permissions
+    // error. The `fable` slot and its routing stay in place, so restoring the
+    // entry here is all that is needed if that changes.
+    tiers: [
+      { value: 'claude', label: 'Opus' },
+      { value: 'anthropic', label: 'Sonnet' },
+    ],
+  },
+  { label: 'ChatGPT', dot: 'bg-emerald-500', tiers: [{ value: 'openai', label: 'Default' }] },
+  { label: 'Grok', dot: 'bg-orange-500', tiers: [{ value: 'grok', label: 'Default' }] },
+  { label: 'Gemini', dot: 'bg-blue-500', tiers: [{ value: 'gemini', label: 'Default' }] },
+];
+
+const MODEL_VALUES: ModelProvider[] = MODEL_GROUPS.flatMap(g => g.tiers.map(t => t.value));
 
 // Build the background context a deep-dive thread should carry into its chat.
 // The Deep Research report lives in `thread.research`, separate from the chat
@@ -403,7 +437,8 @@ function useThreadChat(
   selectedModel: ModelProvider,
   threadId: string,
   initialMessages?: Message[],
-  grokMode: string = 'normal',
+  grokMode: string = 'auto',
+  persona: Persona = 'normal',
   anthropicAuthMode: AnthropicAuthMode = 'api',
   openaiAuthMode: AuthMode = 'api',
   grokAuthMode: AuthMode = 'api',
@@ -418,6 +453,7 @@ function useThreadChat(
         return apiUrl(openaiAuthMode === 'subscription' ? '/api/codex-agent/chat' : '/api/openai/chat');
       case 'claude':
       case 'anthropic':
+      case 'fable':
         return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
       case 'grok':
         return apiUrl(grokAuthMode === 'subscription' ? '/api/grok-agent/chat' : '/api/grok/chat');
@@ -436,16 +472,18 @@ function useThreadChat(
   })) || [];
 
   // Create a unique chat instance for this specific thread
-  const { messages, input, handleInputChange, handleSubmit, isLoading, append, stop } = useChat({
+  const { messages, input, handleInputChange, handleSubmit, isLoading, append, stop, error } = useChat({
     id: `thread-${threadId}`, // Unique ID ensures complete isolation
     api: getApiEndpoint(selectedModel),
     initialMessages: formattedInitialMessages,
     body: {
       showReasoning,
       ...(contextText ? { context: contextText } : {}),
+      persona,
       ...(selectedModel === 'grok' && { mode: grokMode }),
       ...(selectedModel === 'claude' && { variant: 'opus' }),
       ...(selectedModel === 'anthropic' && { variant: 'sonnet' }),
+      ...(selectedModel === 'fable' && { variant: 'fable' }),
     },
     onError: (error) => {
       console.error(`Thread ${threadId} chat error:`, error);
@@ -454,6 +492,7 @@ function useThreadChat(
 
   return {
     messages,
+    error,
     input,
     handleInputChange,
     handleSubmit,
@@ -466,7 +505,8 @@ function useThreadChat(
 }
 
 const ThreadedChat = forwardRef<any, {}>((props, ref) => {
-  const [selectedModel, setSelectedModel] = useState<ModelProvider>('grok');
+  const chatSessions = useChatSessions();
+  const [selectedModel, setSelectedModel] = useState<ModelProvider>(DEFAULT_MODEL);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [selectedText, setSelectedText] = useState<string>('');
@@ -475,7 +515,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const [selectedMessageId, setSelectedMessageId] = useState<string>('');
   const [mainShowReasoning, setMainShowReasoning] = useState(false);
 
-  const [grokMode, setGrokMode] = useState<'normal' | 'fun' | 'creative' | 'precise' | 'caveman'>('normal');
+  const [grokMode, setGrokMode] = useState<'auto' | 'fast' | 'expert' | 'build' | 'heavy'>('auto');
+  // Persona is provider-neutral: the chosen voice follows the conversation
+  // across every model, so switching providers mid-dive does not change it.
+  const [persona, setPersona] = useState<Persona>('normal');
 
   // Add state for thread expansion
   const [expandedThread, setExpandedThread] = useState<string | 'main' | null>('main');
@@ -669,6 +712,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         return apiUrl(openaiAuthMode === 'subscription' ? '/api/codex-agent/chat' : '/api/openai/chat');
       case 'claude':
       case 'anthropic':
+      case 'fable':
         return apiUrl(anthropicAuthMode === 'subscription' ? '/api/claude-agent/chat' : '/api/anthropic/chat');
       case 'grok':
         return apiUrl(grokAuthMode === 'subscription' ? '/api/grok-agent/chat' : '/api/grok/chat');
@@ -684,9 +728,11 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     api: getApiEndpoint(selectedModel),
     body: {
       showReasoning: mainShowReasoning,
+      persona,
       ...(selectedModel === 'grok' && { mode: grokMode }),
       ...(selectedModel === 'claude' && { variant: 'opus' }),
       ...(selectedModel === 'anthropic' && { variant: 'sonnet' }),
+      ...(selectedModel === 'fable' && { variant: 'fable' }),
     }
   });
 
@@ -1020,31 +1066,43 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     }
   };
 
+  // Messages for a thread, whether or not its panel is currently mounted.
+  //
+  // ThreadPanel deletes its entry from threadChatRefs on unmount, and a thread's
+  // live messages exist only in its chat session — nothing writes them back into
+  // `threads` state. So reading through the refs meant any thread that was not
+  // visibly mounted at save time was saved EMPTY: collapsing a row, or putting
+  // another thread fullscreen, both unmount panels. Only the threads on screen
+  // survived a save/reload cycle.
+  //
+  // The session registry is keyed by thread id and outlives the component, so it
+  // is the honest source. peek() rather than get() so a thread that was never
+  // opened does not get an empty session created for it, which would then
+  // overwrite the messages restored from disk.
+  const messagesForThread = (thread: Thread): Message[] => {
+    const live = chatSessions.peek(thread.id)?.getSnapshot().messages;
+    if (live && live.length > 0) {
+      return live.map((msg: any) => ({
+        id: msg.id,
+        content: msg.content,
+        role: msg.role,
+        timestamp: msg.timestamp || Date.now(),
+      }));
+    }
+    if (threadMessagesToLoad[thread.id]?.length) return threadMessagesToLoad[thread.id];
+    return thread.messages || [];
+  };
+
   // Force update thread messages before saving
   const forceUpdateThreadMessages = () => {
     console.log('🔄 Force updating thread messages before save...');
     
     // Update thread messages from live chat instances
     setThreads(prev => prev.map(thread => {
-      const threadChatInstance = threadChatRefs.current[thread.id];
-      
-      if (threadChatInstance && threadChatInstance.messages) {
-        const updatedMessages = threadChatInstance.messages.map((msg: any) => ({
-          id: msg.id,
-          content: msg.content,
-          role: msg.role,
-          timestamp: msg.timestamp || Date.now(),
-        }));
-        
-        console.log(`🔄 Updated thread ${thread.id} with ${updatedMessages.length} messages`);
-        
-        return {
-          ...thread,
-          messages: updatedMessages,
-        };
-      }
-      
-      return thread;
+      const messages = messagesForThread(thread);
+      if (messages === thread.messages) return thread;
+      console.log(`🔄 Updated thread ${thread.id} with ${messages.length} messages`);
+      return { ...thread, messages };
     }));
   };
 
@@ -1052,31 +1110,9 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   const getCurrentState = () => {
     // Collect messages from all thread chat instances with improved fallback handling
     const threadsWithMessages = threads.map(thread => {
-      const threadChatInstance = threadChatRefs.current[thread.id];
-      let currentMessages = thread.messages || [];
-      let messageSource = 'static';
-      
-      // If we have a live chat instance, get its current messages
-      if (threadChatInstance && threadChatInstance.messages) {
-        currentMessages = threadChatInstance.messages.map((msg: any) => ({
-          id: msg.id,
-          content: msg.content,
-          role: msg.role,
-          timestamp: msg.timestamp || Date.now(),
-        }));
-        messageSource = 'live';
-      } else if (threadMessagesToLoad[thread.id]) {
-        // Fallback to messages that were queued for loading
-        currentMessages = threadMessagesToLoad[thread.id];
-        messageSource = 'queued';
-      }
-      
-      console.log(`📊 Thread ${thread.id}: ${currentMessages.length} messages from ${messageSource} source`);
-      
-      return {
-        ...thread,
-        messages: currentMessages,
-      };
+      const currentMessages = messagesForThread(thread);
+      console.log(`📊 Thread ${thread.id}: ${currentMessages.length} messages`);
+      return { ...thread, messages: currentMessages };
     });
 
     // Enhanced logging with source information
@@ -1125,7 +1161,11 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       // Wait a bit for the clear to take effect
       setTimeout(() => {
         // Set model first
-        setSelectedModel(state.selectedModel || 'anthropic');
+        // A dive saved before a tier existed (or after one was removed) must
+        // not leave the picker empty — fall back to the frontier default.
+        setSelectedModel(
+          MODEL_VALUES.includes(state.selectedModel) ? state.selectedModel : DEFAULT_MODEL,
+        );
         
         // Set threads - ensure they have all required properties
         const loadedThreads = (state.threads || []).map((thread: any) => ({
@@ -1206,6 +1246,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
   // Function to clear all threads and main chat for a fresh start
   const clearAllAndStartFresh = () => {
+    chatSessions.clear();
     setThreads([]);
     setActiveThreadId(null);
     pendingExtractions.current.clear();
@@ -1621,6 +1662,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   };
 
   const closeThread = (threadId: string) => {
+    chatSessions.remove(`thread-${threadId}`);
     console.log(`Closing thread: ${threadId}`);
     
     // Remove thread from the list
@@ -1769,7 +1811,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
   useEffect(() => onModelsChange(setConfiguredModels), []);
   const [configuredProviders, setConfiguredProviders] = useState<Set<ProviderId>>(getConfigured());
   useEffect(() => onConfiguredChange(setConfiguredProviders), []);
-  const labelFor = (slot: ModelSlot, fallback: string) => configuredModels[slot]?.trim() || fallback;
   // Model picker dropdown (lives near the chat input)
   const [showModelMenu, setShowModelMenu] = useState(false);
 
@@ -1778,26 +1819,28 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     if (m === 'openai') return 'openai';
     if (m === 'grok') return 'grok';
     if (m === 'gemini') return 'gemini';
-    return 'anthropic'; // 'claude' (Opus) and 'anthropic' (Sonnet) both use the Anthropic key
+    return 'anthropic'; // 'claude' (Opus), 'anthropic' (Sonnet) and 'fable' share the Anthropic key
   };
 
   const isModelReady = (m: ModelProvider) => {
     // Subscription modes bypass the per-provider API key requirement —
     // the local CLI (claude / codex / grok / gemini) supplies auth from the user's plan.
-    if ((m === 'claude' || m === 'anthropic') && anthropicAuthMode === 'subscription') return true;
+    if ((m === 'claude' || m === 'anthropic' || m === 'fable') && anthropicAuthMode === 'subscription') return true;
     if (m === 'openai' && openaiAuthMode === 'subscription') return true;
     if (m === 'grok' && grokAuthMode === 'subscription') return true;
     if (m === 'gemini' && geminiAuthMode === 'subscription') return true;
     return configuredProviders.has(providerForModel(m));
   };
 
-  const modelOptions = [
-    { value: 'openai' as ModelProvider,    label: labelFor('openai', 'GPT-4o'),               dot: 'bg-emerald-500' },
-    { value: 'claude' as ModelProvider,    label: labelFor('claude', 'Claude Opus 4.8'),      dot: 'bg-indigo-500'  },
-    { value: 'anthropic' as ModelProvider, label: labelFor('anthropic', 'Claude Sonnet 4.6'), dot: 'bg-indigo-400'  },
-    { value: 'grok' as ModelProvider,      label: labelFor('grok', 'Grok 4'),                 dot: 'bg-orange-500'  },
-    { value: 'gemini' as ModelProvider,    label: labelFor('gemini', 'Gemini Flash'),         dot: 'bg-blue-500'    },
-  ];
+  // Grouped by provider: the menu shows the provider name, and the tiers under
+  // it where a provider has more than one. Neither carries a model ID — which
+  // model a tier resolves to is the model store's job (Models tab) — so the menu
+  // does not go stale when a provider ships a new version. Tiers are listed most
+  // capable first; DEFAULT_MODEL picks which one is selected on a fresh dive.
+  const modelGroups = MODEL_GROUPS;
+  const modelOptions = modelGroups.flatMap(g =>
+    g.tiers.map(t => ({ value: t.value, label: `${g.label} · ${t.label}`, dot: g.dot })),
+  );
 
   // Compact model picker that lives in the lower input bar. Opens upward so the
   // list doesn't get clipped at the bottom of the screen.
@@ -1820,27 +1863,36 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
             {/* Click-away backdrop */}
             <div className="fixed inset-0 z-10" onClick={() => setShowModelMenu(false)} />
             <div className="absolute bottom-full left-0 mb-2 z-20 w-60 bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl overflow-hidden py-1">
-              {modelOptions.map((model) => {
-                const ready = isModelReady(model.value);
-                const isActive = selectedModel === model.value;
-                return (
-                  <button
-                    key={model.value}
-                    type="button"
-                    disabled={!ready}
-                    onClick={() => { setSelectedModel(model.value); setShowModelMenu(false); }}
-                    title={ready ? `Use ${model.label}` : `${providerForModel(model.value)} key not configured — add it in the Models tab`}
-                    className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                      isActive ? 'bg-zinc-800 text-white' : 'text-zinc-300 hover:bg-zinc-800/70 hover:text-white'
-                    } ${!ready ? 'opacity-40 cursor-not-allowed hover:bg-transparent' : ''}`}
-                  >
-                    <span className={`w-2 h-2 rounded-full shrink-0 ${model.dot}`} />
-                    <span className="flex-1 truncate">{model.label}</span>
-                    {!ready && <span className="text-[9px] uppercase tracking-widest text-amber-400 shrink-0">no key</span>}
-                    {isActive && ready && <span className="text-indigo-400 text-xs shrink-0">✓</span>}
-                  </button>
-                );
-              })}
+              {modelGroups.map((group) => (
+                <div key={group.label} className="py-0.5">
+                  <div className="flex items-center gap-2 px-3 pt-1.5 pb-1">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${group.dot}`} />
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">{group.label}</span>
+                  </div>
+                  {group.tiers.map((tier) => {
+                    const ready = isModelReady(tier.value);
+                    const isActive = selectedModel === tier.value;
+                    return (
+                      <button
+                        key={tier.value}
+                        type="button"
+                        disabled={!ready}
+                        onClick={() => { setSelectedModel(tier.value); setShowModelMenu(false); }}
+                        title={ready
+                          ? `Use ${group.label} ${tier.label}`
+                          : `${providerForModel(tier.value)} key not configured — add it in the Models tab`}
+                        className={`w-full flex items-center gap-2 pl-7 pr-3 py-1.5 text-left text-sm transition-colors ${
+                          isActive ? 'bg-zinc-800 text-white' : 'text-zinc-300 hover:bg-zinc-800/70 hover:text-white'
+                        } ${!ready ? 'opacity-40 cursor-not-allowed hover:bg-transparent' : ''}`}
+                      >
+                        <span className="flex-1 truncate">{tier.label}</span>
+                        {!ready && <span className="text-[9px] uppercase tracking-widest text-amber-400 shrink-0">no key</span>}
+                        {isActive && ready && <span className="text-indigo-400 text-xs shrink-0">✓</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
           </>
         )}
@@ -1931,10 +1983,10 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
     return (
       <div className="w-full space-y-2">
-        {/* Grok persona / response mode — only in main chat, not in threads */}
+        {/* Grok response mode — only in main chat, not in threads */}
         {selectedModel === 'grok' && !isThread && (
           <div className="flex gap-2 flex-wrap">
-            {(['normal', 'fun', 'creative', 'precise', 'caveman'] as const).map(mode => (
+            {(['auto', 'fast', 'expert', 'build', 'heavy'] as const).map(mode => (
               <button
                 key={mode}
                 type="button"
@@ -1946,6 +1998,28 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
                 }`}
               >
                 {mode.charAt(0).toUpperCase() + mode.slice(1)}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Response persona — applies to every provider, not just Grok, so the
+            assistant's voice survives switching models mid-conversation. */}
+        {!isThread && (
+          <div className="flex gap-2 flex-wrap items-center">
+            <span className="text-[10px] uppercase tracking-widest text-zinc-600 mr-1">Style</span>
+            {PERSONAS.map(p => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setPersona(p)}
+                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 border ${
+                  persona === p
+                    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50'
+                    : 'bg-zinc-900/40 text-zinc-500 hover:bg-zinc-800 hover:text-white border-zinc-800'
+                }`}
+              >
+                {p.charAt(0).toUpperCase() + p.slice(1)}
               </button>
             ))}
           </div>
@@ -2187,7 +2261,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     const threadContext = buildThreadContext(thread);
 
     // Create a dedicated, isolated chat instance for this specific thread with initial messages
-    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, anthropicAuthMode, openaiAuthMode, grokAuthMode, geminiAuthMode, threadContext);
+    const threadChat = useThreadChat(selectedModel, thread.id, initialMessages, grokMode, persona, anthropicAuthMode, openaiAuthMode, grokAuthMode, geminiAuthMode, threadContext);
     
     // Store the thread chat instance reference for accessing messages during save
     React.useEffect(() => {
@@ -2408,6 +2482,7 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
         </div>
 
         {/* Thread Input */}
+        {threadChat.error && <div role="alert" className="mx-3 mb-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-xs">{threadChat.error.message}</div>}
         <div 
           className={`flex-shrink-0 transition-all duration-300 ease-in-out border-t border-zinc-800 ${
             hideInputFields
@@ -3379,4 +3454,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
 
 ThreadedChat.displayName = 'ThreadedChat';
 
-export default ThreadedChat; 
+const ScopedThreadedChat = forwardRef<any, {}>((props, ref) => (
+  <ChatSessionProvider><ThreadedChat {...props} ref={ref} /></ChatSessionProvider>
+));
+ScopedThreadedChat.displayName = 'ScopedThreadedChat';
+export default ScopedThreadedChat;

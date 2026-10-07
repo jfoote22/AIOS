@@ -4,6 +4,7 @@
 //   openai    — what the OpenAI button calls
 //   claude    — Anthropic, variant=opus
 //   anthropic — Anthropic, variant=sonnet
+//   fable     — Anthropic, variant=fable (most capable tier)
 //   grok      — xAI
 
 const { app } = require('electron');
@@ -11,10 +12,11 @@ const path = require('path');
 const fs = require('fs');
 
 const DEFAULTS = {
-  openai: 'gpt-4o',
-  claude: 'claude-opus-4-8',
-  anthropic: 'claude-sonnet-4-6',
-  grok: 'grok-4',
+  openai: 'gpt-5.6',
+  claude: 'claude-opus-5',
+  anthropic: 'claude-sonnet-5',
+  fable: 'claude-fable-5-1',
+  grok: 'grok-4.7',
   gemini: 'gemini-flash-latest',
   hermes: 'hermes-mac',
 };
@@ -22,8 +24,30 @@ const DEFAULTS = {
 // Retired model IDs → their replacement. A stored value matching a retired ID
 // is auto-upgraded on read (and re-persisted), so users who had the previous
 // default don't get pinned to an old model.
+//
+// Defaults prefer a provider's floating alias where one exists (gpt-5.6,
+// gemini-flash-latest) so a new version is picked up without a release. Where a
+// provider publishes only pinned ids (Anthropic, xAI), the entries below carry
+// users forward instead.
 const RETIRED = {
-  claude: { 'claude-opus-4-7': 'claude-opus-4-8' },
+  claude: {
+    'claude-opus-4-7': 'claude-opus-5',
+    'claude-opus-4-8': 'claude-opus-5',
+  },
+  anthropic: {
+    'claude-sonnet-4-6': 'claude-sonnet-5',
+  },
+  fable: {
+    'claude-fable-5': 'claude-fable-5-1',
+  },
+  openai: {
+    'gpt-4o': 'gpt-5.6',
+  },
+  grok: {
+    'grok-4': 'grok-4.7',
+    'grok-4.3': 'grok-4.7',
+    'grok-4.5': 'grok-4.7',
+  },
 };
 
 function getFilePath() {

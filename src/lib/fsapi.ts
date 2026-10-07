@@ -4,6 +4,7 @@
 // Used by the "Editor" mode of the Agent/Skill creators.
 
 import { apiUrl } from './apiBase';
+import { ensureWorkspaceAccess, editorWorkspace } from './fileAccess';
 
 export interface FsNode {
   name: string;
@@ -13,6 +14,7 @@ export interface FsNode {
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
+  await ensureWorkspaceAccess(editorWorkspace((body as { root: string }).root));
   const res = await fetch(apiUrl(path), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

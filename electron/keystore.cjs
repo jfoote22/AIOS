@@ -5,6 +5,11 @@ const { app, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
+function isSecureStorageAvailable() {
+  return safeStorage.isEncryptionAvailable() &&
+    !(process.platform === 'linux' && safeStorage.getSelectedStorageBackend?.() === 'basic_text');
+}
+
 function getKeysFilePath() {
   return path.join(app.getPath('userData'), 'provider-keys.json');
 }
@@ -14,27 +19,35 @@ function readKeyStore() {
     const file = getKeysFilePath();
     if (!fs.existsSync(file)) return {};
     const raw = fs.readFileSync(file, 'utf8');
-    return JSON.parse(raw || '{}');
+    const parsed = JSON.parse(raw || '{}');
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object' ||
+        Object.values(parsed).some(value => typeof value !== 'string')) {
+      throw new Error('Invalid credential store format.');
+    }
+    return parsed;
   } catch (e) {
-    console.error('Failed to read key store:', e);
-    return {};
+    throw new Error('Cannot read the credential store. Restore a backup before saving new credentials.', { cause: e });
   }
 }
 
 function writeKeyStore(store) {
-  fs.writeFileSync(getKeysFilePath(), JSON.stringify(store, null, 2), { mode: 0o600 });
+  const file = getKeysFilePath();
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(store, null, 2), { mode: 0o600 });
+  fs.renameSync(temporary, file);
 }
 
 function getProviderKey(providerId) {
-  if (!safeStorage.isEncryptionAvailable()) return '';
-  const store = readKeyStore();
-  const encB64 = store[providerId];
-  if (!encB64) return '';
+  if (!isSecureStorageAvailable()) return '';
   try {
+    const store = readKeyStore();
+    const encB64 = store[providerId];
+    if (!encB64) return '';
     const buf = Buffer.from(encB64, 'base64');
     return safeStorage.decryptString(buf);
   } catch (e) {
-    console.error(`Failed to decrypt key for ${providerId}:`, e);
+    // Keep the app usable for recovery without logging the stored material.
+    console.error(`Credential unavailable for ${providerId}: ${e.message}`);
     return '';
   }
 }
@@ -44,7 +57,7 @@ function setProviderKey(providerId, key) {
   if (!key) {
     delete store[providerId];
   } else {
-    if (!safeStorage.isEncryptionAvailable()) {
+    if (!isSecureStorageAvailable()) {
       throw new Error('Secure storage is not available on this system.');
     }
     const enc = safeStorage.encryptString(key);
@@ -54,7 +67,8 @@ function setProviderKey(providerId, key) {
 }
 
 function listConfiguredProviders() {
-  return Object.keys(readKeyStore());
+  try { return Object.keys(readKeyStore()); }
+  catch { return []; } // Reads fail closed; writes still refuse to overwrite corruption.
 }
 
-module.exports = { getProviderKey, setProviderKey, listConfiguredProviders };
+module.exports = { getProviderKey, setProviderKey, listConfiguredProviders, isSecureStorageAvailable };

@@ -13,6 +13,8 @@
 const research = require('./research.cjs');
 const extract = require('./extract.cjs');
 const { getProviderKey } = require('./keystore.cjs');
+const { promptStream } = require('./agent-prompt.cjs');
+const { noToolsPolicy, assertAgentResult } = require('./agent-policy.cjs');
 const { getModelId } = require('./modelstore.cjs');
 
 // --- tuning knobs (overridable per request) ---
@@ -94,7 +96,7 @@ async function geminiGenerate(prompt, { search = false } = {}) {
   const { GoogleGenAI } = await import('@google/genai');
   const client = new GoogleGenAI({ apiKey: key });
   const result = await client.models.generateContent({
-    model: 'gemini-2.5-flash',
+    model: getModelId('gemini'),
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     ...(search ? { config: { tools: [{ googleSearch: {} }] } } : {}),
   });
@@ -110,8 +112,8 @@ async function claudeStream({ system, user, authMode, onDelta, signal }) {
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
     const modelId = getModelId('claude') || getModelId('anthropic');
     const stream = query({
-      prompt: `${system}\n\n${user}`,
-      options: { model: modelId, systemPrompt: system, allowedTools: [], permissionMode: 'bypassPermissions' },
+      prompt: promptStream(`${system}\n\n${user}`),
+      options: { model: modelId, systemPrompt: system, ...noToolsPolicy() },
     });
     let prev = 0;
     for await (const msg of stream) {
@@ -120,7 +122,7 @@ async function claudeStream({ system, user, authMode, onDelta, signal }) {
         let f = '';
         for (const b of msg.message.content) if (b && b.type === 'text' && typeof b.text === 'string') f += b.text;
         if (f.length > prev) { onDelta?.(f.slice(prev)); prev = f.length; full = f; }
-      } else if (msg.type === 'result') break;
+      } else if (msg.type === 'result') { assertAgentResult(msg); break; }
     }
     return full;
   }
@@ -128,7 +130,7 @@ async function claudeStream({ system, user, authMode, onDelta, signal }) {
   if (!key) throw new Error('Anthropic key not configured — needed to synthesize the report. Add it in the Models tab or switch to Claude subscription auth.');
   const { default: Anthropic } = await import('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: key });
-  const modelId = getModelId('claude') || 'claude-opus-4-8';
+  const modelId = getModelId('claude') || getModelId('anthropic');
   const stream = await client.messages.stream(
     { model: modelId, max_tokens: 4096, system, messages: [{ role: 'user', content: user }] },
     { signal },

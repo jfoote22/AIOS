@@ -59,7 +59,7 @@ export default function HermesSettingsTab() {
     })();
   }, []);
 
-  const applyMob = async (next: { enabled?: boolean; port?: number }) => {
+  const applyMob = async (next: { enabled?: boolean; port?: number; terminalEnabled?: boolean }) => {
     setMobSaving(true);
     try {
       const cfg = await window.aios?.mobile?.setConfig(next);
@@ -349,8 +349,9 @@ export default function HermesSettingsTab() {
               <p className="font-bold text-sm">Mobile companion</p>
               <p className="text-[11px] text-zinc-500 leading-relaxed">
                 Token-gated gateway for the AIOS Android app: browse Second Brain, run DeepDives,
-                create agents &amp; skills, OCR screenshots, and open a terminal — all powered by this
-                desktop. Off by default. For access away from home, put both devices on a Tailscale/VPN.
+                create agents &amp; skills, and OCR screenshots — powered by this desktop.
+                Off by default. This gateway uses unencrypted HTTP: use only a trusted network
+                or encrypted VPN, and never expose its port to the internet. Encrypted device sync is not available yet.
               </p>
             </div>
             <button
@@ -361,6 +362,13 @@ export default function HermesSettingsTab() {
               {mobSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : mob?.enabled ? 'Enabled' : 'Disabled'}
             </button>
           </div>
+
+          <label className="flex items-start gap-3 mb-5 text-xs text-zinc-400">
+            <input type="checkbox" checked={!!mob?.terminalEnabled}
+              disabled={mobSaving || !window.aios?.mobile}
+              onChange={e => applyMob({ terminalEnabled: e.target.checked })} />
+            Allow paired devices to open a desktop terminal (full shell access; off by default)
+          </label>
 
           {!window.aios?.mobile ? (
             <p className="text-[11px] text-amber-400">The mobile gateway requires running inside the AIOS desktop app.</p>

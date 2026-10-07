@@ -16,6 +16,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const sqliteStore = require('./sqlite-store.cjs');
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
+const { bearerToken, tokensEqual } = require('./http-security.cjs');
 
 const DEFAULT_PORT = 8765;
 
@@ -79,16 +80,17 @@ function firstH1(md) {
 
 function buildApp() {
   const app = express();
+  app.use('/api/memory/ingest', (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (!tokensEqual(bearerToken(req), getToken())) {
+      return res.status(401).json({ error: 'Invalid or missing bearer token.' });
+    }
+    next();
+  });
   app.use(express.json({ limit: '25mb' }));
   app.use(express.text({ type: ['text/markdown', 'text/plain'], limit: '25mb' }));
 
   app.post('/api/memory/ingest', (req, res) => {
-    const token = getToken();
-    const provided = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-    if (!token || provided !== token) {
-      return res.status(401).json({ error: 'Invalid or missing bearer token.' });
-    }
-
     // Accept either JSON { content, title?, ... } or a raw markdown/plain body.
     let body = req.body;
     if (typeof body === 'string') body = { content: body };
@@ -198,7 +200,13 @@ function start({ getWebContents } = {}) {
 
 function stop() {
   if (server) {
+    // close() alone only stops NEW connections; it then waits for open ones to
+    // end. Ingest clients use HTTP keep-alive, so an idle socket can hold the
+    // port well past stop() returning — and the Hermes settings toggle restarts
+    // with stop() immediately followed by start(). Dropping live connections is
+    // what actually frees the port for the rebind.
     try { server.close(); } catch {}
+    try { server.closeAllConnections?.(); } catch {}
     server = null;
     currentPort = null;
   }

@@ -10,7 +10,7 @@
 //   - if pty exits on its own, the renderer is notified so it can show a
 //     dimmed "session ended" state and offer to respawn.
 
-const { ipcMain } = require('electron');
+const { ipcMain } = require('./renderer-security.cjs');
 
 let pty;
 let ptyLoadError = null;
