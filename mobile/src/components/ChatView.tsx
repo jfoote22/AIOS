@@ -277,7 +277,7 @@ const styles = StyleSheet.create({
   sendText: { color: '#fff', fontSize: 20, fontWeight: '700' },
 });
 
-const mdStyles = {
+export const mdStyles = {
   body: { color: theme.text, fontSize: 15 },
   code_inline: { backgroundColor: theme.surfaceAlt, color: '#e4e4e7', borderRadius: 4, paddingHorizontal: 4 },
   code_block: { backgroundColor: '#000', color: '#e4e4e7', borderRadius: 8, padding: 10 },

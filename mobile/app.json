@@ -44,6 +44,26 @@
             "usesCleartextTraffic": true
           }
         }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "AIOS reads your latest screenshot to send it to Second Brain.",
+          "savePhotosPermission": false,
+          "isAccessMediaLocationEnabled": false,
+          "granularPermissions": [
+            "photo"
+          ]
+        }
+      ],
+      [
+        "expo-share-intent",
+        {
+          "androidIntentFilters": [
+            "image/*"
+          ],
+          "disableIOS": true
+        }
       ]
     ],
     "extra": {
