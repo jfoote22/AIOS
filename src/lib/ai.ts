@@ -4,6 +4,7 @@
 import { Type } from '@google/genai';
 import { geminiClient } from './geminiClient';
 import { apiUrl } from './apiBase';
+import { getAnthropicAuthMode } from './authMode';
 
 export type OcrProvider = 'openai' | 'gemini' | 'anthropic' | 'grok';
 
@@ -141,36 +142,55 @@ export function downscaleDataUrl(dataUrl: string, maxDim = 1600): Promise<string
   });
 }
 
-/** OCR a capture after downscaling. Preferred entry point for raw captures. */
+/** OCR a capture after downscaling. Preferred entry point for raw captures.
+ *  Gemini first; if it fails (no key, depleted credits, outage) Claude reads the
+ *  image instead, and the error names both failures if that fails too. */
 export async function analyzeSnipScaled(dataUrl: string): Promise<SnipAnalysis> {
-  return analyzeSnip(await downscaleDataUrl(dataUrl));
+  const scaled = await downscaleDataUrl(dataUrl);
+  try {
+    return await analyzeSnip(scaled);
+  } catch (geminiError) {
+    try {
+      return await analyzeSnipWith('anthropic', scaled);
+    } catch (claudeError) {
+      const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+      throw new Error(`Gemini: ${msg(geminiError)} | ${msg(claudeError)}`);
+    }
+  }
+}
+
+async function analyzeSnipViaServer(provider: 'openai' | 'anthropic', imageDataUrl: string): Promise<SnipAnalysis> {
+  const body: Record<string, string> = { imageDataUrl, provider };
+  if (provider === 'anthropic') body.authMode = await getAnthropicAuthMode();
+  const res = await fetch(apiUrl('/api/vision/analyze-snip'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error || `${provider} vision failed (${res.status})`);
+  }
+  return res.json();
 }
 
 // Dispatches snippet analysis to the chosen vision provider.
 // - 'gemini' uses the authenticated main-process generation service.
-// - 'openai' goes through the local Electron API server (which holds the encrypted key
-//   in main and pulls the user-configured model ID from provider-models.json).
-// - 'anthropic' / 'grok' are not yet wired.
+// - 'openai' / 'anthropic' go through the local Electron API server, which holds
+//   the credentials in main. 'anthropic' follows the Anthropic auth mode: the
+//   Claude Code subscription or the stored key.
+// - 'grok' is not yet wired.
 export async function analyzeSnipWith(provider: OcrProvider, imageDataUrl: string): Promise<SnipAnalysis> {
   if (provider === 'gemini') return analyzeSnip(imageDataUrl);
-  if (provider === 'openai') {
-    const res = await fetch(apiUrl('/api/vision/analyze-snip'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageDataUrl, provider: 'openai' }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-      throw new Error(err.error || `OpenAI vision failed (${res.status})`);
-    }
-    return res.json();
-  }
-  throw new Error(`${provider} OCR is not yet wired. Switch to OpenAI or Gemini.`);
+  if (provider === 'openai' || provider === 'anthropic') return analyzeSnipViaServer(provider, imageDataUrl);
+  throw new Error(`${provider} OCR is not yet wired. Switch to Gemini, Claude or OpenAI.`);
 }
 
 export function isOcrProviderReady(provider: OcrProvider, configured: Set<string>): boolean {
   if (provider === 'gemini') return configured.has('gemini') || isGeminiReady();
   if (provider === 'openai') return configured.has('openai');
+  // Subscription mode needs no stored key; the server reports a missing login.
+  if (provider === 'anthropic') return true;
   return false;
 }
 

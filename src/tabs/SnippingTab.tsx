@@ -185,7 +185,7 @@ export default function SnippingTab() {
     const placeholder: CapturedItem = {
       id, image: dataUrl, timestamp: Date.now(), tags: [],
       title: 'Analyzing…',
-      summary: aiReady ? 'Gemini is processing this capture…' : 'Gemini key not set — open the Models tab to add your key.',
+      summary: aiReady ? 'Analyzing this capture…' : 'Gemini key not set — open the Models tab to add your key.',
       source: '—', category: aiReady ? 'Pending' : 'Unprocessed',
       entities: [], subImages: [dataUrl], extractedText: '',
       status: aiReady ? 'analyzing' : 'error',
@@ -223,7 +223,7 @@ export default function SnippingTab() {
         console.error('AI analysis failed:', err);
         const failed: CapturedItem = {
           ...placeholder, title: 'Analysis failed',
-          summary: `Gemini analysis failed: ${err?.message ?? String(err)}`,
+          summary: `Analysis failed: ${err?.message ?? String(err)}`,
           category: 'Unprocessed', status: 'error', error: err?.message ?? String(err),
         };
         setVault(prev => prev.map(i => (i.id === id ? failed : i)));
