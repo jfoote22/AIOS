@@ -16,6 +16,7 @@ const { fileAccess } = require('./file-access.cjs');
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
 const { promptStream } = require('./agent-prompt.cjs');
 const { loadClaudeSdk, codexOptions } = require('./sdk-binaries.cjs');
+const { analyzeSnipImage, claudeOcr, normalizeOcr, shortError } = require('./snip-ocr.cjs');
 const { getModelId, setModelId } = require('./modelstore.cjs');
 const extract = require('./extract.cjs');
 const research = require('./research.cjs');
@@ -2023,12 +2024,27 @@ function start({ development = false, approveAgentTool } = {}) {
   // --- Vision OCR / snippet analysis (currently OpenAI; matches Gemini analyzeSnip shape) ---
   app.post('/api/vision/analyze-snip', async (req, res) => {
     try {
-      const { imageDataUrl, provider } = req.body || {};
+      const { imageDataUrl, provider, authMode } = req.body || {};
       if (!imageDataUrl || typeof imageDataUrl !== 'string') {
         return res.status(400).json({ error: 'imageDataUrl is required' });
       }
+      // 'auto' = Gemini then Claude; 'anthropic' = Claude only. authMode is the
+      // renderer's Anthropic auth mode (subscription CLI vs stored key).
+      if (provider === 'auto' || provider === 'anthropic') {
+        const m = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]*={0,2})$/.exec(imageDataUrl);
+        if (!m) return res.status(400).json({ error: 'imageDataUrl must be a base64 PNG, JPEG, WebP or GIF data URL.' });
+        const image = { mimeType: m[1], data: m[2] };
+        const anthropicAuthMode = authMode === 'subscription' ? 'subscription' : 'api';
+        try {
+          return res.json(provider === 'auto'
+            ? await analyzeSnipImage(image, { anthropicAuthMode })
+            : { ...normalizeOcr(await claudeOcr(image, anthropicAuthMode)), ocrProvider: 'Claude' });
+        } catch (e) {
+          return res.status(502).json({ error: provider === 'auto' ? e.message : `Claude OCR failed: ${shortError(e)}` });
+        }
+      }
       if (provider && provider !== 'openai') {
-        return res.status(400).json({ error: `Vision provider "${provider}" is not yet wired. Use 'openai' or analyze via Gemini directly.` });
+        return res.status(400).json({ error: `Vision provider "${provider}" is not yet wired. Use 'auto', 'anthropic' or 'openai'.` });
       }
       const key = getProviderKey('openai');
       if (!key) return res.status(400).json({ error: 'OpenAI key not configured. Add it in the Models tab.' });
