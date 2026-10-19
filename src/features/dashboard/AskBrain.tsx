@@ -21,18 +21,16 @@ interface NeuronFull {
   status?: string;
 }
 interface Result extends NeuronFull {
-  sim: number;
+  rank: number;
 }
 
 const TOP_K = 6;
-const MIN_SIM = 0.4; // matches the Second Brain Ask threshold
 
 /**
- * Ask the brain — REAL retrieval + grounded answer. Embeds the question, ranks
- * every neuron by cosine similarity over its stored embedding (same pipeline as
- * the Second Brain Ask), synthesizes a grounded answer from the top neurons via
- * chatWithVault, and lets you select any retrieved neuron to drill into a
- * DeepDive seeded with that neuron + your question. (Needs a Gemini key.)
+ * Ask the brain — retrieval + grounded answer. ChatGPT reads a catalog of every
+ * neuron and picks the relevant ones (same pipeline as the phone's Ask), then
+ * chatWithVault synthesizes a grounded answer from them. Select any retrieved
+ * neuron to drill into a DeepDive seeded with that neuron + your question.
  */
 export default function AskBrain() {
   const [q, setQ] = useState("");
@@ -53,28 +51,21 @@ export default function AskBrain() {
     // injected text moments ago that the sync hook hasn't adopted yet.
     const query = (inputRef.current?.value ?? q).trim();
     if (!query) return;
-    if (!ai.isGeminiReady()) {
-      setResults(null);
-      setAnswer(null);
-      setErr("Add your Gemini key in Settings → Models so the brain can search by meaning.");
-      return;
-    }
     setBusy(true);
     setErr(null);
     setAnswer(null);
 
     let scored: Result[] = [];
     try {
-      const [qvec, snippets] = await Promise.all([
-        ai.embedText(query),
+      const [ids, snippets] = await Promise.all([
+        ai.pickVaultSnippets(query, [], TOP_K),
         db.getAllSnippets<NeuronFull>(),
       ]);
-      scored = snippets
-        .filter((s) => s.embedding && s.embedding.length === qvec.length && s.status !== "error")
-        .map((s) => ({ ...s, sim: ai.cosineSimilarity(qvec, s.embedding!) }))
-        .sort((a, b) => b.sim - a.sim)
-        .slice(0, TOP_K)
-        .filter((r) => r.sim >= MIN_SIM);
+      const byId = new Map(snippets.map((s) => [s.id, s]));
+      scored = ids
+        .map((id) => byId.get(id))
+        .filter((s): s is NeuronFull => !!s)
+        .map((s, i) => ({ ...s, rank: i + 1 }));
       setAskedFor(query);
       setResults(scored);
       if (!scored.length) setErr("No related neurons yet — capture or ingest more, then ask again.");
@@ -150,7 +141,7 @@ export default function AskBrain() {
 
       {busy && (
         <div className="py-6 flex justify-center">
-          <Spinner label="Searching your neurons by meaning…" />
+          <Spinner label="ChatGPT is picking the relevant neurons…" />
         </div>
       )}
 
@@ -187,9 +178,9 @@ export default function AskBrain() {
                   <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: colorFor(r.category || "Uncategorized") }} />
                   <span className="text-sm font-medium text-ink truncate">{r.title || "(untitled neuron)"}</span>
                 </div>
-                <span className="shrink-0 inline-flex items-center gap-1 text-[10px] text-accent tabular-nums" title="semantic match">
+                <span className="shrink-0 inline-flex items-center gap-1 text-[10px] text-accent tabular-nums" title="relevance rank">
                   <Sparkles className="w-3 h-3" />
-                  {Math.round(r.sim * 100)}%
+                  #{r.rank}
                 </span>
               </div>
               {(r.summary || r.extractedText) && (

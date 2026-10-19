@@ -21,6 +21,7 @@ const { getModelId, setModelId } = require('./modelstore.cjs');
 const extract = require('./extract.cjs');
 const research = require('./research.cjs');
 const deepResearch = require('./deep-research.cjs');
+const vaultAsk = require('./vault-ask.cjs');
 
 // Dynamic imports for ESM-only ai SDK packages.
 async function loadAi() {
@@ -2102,6 +2103,56 @@ Be specific and faithful to what is actually visible. Do not invent details. If 
   // mid-job. Accepts { contents: string[] }, returns { embeddings: number[][] }.
   // Upstream rate-limit / error statuses are propagated so the renderer can
   // back off and retry.
+  // --- Ask Second Brain (desktop): ChatGPT picks the snips, then answers ---
+  // Same pipeline as the mobile gateway's /api/mobile/ask (vault-ask.cjs).
+  const vaultHistory = (h) => (Array.isArray(h) ? h : [])
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string');
+
+  app.post('/api/vault/pick', async (req, res) => {
+    const { question, history, limit } = req.body || {};
+    if (typeof question !== 'string' || !question.trim()) return res.status(400).json({ error: 'question is required.' });
+    const abort = new AbortController();
+    res.on('close', () => abort.abort());
+    try {
+      const { items, via } = await vaultAsk.pickSnippets(question.trim(), {
+        history: vaultHistory(history),
+        limit: Number.isInteger(limit) && limit > 0 && limit <= 20 ? limit : undefined,
+        signal: abort.signal,
+      });
+      res.json({ ids: items.map((s) => s.id), via });
+    } catch (e) {
+      if (!res.headersSent) res.status(500).json({ error: e?.message || 'Picking snips failed.' });
+    }
+  });
+
+  // Body: { question, history?, items: VaultContextItem[] } → data stream.
+  app.post('/api/vault/answer', async (req, res) => {
+    const { question, history, items } = req.body || {};
+    if (typeof question !== 'string' || !question.trim()) return res.status(400).json({ error: 'question is required.' });
+    const abort = new AbortController();
+    res.on('close', () => abort.abort());
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('x-vercel-ai-data-stream', 'v1');
+    res.setHeader('Cache-Control', 'no-cache');
+    try {
+      const { provider } = await vaultAsk.answerQuestion({
+        question: question.trim(),
+        items: Array.isArray(items) ? items.filter((c) => c && typeof c === 'object') : [],
+        history: vaultHistory(history),
+        signal: abort.signal,
+        onDelta: (t) => { if (!abort.signal.aborted) res.write(streamPart('text', t)); },
+      });
+      if (abort.signal.aborted) return;
+      res.write(streamPart('finish_message', { finishReason: 'stop', provider }));
+      res.end();
+    } catch (e) {
+      if (abort.signal.aborted) return;
+      const message = e?.message || 'Ask Second Brain failed.';
+      if (!res.headersSent) res.status(502).json({ error: message });
+      else { try { res.write(streamPart('error', message)); res.end(); } catch {} }
+    }
+  });
+
   app.post('/api/embeddings', async (req, res) => {
     try {
       const { contents } = req.body || {};

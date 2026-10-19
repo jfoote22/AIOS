@@ -4,7 +4,7 @@ import ForceGraph2D, { type ForceGraphMethods, type NodeObject, type LinkObject 
 import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Upload as UploadIcon, Bot, User as UserIcon, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle, Search, Plus, Share2 } from 'lucide-react';
 import * as db from '../lib/db';
 import {
-  embedText, cosineSimilarity, chatWithVault, isGeminiReady, onGeminiReadyChange, buildEmbedSource,
+  embedText, cosineSimilarity, chatWithVault, pickVaultSnippets, isGeminiReady, onGeminiReadyChange, buildEmbedSource,
   type ChatTurn, type VaultContextItem,
 } from '../lib/ai';
 import {
@@ -557,13 +557,6 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     // injected text moments ago that the sync hook hasn't adopted yet.
     const q = (chatInputRef.current?.value ?? chatInput).trim();
     if (!q || chatBusy) return;
-    if (!aiReady) {
-      setChatHistory(h => [...h, { role: 'user', text: q }, { role: 'model', text: 'AI is not configured. Add your Gemini key in the Models tab.' }]);
-      setChatInput('');
-      if (chatInputRef.current) chatInputRef.current.value = '';
-      requestAnimationFrame(() => chatInputRef.current?.focus());
-      return;
-    }
     setChatInput('');
     if (chatInputRef.current) chatInputRef.current.value = '';
     setChatBusy(true);
@@ -571,13 +564,19 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     setChatHistory(h => [...h, { role: 'user', text: q }, { role: 'model', text: '' }]);
 
     try {
-      const queryVec = await embedText(q);
+      const TOP_SNIPS = 6;
+      const TOP_DDS = 3;
+      const TOP_CHUNKS = 6;
 
-      // Semantic ranking across snippets that have embeddings.
-      const embedded = snippets.filter(s => s.embedding?.length && s.status === 'ready');
-      const snipRanked = embedded
-        .map(s => ({ kind: 'snip' as const, item: s, sim: cosineSimilarity(queryVec, s.embedding) }))
-        .sort((a, b) => b.sim - a.sim);
+      // ChatGPT picks the snips from a catalog of the whole vault (no
+      // embeddings needed). Import chunks are too many for that catalog, so
+      // they still rank by embedding — best-effort, skipped if it fails.
+      const [pickedIds, queryVec] = await Promise.all([
+        pickVaultSnippets(q, prior, TOP_SNIPS),
+        aiReady ? embedText(q).catch(() => null) : Promise.resolve(null),
+      ]);
+      const snipById = new Map(snippets.map(s => [s.id, s]));
+      const picked = pickedIds.map(id => snipById.get(id)).filter((s): s is NonNullable<typeof s> => !!s);
 
       // Keyword ranking across DeepDive sessions (text-only fallback for now).
       const qLower = q.toLowerCase();
@@ -592,25 +591,23 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
 
       // Semantic ranking across import chunks (Claude / ChatGPT history)
-      const chunkRanked = chunks
-        .filter(c => c.embedding?.length)
-        .map(c => ({ chunk: c, sim: cosineSimilarity(queryVec, c.embedding) }))
-        .sort((a, b) => b.sim - a.sim);
-
-      const TOP_SNIPS = 6;
-      const TOP_DDS = 3;
-      const TOP_CHUNKS = 6;
+      const chunkRanked = queryVec?.length
+        ? chunks
+          .filter(c => c.embedding?.length)
+          .map(c => ({ chunk: c, sim: cosineSimilarity(queryVec, c.embedding) }))
+          .sort((a, b) => b.sim - a.sim)
+        : [];
 
       const context: VaultContextItem[] = [
-        ...snipRanked.slice(0, TOP_SNIPS).filter(r => r.sim >= 0.4).map(r => ({
-          id: `snip:${r.item.id}`,
-          title: r.item.title || '',
-          summary: r.item.summary || '',
-          category: r.item.category || 'Uncategorized',
-          source: r.item.source || '',
-          tags: r.item.tags || [],
-          extractedText: r.item.extractedText || '',
-          timestamp: r.item.timestamp || 0,
+        ...picked.map(item => ({
+          id: `snip:${item.id}`,
+          title: item.title || '',
+          summary: item.summary || '',
+          category: item.category || 'Uncategorized',
+          source: item.source || '',
+          tags: item.tags || [],
+          extractedText: item.extractedText || '',
+          timestamp: item.timestamp || 0,
         })),
         ...chunkRanked.slice(0, TOP_CHUNKS).filter(r => r.sim >= 0.4).map(r => ({
           id: `chunk:${r.chunk.id}`,

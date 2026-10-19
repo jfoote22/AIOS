@@ -8,7 +8,7 @@ import {
 import * as db from '../lib/db';
 import {
   analyzeText, analyzeSnipScaled, isGeminiReady, onGeminiReadyChange,
-  embedText, cosineSimilarity, buildEmbedSource, chatWithVault,
+  embedText, cosineSimilarity, buildEmbedSource, chatWithVault, pickVaultSnippets,
   type ChatTurn, type VaultContextItem,
 } from '../lib/ai';
 import SnippetEditor, {
@@ -350,12 +350,6 @@ export default function SnippingTab() {
     // injected text moments ago that the sync hook hasn't adopted yet.
     const q = (chatInputRef.current?.value ?? chatInput).trim();
     if (!q || chatBusy) return;
-    if (!aiReady) {
-      setChatHistory(h => [...h, { role: 'user', text: q }, { role: 'model', text: 'AI is not configured. Open the Models tab and add your Gemini key.' }]);
-      setChatInput('');
-      if (chatInputRef.current) chatInputRef.current.value = '';
-      return;
-    }
     setChatInput('');
     if (chatInputRef.current) chatInputRef.current.value = '';
     setChatBusy(true);
@@ -363,18 +357,17 @@ export default function SnippingTab() {
     setChatHistory(h => [...h, { role: 'user', text: q }, { role: 'model', text: '' }]);
 
     try {
-      const queryVec = await embedText(q);
-      const ranked = vault
-        .filter(i => i.embedding && i.embedding.length && i.status === 'ready')
-        .map(i => ({ item: i, sim: cosineSimilarity(queryVec, i.embedding!) }))
-        .sort((a, b) => b.sim - a.sim);
-      const TOP_K = 8;
-      const topMatches = ranked.slice(0, TOP_K).filter(r => r.sim >= 0.4);
-      const context: VaultContextItem[] = topMatches.map(r => ({
-        id: r.item.id, title: r.item.title, summary: r.item.summary,
-        category: r.item.category, source: r.item.source, tags: r.item.tags,
-        extractedText: r.item.extractedText, timestamp: r.item.timestamp,
-      }));
+      // ChatGPT picks the relevant snips from a catalog of the whole vault.
+      const pickedIds = await pickVaultSnippets(q, priorTurns, 8);
+      const byId = new Map(vault.map(i => [i.id, i]));
+      const context: VaultContextItem[] = pickedIds
+        .map(id => byId.get(id))
+        .filter((i): i is NonNullable<typeof i> => !!i)
+        .map(i => ({
+          id: i.id, title: i.title, summary: i.summary,
+          category: i.category, source: i.source, tags: i.tags,
+          extractedText: i.extractedText, timestamp: i.timestamp,
+        }));
       const citedIds = context.map(c => c.id);
 
       let acc = '';

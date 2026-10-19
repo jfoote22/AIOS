@@ -646,32 +646,51 @@ export interface VaultContextItem {
 
 export interface ChatTurn { role: 'user' | 'model'; text: string; }
 
-export async function* chatWithVault(history: ChatTurn[], question: string, contextItems: VaultContextItem[]): AsyncGenerator<string> {
-  const ai = getClient();
+const toWireHistory = (history: ChatTurn[]) =>
+  history.map(t => ({ role: t.role === 'model' ? 'assistant' : 'user', content: t.text }));
 
-  const contextBlock = contextItems.length
-    ? contextItems.map((c, i) => {
-        const date = new Date(c.timestamp).toLocaleString();
-        return `[Snip ${i + 1}] (id=${c.id}, captured ${date})\nTitle: ${c.title || '(no title)'}\nCategory: ${c.category} | Source: ${c.source}\nTags: ${c.tags.join(', ') || '(none)'}\nSummary: ${c.summary}\nExtracted text: ${(c.extractedText || '(no text)').slice(0, 1500)}`;
-      }).join('\n\n')
-    : '(The vault has no relevant snips for this question.)';
-
-  const systemInstruction = `You are the personal AI assistant for "AIOS Vault" — a private knowledge base of screenshots and notes the user has captured over time. Answer the user's question using ONLY the snips provided as context. If the answer is not in the context, say so honestly and suggest what they could capture or search for. When you reference information, cite which snip it came from like [Snip 2]. Keep answers concise and useful. Today's date is ${new Date().toLocaleDateString()}.`;
-
-  const contents = [
-    ...history.map(t => ({ role: t.role, parts: [{ text: t.text }] })),
-    { role: 'user', parts: [{ text: `Context from my vault (top matches for my question):\n\n${contextBlock}\n\nMy question: ${question}` }] },
-  ];
-
-  const stream = await ai.models.generateContentStream({
-    model: 'gemini-2.5-flash',
-    contents,
-    config: { systemInstruction },
+/**
+ * ChatGPT reads a catalog of every snip and returns the ids that help answer
+ * `question`, best first (keyword match if ChatGPT is unavailable). Runs in
+ * main — see electron/vault-ask.cjs.
+ */
+export async function pickVaultSnippets(question: string, history: ChatTurn[] = [], limit?: number): Promise<string[]> {
+  const res = await fetch(apiUrl('/api/vault/pick'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, history: toWireHistory(history), limit }),
   });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+  return Array.isArray(data?.ids) ? data.ids : [];
+}
 
-  for await (const chunk of stream) {
-    const t = chunk.text;
-    if (t) yield t;
+/** Grounded answer from the given snips: ChatGPT, then Claude, then Gemini. */
+export async function* chatWithVault(history: ChatTurn[], question: string, contextItems: VaultContextItem[]): AsyncGenerator<string> {
+  const res = await fetch(apiUrl('/api/vault/answer'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, history: toWireHistory(history), items: contextItems }),
+  });
+  if (!res.ok || !res.body) {
+    let msg = `HTTP ${res.status}`;
+    try { const j = await res.json(); if (j?.error) msg = j.error; } catch { /* keep default */ }
+    throw new Error(msg);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (line.startsWith('0:')) yield JSON.parse(line.slice(2)) as string;
+      else if (line.startsWith('3:')) throw new Error(JSON.parse(line.slice(2)));
+    }
   }
 }
 
