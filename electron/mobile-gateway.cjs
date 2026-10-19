@@ -89,15 +89,23 @@ function isEnabled() {
   return getProviderKey('mobile_gateway_enabled') === '1';
 }
 
-// First non-internal IPv4 — what the UI shows / encodes in the pairing QR.
+// Tailscale hands out addresses from the CGNAT block 100.64.0.0/10.
+function isTailscaleAddress(addr) {
+  const [a, b] = addr.split('.').map(Number);
+  return a === 100 && b >= 64 && b <= 127;
+}
+
+// What the UI shows / encodes in the pairing QR. A Tailscale address wins:
+// it reaches this PC from anywhere (cellular, other Wi-Fi) as well as at home.
+// Otherwise the first non-internal, non-link-local IPv4 (home LAN only).
 function lanAddress() {
-  const ifaces = os.networkInterfaces();
-  for (const name of Object.keys(ifaces)) {
-    for (const ni of ifaces[name] || []) {
-      if (ni && ni.family === 'IPv4' && !ni.internal) return ni.address;
+  const v4 = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const ni of list || []) {
+      if (ni && ni.family === 'IPv4' && !ni.internal && !ni.address.startsWith('169.254.')) v4.push(ni.address);
     }
   }
-  return '0.0.0.0';
+  return v4.find(isTailscaleAddress) || v4[0] || '0.0.0.0';
 }
 
 // ── auth ─────────────────────────────────────────────────────────────────────
