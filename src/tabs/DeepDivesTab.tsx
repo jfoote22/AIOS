@@ -8,7 +8,7 @@ import { consumeSeed, onSeedChange, type DeepDiveSeed } from '../lib/deepdiveSee
 import { emitDeepDivesChange } from '../lib/deepdiveStore';
 import { emitSnippetsChange } from '../lib/snippetStore';
 import {
-  isGeminiReady, analyzeDeepDiveUnderstanding, analyzeUnderstandingDrilldown,
+  isAiReady, analyzeDeepDiveUnderstanding, analyzeUnderstandingDrilldown,
   embedText, buildEmbedSource,
   type DeepDiveUnderstanding, type UnderstandingSourceInput,
 } from '../lib/ai';
@@ -182,9 +182,9 @@ export default function DeepDivesTab() {
       // Best-effort: embed the session's assistant text so it joins the Second
       // Brain semantic graph as a connectable node (non-fatal if Gemini is off).
       try {
-        const { isGeminiReady, embedText } = await import('../lib/ai');
+        const { isAiReady, embedText } = await import('../lib/ai');
         const { deepDiveEmbedSource } = await import('../lib/graph');
-        if (isGeminiReady()) {
+        if (isAiReady()) {
           const src = deepDiveEmbedSource(record as any);
           if (src) {
             const emb = await embedText(src);
@@ -278,8 +278,8 @@ export default function DeepDivesTab() {
         const state = threadedChatRef.current?.getCurrentState?.();
         const hasContent = (state?.mainMessages?.length ?? 0) > 0 || (state?.threads?.length ?? 0) > 0;
         if (!hasContent) { setUnderstandingStatus('empty'); return; }
-        if (!isGeminiReady()) {
-          throw new Error('Gemini API key is not configured. Open Models to add your key — it powers the topic analysis.');
+        if (!isAiReady()) {
+          throw new Error('No AI model is connected. Add one in Settings → Models — it powers the topic analysis.');
         }
         const graph = await buildUnderstandingGraph(state);
         if (!graph.nodes.length) { setTree(null); setCurrentLevelId(null); setUnderstandingStatus('empty'); return; }
@@ -334,8 +334,8 @@ export default function DeepDivesTab() {
     setDrillingNodeId(node.id);
     const levelIdAtStart = currentLevelId;
     try {
-      if (!isGeminiReady()) {
-        throw new Error('Gemini API key is not configured. Open Models to add your key.');
+      if (!isAiReady()) {
+        throw new Error('No AI model is connected. Add one in Settings → Models.');
       }
       threadedChatRef.current?.forceUpdateThreadMessages?.();
       await new Promise(r => setTimeout(r, 120));
@@ -398,8 +398,8 @@ export default function DeepDivesTab() {
     if (!currentLevel || brainStatus !== 'idle') return;
     try {
       setBrainStatus('sending');
-      if (!isGeminiReady()) {
-        throw new Error('Gemini API key is not configured. Open Models to add your key.');
+      if (!isAiReady()) {
+        throw new Error('No AI model is connected. Add one in Settings → Models.');
       }
       await exportUnderstandingToBrain(currentLevel, tree && currentLevelId ? levelPath(tree, currentLevelId).map(l => l.title) : []);
       setBrainStatus('sent');

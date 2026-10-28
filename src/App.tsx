@@ -8,10 +8,11 @@ import HermesTab from './tabs/HermesTab';
 import KanbanTab from './tabs/KanbanTab';
 import TerminalTab from './tabs/TerminalTab';
 import SettingsTab from './tabs/SettingsTab';
-import { refreshConfigured, isConfigured } from './lib/providers';
-import { setGeminiReady } from './lib/ai';
+import { refreshConfigured } from './lib/providers';
+import { setAiReady } from './lib/ai';
 import { initApiBase } from './lib/apiBase';
 import { refreshModels } from './lib/models';
+import { refreshRouting, onRoutingChange, isTextModelReady } from './lib/modelRouting';
 import { onNavigate } from './lib/navigate';
 import { KANBAN_ENABLED } from './lib/features';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -34,9 +35,22 @@ export default function App() {
     (async () => {
       await initApiBase();
       setApiReady(true);
-      await Promise.all([refreshConfigured(), refreshModels()]);
-      setGeminiReady(isConfigured('gemini'));
+      await Promise.all([refreshConfigured(), refreshModels(), refreshRouting()]);
     })();
+  }, []);
+
+  // Which tasks have a model depends on keys, auth modes and Hermes settings;
+  // re-read routing whenever any of them change.
+  useEffect(() => {
+    const unsub = onRoutingChange(() => setAiReady(isTextModelReady()));
+    const reload = () => { refreshRouting(); };
+    window.addEventListener('aios:models-changed', reload);
+    window.addEventListener('aios:hermes-config-changed', reload);
+    return () => {
+      unsub();
+      window.removeEventListener('aios:models-changed', reload);
+      window.removeEventListener('aios:hermes-config-changed', reload);
+    };
   }, []);
 
   useEffect(() => onNavigate(setActive), []);

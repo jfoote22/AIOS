@@ -28,7 +28,7 @@ async function persist(base: NewNeuron): Promise<void> {
   // Best-effort embedding so it links into the graph + semantic search. Skipped
   // silently if Gemini isn't configured (a later enrich pass can fill it in).
   try {
-    if (ai.isGeminiReady()) {
+    if (ai.isAiReady()) {
       const embedding = await ai.embedText(ai.buildEmbedSource(base));
       await db.putSnippet({ ...base, embedding });
     }

@@ -68,7 +68,7 @@ test('bearer parser ignores query tokens and uses exact credentials', () => {
 test('mobile proxy admits only explicit method/path pairs', () => {
   assert.equal(mobileProxyAllowed('POST', 'agents/draft'), true);
   assert.equal(mobileProxyAllowed('POST', 'research/find-links'), true);
-  for (const path of ['agents/run', 'agents/write-md', 'deepgram', 'hermes/config', 'project/load', 'agents/draft/../run', '%61gents/draft', 'agents/draft/', 'research/deep/cancel']) {
+  for (const path of ['agents/run', 'agents/write-md', 'deepgram', 'hermes/config', 'project/load', 'ai/generate', 'models/routing', 'models/connections', 'models/test', 'agents/draft/../run', '%61gents/draft', 'agents/draft/', 'research/deep/cancel']) {
     assert.equal(mobileProxyAllowed('POST', path), false, path);
   }
   assert.equal(mobileProxyAllowed('GET', 'agents/draft'), false);

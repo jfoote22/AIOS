@@ -1278,7 +1278,6 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
     try {
       const db = await import('../lib/db');
       const ai = await import('../lib/ai');
-      const providers = await import('../lib/providers');
 
       const id = `text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const sourceLabel = contextMenuSource.isFromThread
@@ -1302,8 +1301,8 @@ const ThreadedChat = forwardRef<any, {}>((props, ref) => {
       };
       await db.putSnippet(placeholder);
 
-      // Best-effort: enrich with Gemini analysis + embedding if configured.
-      if (providers.isConfigured('gemini') && ai.isGeminiReady()) {
+      // Best-effort: enrich with AI analysis + embedding if a model is connected.
+      if (ai.isAiReady()) {
         try {
           const analysis = await ai.analyzeText(trimmed);
           const enriched = {

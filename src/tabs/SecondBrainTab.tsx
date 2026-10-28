@@ -4,9 +4,10 @@ import ForceGraph2D, { type ForceGraphMethods, type NodeObject, type LinkObject 
 import { Brain, Send, X, Sparkles, MessageSquare, Scissors, Compass, Download as DownloadIcon, Upload as UploadIcon, Bot, User as UserIcon, Sliders, RotateCcw, Trash2, ChevronRight, ChevronDown, Network, AlertCircle, Search, Plus, Share2 } from 'lucide-react';
 import * as db from '../lib/db';
 import {
-  embedText, cosineSimilarity, chatWithVault, pickVaultSnippets, isGeminiReady, onGeminiReadyChange, buildEmbedSource,
+  embedText, cosineSimilarity, chatWithVault, pickVaultSnippets, isAiReady, onAiReadyChange, buildEmbedSource, needsEmbedding,
   type ChatTurn, type VaultContextItem,
 } from '../lib/ai';
+import { embeddingsMode, onRoutingChange } from '../lib/modelRouting';
 import {
   buildGraph, nodeAsContextItem, deepDiveEmbedSource, computePulseLayers,
   findDocClusters, applyCollapsedClusters,
@@ -81,7 +82,12 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const [chatBusy, setChatBusy] = useState(false);
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [citedIds, setCitedIds] = useState<Set<string>>(new Set());
-  const [aiReady, setAiReady] = useState<boolean>(isGeminiReady());
+  const [aiReady, setAiReady] = useState<boolean>(isAiReady());
+  // Semantic search and graph links need embeddings, not a chat model: the
+  // built-in embedder works with nothing connected.
+  const [embedMode, setEmbedMode] = useState(embeddingsMode());
+  useEffect(() => onRoutingChange(() => setEmbedMode(embeddingsMode())), []);
+  const embedReady = embedMode === 'local' || aiReady;
   const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
   const [nodeMenu, setNodeMenu] = useState<{ node: BrainNode; x: number; y: number } | null>(null);
   // Right-click on empty canvas → "create neuron here" menu. Carries both the
@@ -203,7 +209,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   const graphRef = useRef<BrainGraph>(graph);
   useEffect(() => { graphRef.current = graph; }, [graph]);
 
-  useEffect(() => onGeminiReadyChange(setAiReady), []);
+  useEffect(() => onAiReadyChange(setAiReady), []);
 
   // Load snippets + DeepDive sessions + imported conversations + their chunks
   const loadData = useCallback(async () => {
@@ -295,13 +301,13 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   // the LAN webhook). The main process stores them raw + pending; here we
   // categorize, chunk, and embed. Runs once on mount (catches anything that
   // arrived while the app was closed), again on each live delivery, and again
-  // whenever a Gemini key becomes available (pending notes can't embed without it).
+  // whenever a model becomes available (pending notes can't be filed without one).
   useEffect(() => { enrichPendingMemory(); }, []);
   useEffect(() => {
     const off = window.aios?.memory?.onIngested?.(() => { enrichPendingMemory(); });
     return off;
   }, []);
-  useEffect(() => onGeminiReadyChange((ready) => { if (ready) enrichPendingMemory(); }), []);
+  useEffect(() => onAiReadyChange((ready) => { if (ready) enrichPendingMemory(); }), []);
   // Transient Gemini failures (503/429) park a note behind an exponential
   // backoff instead of failing it permanently. Nothing else would come back to
   // it — a delivery only fires onIngested once — so sweep on a timer. The call
@@ -466,17 +472,18 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
     };
   }, [active, hasGraph]);
 
-  // Nodes that can't form semantic links yet because they have no embedding
-  // (older snippets saved before Gemini was configured, or DeepDives saved
-  // before save-time embedding). The backfill button embeds them on demand.
+  // Nodes that can't form semantic links yet: no embedding (saved before any
+  // embeddings were available, or DeepDives saved before save-time embedding),
+  // or one from a different embedding model than the current one. The backfill
+  // button (re)embeds them on demand.
   const unembedded = useMemo(() => {
-    const s = snippets.filter((x: any) => x.status === 'ready' && !(x.embedding?.length) && (x.extractedText || x.summary || x.title)).length;
-    const d = deepDives.filter((x: any) => !(x.embedding?.length)).length;
+    const s = snippets.filter((x: any) => x.status === 'ready' && needsEmbedding(x.embedding) && (x.extractedText || x.summary || x.title)).length;
+    const d = deepDives.filter((x: any) => needsEmbedding(x.embedding)).length;
     return s + d;
   }, [snippets, deepDives]);
 
   const runBackfill = useCallback(async () => {
-    if (!aiReady || backfill) return;
+    if (!embedReady || backfill) return;
     const sTodo = snippets.filter((x: any) => x.status === 'ready' && !(x.embedding?.length) && (x.extractedText || x.summary || x.title));
     const dTodo = deepDives.filter((x: any) => !(x.embedding?.length));
     const total = sTodo.length + dTodo.length;
@@ -509,7 +516,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       setBackfill(null);
       loadData();
     }
-  }, [aiReady, backfill, snippets, deepDives, loadData]);
+  }, [embedReady, backfill, snippets, deepDives, loadData]);
 
   // Track container size for the graph canvas
   useEffect(() => {
@@ -573,7 +580,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
       // they still rank by embedding — best-effort, skipped if it fails.
       const [pickedIds, queryVec] = await Promise.all([
         pickVaultSnippets(q, prior, TOP_SNIPS),
-        aiReady ? embedText(q).catch(() => null) : Promise.resolve(null),
+        embedReady ? embedText(q).catch(() => null) : Promise.resolve(null),
       ]);
       const snipById = new Map(snippets.map(s => [s.id, s]));
       const picked = pickedIds.map(id => snipById.get(id)).filter((s): s is NonNullable<typeof s> => !!s);
@@ -999,7 +1006,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
   // Debounced query embedding for semantic search (mirrors the Snippit tab).
   useEffect(() => {
     const q = searchQuery.trim();
-    if (!aiReady || q.length < 3) { setQueryEmbedding(null); setIsSemanticSearching(false); return; }
+    if (!embedReady || q.length < 3) { setQueryEmbedding(null); setIsSemanticSearching(false); return; }
     setIsSemanticSearching(true);
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -1008,7 +1015,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
         .catch(err => { if (!cancelled) { console.error('Search embedding failed:', err); setQueryEmbedding(null); setIsSemanticSearching(false); } });
     }, 350);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [searchQuery, aiReady]);
+  }, [searchQuery, embedReady]);
 
   // After every graph rebuild, re-resolve the focused node by id so the open
   // detail/editor panel survives the rebuild (buildGraph creates fresh node
@@ -1198,7 +1205,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
                 <input type="text"
                   autoFocus
-                  placeholder={aiReady ? "Search your neurons in plain English…" : "Search titles, summaries, tags…"}
+                  placeholder={embedReady ? "Search your neurons in plain English…" : "Search titles, summaries, tags…"}
                   className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 pl-9 pr-20 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
                   value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
                 <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
@@ -1283,7 +1290,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
                     onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
                     rows={1}
                     disabled={chatBusy || !aiReady}
-                    placeholder={aiReady ? 'Ask anything…' : 'Add Gemini key in Models tab'}
+                    placeholder={aiReady ? 'Ask anything…' : 'Connect a model in Settings → Models'}
                     className="flex-1 resize-none bg-zinc-900 border border-zinc-800 rounded-xl py-2.5 px-3 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all max-h-32 disabled:opacity-50"
                   />
                   <button onClick={send} disabled={chatBusy || !aiReady || !chatInput.trim()}
@@ -1609,7 +1616,7 @@ export default function SecondBrainTab({ active = true }: { active?: boolean }) 
               unembedded={unembedded}
               backfill={backfill}
               onBackfill={runBackfill}
-              aiReady={aiReady}
+              aiReady={embedReady}
             />
           )}
 
@@ -1896,7 +1903,7 @@ function PhysicsPanel({
           <button
             onClick={onBackfill}
             disabled={!aiReady || !!backfill}
-            title={aiReady ? 'Embed nodes that have no vector yet so they can connect' : 'Add a Gemini key in Models to enable'}
+            title={aiReady ? 'Embed nodes that have no vector (or one from an older embedding model) so they can connect' : 'Pick an embeddings provider in Settings → Models'}
             className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md border border-indigo-500/40 bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-[10px] font-semibold uppercase tracking-widest"
           >
             <Sparkles className="w-3 h-3" />

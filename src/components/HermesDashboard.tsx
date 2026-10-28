@@ -7,7 +7,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ExternalLink, Loader2, Play, RefreshCw } from 'lucide-react';
-import { getMeta, setMeta } from '../lib/db';
+import { getMeta } from '../lib/db';
+import { apiUrl } from '../lib/apiBase';
 
 const URL_KEY = 'hermes:dashboard-url';
 const DASHBOARD_PORT = 9119;
@@ -25,9 +26,11 @@ interface Props {
   /** True when the Hermes tab is showing and the dashboard view is selected. */
   visible: boolean;
   apiBaseUrl: string;
+  /** Dashboard URL saved in Settings → Hermes (or from this tab's address bar). */
+  savedUrl: string;
 }
 
-export default function HermesDashboard({ visible, apiBaseUrl }: Props) {
+export default function HermesDashboard({ visible, apiBaseUrl, savedUrl }: Props) {
   const slotRef = useRef<HTMLDivElement>(null);
   const [url, setUrl] = useState('');
   const [draft, setDraft] = useState('');
@@ -35,15 +38,15 @@ export default function HermesDashboard({ visible, apiBaseUrl }: Props) {
   const [error, setError] = useState<string | null>(null);
   const bridge = window.aios?.hermesView;
 
+  // The saved URL wins; older builds kept it in the meta table instead.
   useEffect(() => {
     (async () => {
-      const saved = await getMeta<string>(URL_KEY).catch(() => null);
-      const initial = saved || defaultDashboardUrl(apiBaseUrl);
-      setUrl(initial);
-      setDraft(initial);
+      const legacy = savedUrl ? null : await getMeta<string>(URL_KEY).catch(() => null);
+      const next = savedUrl || legacy || defaultDashboardUrl(apiBaseUrl);
+      setUrl(next);
+      setDraft(next);
     })();
-    // Only the first config load picks the default; later edits are the user's.
-  }, []);
+  }, [savedUrl]);
 
   const bounds = useCallback(() => {
     const r = slotRef.current?.getBoundingClientRect();
@@ -82,7 +85,9 @@ export default function HermesDashboard({ visible, apiBaseUrl }: Props) {
     const next = draft.trim();
     try { new URL(next); } catch { setError('Enter a full URL, e.g. http://127.0.0.1:9119'); return; }
     setUrl(next);
-    setMeta(URL_KEY, next).catch(() => {});
+    fetch(apiUrl('/api/hermes/connection'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dashboardUrl: next }),
+    }).catch(() => {});
   };
 
   if (!bridge) {

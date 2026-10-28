@@ -29,6 +29,8 @@ async function readMode(key: string, fallback: AuthMode = 'api'): Promise<AuthMo
 async function writeMode(key: string, mode: AuthMode, listeners: Set<Listener>): Promise<void> {
   await db.setMeta(key, mode);
   listeners.forEach(fn => { try { fn(mode); } catch {} });
+  // Model routing depends on auth modes (see App.tsx).
+  window.dispatchEvent(new Event('aios:models-changed'));
 }
 
 export const getAnthropicAuthMode = () => readMode(ANTHROPIC_AUTH_MODE_KEY);

@@ -5,6 +5,7 @@
 // is just a sandboxed browser pinned to the one origin the user configured.
 
 const { WebContentsView, shell, session } = require('electron');
+const { getProviderKey } = require('./keystore.cjs');
 
 const PARTITION = 'persist:hermes-dashboard';
 
@@ -40,6 +41,42 @@ function openOutside(target) {
   } catch { /* not a URL — ignore */ }
 }
 
+// Sign in with the dashboard login saved in Settings → Hermes (encrypted in
+// the keystore) when Hermes shows its login page: the same request its own
+// form makes, run inside the page so Hermes sets its session cookie normally.
+// One try per saved login while on the login page, so a wrong password
+// can't loop; saving a new one tries again.
+const LOGIN_SCRIPT = `(async (username, password) => {
+  const prefix = location.pathname.replace(/[/]login[/]?$/, '');
+  const next = new URLSearchParams(location.search).get('next') || '';
+  const res = await fetch(prefix + '/auth/password-login', {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider: 'basic', username, password, next }),
+  });
+  if (!res.ok) return res.status;
+  const data = await res.json().catch(() => ({}));
+  location.href = data.next || prefix + '/';
+  return 200;
+})`;
+
+let triedLogin = ''; // the login last tried while on the login page
+function autoLogin(wc) {
+  let url;
+  try { url = new URL(wc.getURL()); } catch { return; }
+  if (!/\/login\/?$/.test(url.pathname)) { triedLogin = ''; return; }
+  if (url.origin !== origin) return;
+  const username = getProviderKey('hermes_dashboard_user');
+  const password = getProviderKey('hermes_dashboard_password');
+  if (!username || !password) return;
+  const attempt = JSON.stringify([username, password]);
+  if (triedLogin === attempt) return;
+  triedLogin = attempt;
+  wc.executeJavaScript(`${LOGIN_SCRIPT}(${JSON.stringify(username)}, ${JSON.stringify(password)})`)
+    .then((status) => { if (status !== 200) console.warn(`[hermes-view] saved dashboard login was rejected (HTTP ${status})`); })
+    .catch(() => {});
+}
+
 function createView() {
   prepareSession();
   const next = new WebContentsView({
@@ -66,6 +103,7 @@ function createView() {
     if (!same) event.preventDefault();
   });
   wc.on('will-attach-webview', (event) => event.preventDefault());
+  wc.on('did-finish-load', () => autoLogin(wc));
   return next;
 }
 

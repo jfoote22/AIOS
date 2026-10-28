@@ -9,7 +9,7 @@ import {
   indexUnindexed, estimateIndexCost, listChunkCounts,
   type ImportedConversation, type ImportMeta, type ImportProvider, type ImportResult, type IndexProgress,
 } from '../lib/imports';
-import { isGeminiReady, onGeminiReadyChange } from '../lib/ai';
+import { embeddingsMode, getRouting, onRoutingChange } from '../lib/modelRouting';
 
 type FilterId = 'all' | ImportProvider;
 
@@ -37,12 +37,13 @@ export default function ImportsTab() {
   const [error, setError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ImportResult | null>(null);
   const [open, setOpen] = useState<ImportMeta | null>(null);
-  const [aiReady, setAiReady] = useState(isGeminiReady());
+  // Indexing only needs embeddings; the built-in model needs no setup.
+  const [aiReady, setAiReady] = useState(!!getRouting());
   const [indexPrompt, setIndexPrompt] = useState<{ conversations: number; chunks: number; approxTokens: number } | null>(null);
   const [indexing, setIndexing] = useState<IndexProgress | null>(null);
   const indexAbort = useRef<AbortController | null>(null);
 
-  useEffect(() => onGeminiReadyChange(setAiReady), []);
+  useEffect(() => onRoutingChange(() => setAiReady(!!embeddingsMode())), []);
   useEffect(() => { refresh(); }, []);
 
   const refresh = async () => {
@@ -144,7 +145,7 @@ export default function ImportsTab() {
           <button
             onClick={openIndexPrompt}
             disabled={!!indexing || unindexedCount === 0 || !aiReady}
-            title={!aiReady ? 'Add a Gemini key in Models first' : unindexedCount === 0 ? 'All imports are indexed' : `Embed ${unindexedCount} unindexed conversation${unindexedCount === 1 ? '' : 's'}`}
+            title={!aiReady ? 'Loading model settings…' : unindexedCount === 0 ? 'All imports are indexed' : `Embed ${unindexedCount} unindexed conversation${unindexedCount === 1 ? '' : 's'}`}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-100 text-[11px] font-bold uppercase tracking-wider transition-colors"
           >
             <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
@@ -345,8 +346,9 @@ function IndexConfirmModal({
               <Stat label="≈ Tokens" value={fmtCompact(estimate.approxTokens)} />
             </div>
             <p className="text-[11px] text-zinc-500">
-              Uses your Gemini key. Pricing varies by tier — check
-              ai.google.dev for current embeddings rates.
+              {embeddingsMode() === 'local'
+                ? 'Runs on the built-in embedding model on this computer — free, but large imports take a while.'
+                : 'Uses the embeddings provider chosen in Settings → Models, which may bill per token.'}
             </p>
           </div>
           <footer className="px-5 py-3 border-t border-zinc-800 bg-zinc-900/30 flex justify-end gap-2">

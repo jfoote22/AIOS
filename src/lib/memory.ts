@@ -35,7 +35,7 @@ let running = false;
  */
 export async function enrichPendingMemory(): Promise<number> {
   if (running) return 0;
-  if (!ai.isGeminiReady()) return 0;
+  if (!ai.isAiReady()) return 0;
   running = true;
   let processed = 0;
   try {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Sliders, KeyRound, Check, Trash2, ExternalLink, Lock, Cpu, RotateCcw, ShieldCheck, Terminal } from 'lucide-react';
+import ModelRoutingPanel from '../components/ModelRoutingPanel';
 import { PROVIDERS, type ProviderId, refreshConfigured, getConfigured, onConfiguredChange } from '../lib/providers';
-import { setGeminiReady } from '../lib/ai';
 import { type ModelSlot, SLOT_LABELS, getCachedModels, getDefaults, onModelsChange, refreshModels, saveModel, resetModel } from '../lib/models';
 import {
   getAnthropicAuthMode, setAnthropicAuthMode, onAnthropicAuthModeChange,
@@ -74,8 +74,8 @@ export default function ModelsTab() {
     updateRow(id, { saving: true, message: undefined });
     try {
       await window.aios.setProviderKey(id, draft);
-      if (id === 'gemini') setGeminiReady(true);
       await refreshConfigured();
+      window.dispatchEvent(new Event('aios:models-changed'));
       updateRow(id, { saving: false, draft: '', masked: maskKey(draft), message: { kind: 'ok', text: 'Saved.' } });
     } catch (e: any) {
       updateRow(id, { saving: false, message: { kind: 'err', text: e?.message || 'Failed to save.' } });
@@ -86,8 +86,8 @@ export default function ModelsTab() {
     if (!confirm(`Remove the stored ${id} credential from this machine?`)) return;
     try {
       await window.aios?.clearProviderKey(id);
-      if (id === 'gemini') setGeminiReady(false);
       await refreshConfigured();
+      window.dispatchEvent(new Event('aios:models-changed'));
       updateRow(id, { masked: '', message: { kind: 'ok', text: 'Removed.' } });
     } catch (e: any) {
       updateRow(id, { message: { kind: 'err', text: e?.message || 'Failed to clear.' } });
@@ -104,6 +104,8 @@ export default function ModelsTab() {
             <p className="text-xs text-zinc-500">Add a credential to activate a model across AIOS. Keys are stored using the OS keychain and used by the desktop service to authenticate with your chosen provider. Cloud processing sends the selected content to that provider.</p>
           </div>
         </div>
+
+        <ModelRoutingPanel />
 
         {secureAvailable === false && (
           <div className="mb-6 p-4 bg-amber-600/10 border border-amber-500/20 rounded-xl text-amber-300 text-xs">

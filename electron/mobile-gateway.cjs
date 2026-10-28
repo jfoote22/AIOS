@@ -28,6 +28,7 @@ const { getProviderKey, setProviderKey } = require('./keystore.cjs');
 const { getModelId } = require('./modelstore.cjs');
 const { pickSnippets, answerQuestion } = require('./vault-ask.cjs');
 const { analyzeSnipImage } = require('./snip-ocr.cjs');
+const hermesBridge = require('./hermes-bridge.cjs');
 const { bearerToken, tokensEqual, localAuthHeaders, mobileProxyAllowed } = require('./http-security.cjs');
 
 const DEFAULT_PORT = 8766;
@@ -106,6 +107,17 @@ function lanAddress() {
     }
   }
   return v4.find(isTailscaleAddress) || v4[0] || '0.0.0.0';
+}
+
+/** Every reachable IPv4 address, Tailscale first (for the Hermes bridge setup). */
+function allAddresses() {
+  const v4 = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const ni of list || []) {
+      if (ni && ni.family === 'IPv4' && !ni.internal && !ni.address.startsWith('169.254.')) v4.push(ni.address);
+    }
+  }
+  return v4.sort((a, b) => Number(isTailscaleAddress(b)) - Number(isTailscaleAddress(a)));
 }
 
 // ── auth ─────────────────────────────────────────────────────────────────────
@@ -342,6 +354,9 @@ function buildApp() {
     );
   });
 
+  // Hermes → AIOS tool server (chief-of-staff delegation). Has its own token.
+  app.use('/mcp', hermesBridge.mcpRouter());
+
   // Authenticate and bound the body before the curated proxy handles it.
   app.all('/api/proxy/*', requireToken, express.json({ limit: '2mb' }), proxyToApi);
 
@@ -509,7 +524,7 @@ function buildApp() {
     const m = /^data:([^;]+);base64,(.*)$/.exec(imageDataUrl);
     if (!m) return res.status(400).json({ error: 'imageDataUrl (a data:...;base64 URL) is required.' });
     try {
-      res.json(await analyzeSnipImage({ mimeType: m[1], data: m[2] }, { anthropicAuthMode: authModeFor('anthropic') }));
+      res.json(await analyzeSnipImage({ mimeType: m[1], data: m[2] }));
     } catch (e) {
       res.status(502).json({ error: e?.message || String(e) });
     }
@@ -545,8 +560,8 @@ function buildApp() {
     });
   });
 
-  // Ask Second Brain: ChatGPT picks the relevant snips from a catalog of the
-  // vault, then answers from them (Claude, then Gemini, if ChatGPT cannot) in
+  // Ask Second Brain: the model routed to 'vault-ask' picks the relevant snips
+  // from a catalog of the vault, then answers from them, in
   // the same 0:/3:/d: data-stream format as /api/mobile/chat. The cited snips
   // travel in the x-aios-sources header so the client can link them before
   // the answer arrives. Body: { question, history? }.
@@ -822,6 +837,6 @@ function status() {
 module.exports = {
   start, stop, status, setApiPort, buildApp,
   ensureToken, regenerateToken,
-  isEnabled, configuredPort, lanAddress,
+  isEnabled, configuredPort, lanAddress, allAddresses, isTailscaleAddress,
   DEFAULT_PORT,
 };

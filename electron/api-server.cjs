@@ -16,12 +16,16 @@ const { fileAccess } = require('./file-access.cjs');
 const { getProviderKey, setProviderKey } = require('./keystore.cjs');
 const { promptStream } = require('./agent-prompt.cjs');
 const { loadClaudeSdk, codexOptions } = require('./sdk-binaries.cjs');
-const { analyzeSnipImage, claudeOcr, normalizeOcr, shortError } = require('./snip-ocr.cjs');
+const { analyzeSnipImage } = require('./snip-ocr.cjs');
+const router = require('./model-router.cjs');
+const routing = require('./model-routing.cjs');
+const hermesBridge = require('./hermes-bridge.cjs');
 const { getModelId, setModelId } = require('./modelstore.cjs');
 const extract = require('./extract.cjs');
 const research = require('./research.cjs');
 const deepResearch = require('./deep-research.cjs');
 const vaultAsk = require('./vault-ask.cjs');
+const { resolveGrokBin, resolveGeminiBin } = require('./cli-bins.cjs');
 
 // Dynamic imports for ESM-only ai SDK packages.
 async function loadAi() {
@@ -217,64 +221,6 @@ function appendSteer(messages, steer) {
   return copy;
 }
 
-// Resolve the `grok` CLI binary. The Electron process can have a stale PATH
-// (the user often installs grok mid-session, which appends ~/.grok/bin to the
-// *user* PATH only). So we check an explicit override, then the canonical
-// install location, then fall back to the bare command for the OS to resolve.
-let _grokBinCache;
-function resolveGrokBin() {
-  if (_grokBinCache !== undefined) return _grokBinCache;
-  const override = (process.env.AIOS_GROK_BIN || '').trim();
-  const candidates = [];
-  if (override) candidates.push(override);
-  const home = os.homedir();
-  if (home) {
-    candidates.push(path.join(home, '.grok', 'bin', process.platform === 'win32' ? 'grok.exe' : 'grok'));
-  }
-  for (const c of candidates) {
-    try { if (fsSync.existsSync(c)) { _grokBinCache = c; return c; } } catch {}
-  }
-  // Last resort: let the OS PATH-resolve it (works if grok is on PATH).
-  _grokBinCache = process.platform === 'win32' ? 'grok.exe' : 'grok';
-  return _grokBinCache;
-}
-
-// Resolve the Antigravity CLI binary (`agy`), Google's replacement for the old
-// `gemini` CLI. Google decommissioned the Gemini CLI for Pro/Ultra/free
-// (subscription) users on 2026-06-18; Antigravity CLI is the successor. It is a
-// native binary (NOT an npm package) installed by
-//   irm https://antigravity.google/cli/install.ps1 | iex   (Windows)
-//   curl -fsSL https://antigravity.google/cli/install.sh | bash   (Unix)
-// and dropped at %LOCALAPPDATA%\agy\bin\agy.exe (Windows) or ~/.local/bin/agy.
-// Same stale-PATH problem as the others: that dir may not be on the Electron
-// process PATH, so check an explicit override, then the canonical install
-// location, then fall back to the bare command for the OS to resolve. Because
-// it's a real .exe (not a .cmd shim), the agent route can spawn it with
-// shell:false and pass argv directly — no shell-quoting needed.
-// AIOS_AGY_BIN is the preferred override; AIOS_GEMINI_BIN is honored for
-// back-compat with older configs.
-let _geminiBinCache;
-function resolveGeminiBin() {
-  if (_geminiBinCache !== undefined) return _geminiBinCache;
-  const override = (process.env.AIOS_AGY_BIN || process.env.AIOS_GEMINI_BIN || '').trim();
-  const isWin = process.platform === 'win32';
-  const exe = isWin ? 'agy.exe' : 'agy';
-  const candidates = [];
-  if (override) candidates.push(override);
-  const home = os.homedir();
-  if (isWin) {
-    const localAppData = process.env.LOCALAPPDATA || (home && path.join(home, 'AppData', 'Local'));
-    if (localAppData) candidates.push(path.join(localAppData, 'agy', 'bin', 'agy.exe'));
-  } else if (home) {
-    candidates.push(path.join(home, '.local', 'bin', 'agy'));
-  }
-  for (const c of candidates) {
-    try { if (fsSync.existsSync(c)) { _geminiBinCache = c; return c; } } catch {}
-  }
-  // Last resort: let the OS PATH-resolve it (works if agy is on PATH).
-  _geminiBinCache = exe;
-  return _geminiBinCache;
-}
 
 // Kill a spawned CLI child ONLY on a genuine client disconnect. `req.on('close')`
 // fires as soon as the request body is fully read (Node behavior), even though
@@ -441,7 +387,7 @@ function aiosJobToHermesBody(job) {
   return body;
 }
 
-function start({ development = false, approveAgentTool } = {}) {
+function start({ development = false, approveAgentTool, gatewayInfo } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.use(localApiGuard({ development }));
@@ -458,6 +404,114 @@ function start({ development = false, approveAgentTool } = {}) {
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
+  // --- Model routing: one generic AI endpoint + the Settings → Models API ---
+  // The renderer names a task; model-router.cjs picks the model.
+  const IMAGE_DATA_URL = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]*={0,2})$/;
+  app.post('/api/ai/generate', async (req, res) => {
+    const { task, system = '', prompt, imageDataUrl, json = false, stream = false } = req.body || {};
+    if (!routing.TASKS.includes(task)) return res.status(400).json({ error: 'Unknown task.' });
+    if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 2_000_000) return res.status(400).json({ error: 'prompt is required.' });
+    if (typeof system !== 'string' || system.length > 100_000) return res.status(400).json({ error: 'Invalid system prompt.' });
+    let image;
+    if (imageDataUrl !== undefined) {
+      const m = typeof imageDataUrl === 'string' && IMAGE_DATA_URL.exec(imageDataUrl);
+      if (!m) return res.status(400).json({ error: 'imageDataUrl must be a base64 PNG, JPEG, WebP or GIF data URL.' });
+      image = { mimeType: m[1], data: m[2] };
+    }
+    const abort = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) abort.abort(); });
+    try {
+      if (stream === true) {
+        res.type('application/x-ndjson');
+        const { model, label } = await router.generate({
+          task, system, prompt, image, json: json === true, signal: abort.signal,
+          onDelta: (t) => { if (!abort.signal.aborted) res.write(JSON.stringify({ text: t }) + '\n'); },
+        });
+        res.end(JSON.stringify({ done: true, model, label }) + '\n');
+      } else {
+        const { text, model, label } = await router.generate({ task, system, prompt, image, json: json === true, signal: abort.signal });
+        res.json({ text, model, label });
+      }
+    } catch (e) {
+      if (abort.signal.aborted) return;
+      const message = e?.message || 'The AI request failed.';
+      if (!res.headersSent) res.status(502).json({ error: message });
+      else res.end(JSON.stringify({ error: message }) + '\n');
+    }
+  });
+
+  const routingView = () => {
+    const store = routing.read();
+    return {
+      default: store.default,
+      tasks: store.tasks,
+      embeddings: store.embeddings,
+      fallback: store.fallback,
+      taskList: routing.TASKS.map((id) => ({ id, label: router.TASK_LABELS[id] || id })),
+      // Never includes keys; `hasKey` says whether one is stored.
+      connections: router.catalog(store).map(({ keyId, ...c }) => c),
+      ready: Object.fromEntries(routing.TASKS.map((t) => [t, router.hasModelFor(t, { vision: t === 'ocr' })])),
+    };
+  };
+
+  app.get('/api/models/routing', (_req, res) => res.json(routingView()));
+
+  // Hermes → AIOS bridge setup (Settings → Hermes). The tool server itself is
+  // served by the mobile gateway at /mcp; this reports how to reach it.
+  // main.cjs passes gatewayInfo() so this module never loads the gateway itself.
+  const bridgeView = () => {
+    const g = gatewayInfo?.() || { enabled: false, running: false, port: 8766, addresses: [] };
+    return {
+      gatewayEnabled: g.enabled,
+      gatewayRunning: g.running,
+      port: g.port,
+      urls: g.addresses.map((a) => ({ url: `http://${a.address}:${g.port}/mcp`, tailscale: a.tailscale })),
+      token: hermesBridge.ensureToken(),
+    };
+  };
+  app.get('/api/hermes/bridge', (_req, res) => res.json(bridgeView()));
+  app.post('/api/hermes/bridge/regenerate', (_req, res) => { hermesBridge.regenerateToken(); res.json(bridgeView()); });
+
+  app.put('/api/models/routing', (req, res) => {
+    try { routing.update(req.body || {}); res.json(routingView()); }
+    catch (e) { res.status(400).json({ error: e?.message || 'Could not save.' }); }
+  });
+
+  // Body: { id, label, baseUrl, models: string[], vision, apiKey? } — apiKey
+  // undefined keeps the stored key, '' removes it.
+  app.post('/api/models/connections', (req, res) => {
+    try {
+      const body = req.body || {};
+      const store = routing.upsertConnection(body);
+      const id = String(body.id || '').trim().toLowerCase();
+      if (typeof body.apiKey === 'string' && store.connections.some((c) => c.id === id)) {
+        setProviderKey(`conn:${id}`, body.apiKey.trim());
+      }
+      res.json(routingView());
+    } catch (e) { res.status(400).json({ error: e?.message || 'Could not save the connection.' }); }
+  });
+
+  app.delete('/api/models/connections/:id', (req, res) => {
+    const id = String(req.params.id || '');
+    try {
+      routing.removeConnection(id);
+      setProviderKey(`conn:${id}`, '');
+      res.json(routingView());
+    } catch (e) { res.status(400).json({ error: e?.message || 'Could not remove the connection.' }); }
+  });
+
+  app.post('/api/models/detect', async (req, res) => {
+    try { res.json({ models: await router.detectModels(req.body || {}) }); }
+    catch (e) { res.status(502).json({ error: e?.message || 'Could not list models.' }); }
+  });
+
+  app.post('/api/models/test', async (req, res) => {
+    const ref = routing.cleanRef(req.body?.ref);
+    if (!ref) return res.status(400).json({ error: 'ref is required.' });
+    try { res.json({ reply: await router.testModel(ref) }); }
+    catch (e) { res.status(502).json({ error: router.shortError(e) }); }
+  });
+
   app.get('/api/hermes/config', (_req, res) => {
     const baseUrl = normalizeHermesBaseUrl(getProviderKey('hermes_base_url'));
     const apiKey = getProviderKey('hermes_api_key');
@@ -466,6 +520,48 @@ function start({ development = false, approveAgentTool } = {}) {
       hasApiKey: !!apiKey,
       apiKeyPreview: apiKey ? `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}` : '',
       model: getModelId('hermes'),
+      dashboardUrl: getProviderKey('hermes_dashboard_url'),
+      dashboardUser: getProviderKey('hermes_dashboard_user'),
+      hasDashboardPassword: !!getProviderKey('hermes_dashboard_password'),
+    });
+  });
+
+  // One-step setup: the Mac's address (IP, hostname or URL) sets both the API
+  // server URL and the dashboard URL; the dashboard login is stored encrypted
+  // and used by hermes-view.cjs to sign in automatically. Omitted fields are
+  // kept; an empty dashboardPassword string is ignored (clear it with clearDashboardLogin).
+  app.post('/api/hermes/connection', (req, res) => {
+    const { host, apiPort = 8642, dashboardPort = 9119, dashboardUrl, dashboardUser, dashboardPassword, clearDashboardLogin } = req.body || {};
+    const port = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 && n < 65536 ? n : null; };
+    if (typeof host === 'string' && host.trim()) {
+      let url;
+      try { url = new URL(/^https?:\/\//i.test(host.trim()) ? host.trim() : `http://${host.trim()}`); }
+      catch { return res.status(400).json({ error: 'Enter an address like 100.97.211.120 or http://my-mac:9119.' }); }
+      if (url.username || url.password) return res.status(400).json({ error: 'Leave credentials out of the address.' });
+      if (!port(apiPort) || !port(dashboardPort)) return res.status(400).json({ error: 'Ports must be 1–65535.' });
+      setProviderKey('hermes_base_url', `${url.protocol}//${url.hostname}:${port(apiPort)}/v1`);
+      setProviderKey('hermes_dashboard_url', `${url.protocol}//${url.hostname}:${port(dashboardPort)}`);
+    }
+    if (typeof dashboardUrl === 'string' && dashboardUrl.trim()) {
+      try {
+        const u = new URL(dashboardUrl.trim());
+        if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) throw new Error();
+        setProviderKey('hermes_dashboard_url', u.href.replace(/\/+$/, ''));
+      } catch { return res.status(400).json({ error: 'Dashboard URL must be a full http(s) URL.' }); }
+    }
+    if (clearDashboardLogin === true) {
+      setProviderKey('hermes_dashboard_user', '');
+      setProviderKey('hermes_dashboard_password', '');
+    } else {
+      if (typeof dashboardUser === 'string' && dashboardUser.trim()) setProviderKey('hermes_dashboard_user', dashboardUser.trim());
+      if (typeof dashboardPassword === 'string' && dashboardPassword) setProviderKey('hermes_dashboard_password', dashboardPassword);
+    }
+    res.json({
+      ok: true,
+      baseUrl: normalizeHermesBaseUrl(getProviderKey('hermes_base_url')),
+      dashboardUrl: getProviderKey('hermes_dashboard_url'),
+      dashboardUser: getProviderKey('hermes_dashboard_user'),
+      hasDashboardPassword: !!getProviderKey('hermes_dashboard_password'),
     });
   });
 
@@ -570,7 +666,7 @@ function start({ development = false, approveAgentTool } = {}) {
 
   app.post('/api/hermes/cron/draft', async (req, res) => {
     try {
-      const { field, currentValue = '', hint = '', job = {}, authMode } = req.body || {};
+      const { field, currentValue = '', hint = '', job = {} } = req.body || {};
       if (!field) return res.status(400).json({ error: 'Missing `field`.' });
 
       const sysParts = [
@@ -606,41 +702,7 @@ function start({ development = false, approveAgentTool } = {}) {
       ].filter(Boolean);
       const userPrompt = `Context:\n${ctxLines.join('\n')}\n\nDraft the value for "${field}" now.`;
 
-      let raw = '';
-      if (authMode === 'subscription') {
-        const { query } = await loadClaudeSdk();
-        const modelId = getModelId('claude') || getModelId('anthropic');
-        const stream = query({
-          prompt: promptStream(userPrompt),
-          options: {
-            model: modelId,
-            systemPrompt: sysParts.join('\n'),
-            ...noToolsPolicy(),
-          },
-        });
-        for await (const msg of stream) {
-          if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
-            for (const block of msg.message.content) {
-              if (block && block.type === 'text' && typeof block.text === 'string') raw += block.text;
-            }
-          } else if (msg.type === 'result') { assertAgentResult(msg); break; }
-        }
-      } else {
-        const key = getProviderKey('anthropic');
-        if (!key) return res.status(400).json({ error: 'Anthropic key not configured. Add it in Models tab, or switch to subscription auth.' });
-        const { default: Anthropic } = await import('@anthropic-ai/sdk');
-        const client = new Anthropic({ apiKey: key });
-        const modelId = getModelId('claude') || getModelId('anthropic');
-        const response = await client.messages.create({
-          model: modelId,
-          max_tokens: 1200,
-          system: sysParts.join('\n'),
-          messages: [{ role: 'user', content: userPrompt }],
-        });
-        for (const block of response.content || []) {
-          if (block.type === 'text') raw += block.text;
-        }
-      }
+      const { text: raw } = await router.generate({ task: 'drafting', system: sysParts.join('\n'), prompt: userPrompt });
 
       const value = raw.trim().replace(/^```[a-z]*\n?|\n?```$/g, '').trim();
       res.json({ field, value });
@@ -2030,88 +2092,22 @@ function start({ development = false, approveAgentTool } = {}) {
     }
   });
 
-  // --- Vision OCR / snippet analysis (currently OpenAI; matches Gemini analyzeSnip shape) ---
+  // --- Vision OCR / snippet analysis on the model routed to 'ocr' ---
   app.post('/api/vision/analyze-snip', async (req, res) => {
+    const { imageDataUrl } = req.body || {};
+    const m = typeof imageDataUrl === 'string'
+      && /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]*={0,2})$/.exec(imageDataUrl);
+    if (!m) return res.status(400).json({ error: 'imageDataUrl must be a base64 PNG, JPEG, WebP or GIF data URL.' });
+    const abort = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) abort.abort(); });
     try {
-      const { imageDataUrl, provider, authMode } = req.body || {};
-      if (!imageDataUrl || typeof imageDataUrl !== 'string') {
-        return res.status(400).json({ error: 'imageDataUrl is required' });
-      }
-      // 'auto' = Gemini then Claude; 'anthropic' = Claude only. authMode is the
-      // renderer's Anthropic auth mode (subscription CLI vs stored key).
-      if (provider === 'auto' || provider === 'anthropic') {
-        const m = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]*={0,2})$/.exec(imageDataUrl);
-        if (!m) return res.status(400).json({ error: 'imageDataUrl must be a base64 PNG, JPEG, WebP or GIF data URL.' });
-        const image = { mimeType: m[1], data: m[2] };
-        const anthropicAuthMode = authMode === 'subscription' ? 'subscription' : 'api';
-        try {
-          return res.json(provider === 'auto'
-            ? await analyzeSnipImage(image, { anthropicAuthMode })
-            : { ...normalizeOcr(await claudeOcr(image, anthropicAuthMode)), ocrProvider: 'Claude' });
-        } catch (e) {
-          return res.status(502).json({ error: provider === 'auto' ? e.message : `Claude OCR failed: ${shortError(e)}` });
-        }
-      }
-      if (provider && provider !== 'openai') {
-        return res.status(400).json({ error: `Vision provider "${provider}" is not yet wired. Use 'auto', 'anthropic' or 'openai'.` });
-      }
-      const key = getProviderKey('openai');
-      if (!key) return res.status(400).json({ error: 'OpenAI key not configured. Add it in the Models tab.' });
-
-      const modelId = getModelId('openai');
-      const OpenAI = (await import('openai')).default;
-      const client = new OpenAI({ apiKey: key });
-
-      const prompt = `You are the AI curator for "AIOS Vault" — a personal knowledge capture tool. The user has just captured this screenshot. Analyze it and return ONLY valid JSON in exactly this shape (no markdown, no code fences):
-{
-  "title": "5-10 word descriptive title for this capture",
-  "summary": "A concise paragraph (2-4 sentences) describing what is in the image and what it appears to be doing or showing",
-  "category": "One short category name like Houdini, Travel, Finance, Development, Design, Reference, Personal, General",
-  "source": "Best guess of source app/website based on visible UI cues (Chrome, VS Code, Houdini, YouTube, Slack, etc.)",
-  "tags": ["3-8 lowercase keyword tags"],
-  "entities": [{ "type": "link|number|address|info", "label": "Short label", "value": "literal extracted value" }],
-  "extractedText": "All readable text in the image, transcribed verbatim. Empty string if no text."
-}
-Be specific and faithful to what is actually visible. Do not invent details. If the image is mostly empty or unreadable, say so honestly in the summary. Respond with ONLY the JSON object.`;
-
-      const completion = await client.chat.completions.create({
-        model: modelId,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: imageDataUrl } },
-          ],
-        }],
-      });
-
-      let text = completion.choices?.[0]?.message?.content || '';
-      // Strip any stray markdown fences and isolate the outermost JSON object.
-      text = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-      const start = text.indexOf('{');
-      const end = text.lastIndexOf('}');
-      if (start >= 0 && end > start) text = text.substring(start, end + 1);
-
-      const parsed = JSON.parse(text);
-      const allowed = new Set(['link', 'number', 'address', 'info']);
-      parsed.entities = (parsed.entities || []).map(e => ({ ...e, type: allowed.has(e?.type) ? e.type : 'info' }));
-      parsed.tags = Array.isArray(parsed.tags) ? parsed.tags : [];
-      parsed.extractedText = parsed.extractedText || '';
-
-      res.json(parsed);
+      res.json(await analyzeSnipImage({ mimeType: m[1], data: m[2] }, { signal: abort.signal }));
     } catch (e) {
-      console.error('Vision OCR error:', e);
-      res.status(500).json({ error: e?.message || 'Vision analysis failed' });
+      if (!res.headersSent) res.status(502).json({ error: e?.message || 'Reading the screenshot failed.' });
     }
   });
 
-  // --- Embeddings: Gemini text embeddings, batched ---
-  // The key lives here in main (encrypted keystore), so embedding never depends
-  // on the renderer's in-memory key — which a hot-reload or boot race can wipe
-  // mid-job. Accepts { contents: string[] }, returns { embeddings: number[][] }.
-  // Upstream rate-limit / error statuses are propagated so the renderer can
-  // back off and retry.
-  // --- Ask Second Brain (desktop): ChatGPT picks the snips, then answers ---
+  // --- Ask Second Brain (desktop): a model picks the snips, then answers ---
   // Same pipeline as the mobile gateway's /api/mobile/ask (vault-ask.cjs).
   const vaultHistory = (h) => (Array.isArray(h) ? h : [])
     .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string');
@@ -2161,22 +2157,18 @@ Be specific and faithful to what is actually visible. Do not invent details. If 
     }
   });
 
+  // --- Embeddings for the provider chosen in Settings → Models (Gemini or an
+  // OpenAI-compatible connection; the built-in model runs in the renderer).
+  // Accepts { contents: string[] }, returns { embeddings: number[][] }.
+  // Upstream rate-limit / error statuses are propagated so the renderer can
+  // back off and retry.
   app.post('/api/embeddings', async (req, res) => {
     try {
       const { contents } = req.body || {};
       if (!Array.isArray(contents) || contents.length === 0) {
         return res.status(400).json({ error: 'contents (non-empty array of strings) is required' });
       }
-      const key = getProviderKey('gemini');
-      if (!key) return res.status(400).json({ error: 'Gemini key not configured. Add it in the Models tab.' });
-
-      const { GoogleGenAI } = await import('@google/genai');
-      const client = new GoogleGenAI({ apiKey: key });
-      const result = await client.models.embedContent({
-        model: 'gemini-embedding-001',
-        contents,
-      });
-      const embeddings = (result.embeddings || []).map(e => e.values || []);
+      const embeddings = await router.embed(contents);
       res.json({ embeddings });
     } catch (e) {
       // Surface the upstream HTTP status (notably 429) so the client backs off.

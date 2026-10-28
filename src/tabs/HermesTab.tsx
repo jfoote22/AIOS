@@ -16,6 +16,7 @@ interface HermesConfig {
   hasApiKey: boolean;
   apiKeyPreview: string;
   model: string;
+  dashboardUrl?: string;
 }
 
 interface ChatMessage {
@@ -274,6 +275,7 @@ export default function HermesTab({ active = true }: { active?: boolean }) {
   // 'dashboard' embeds Hermes's own web UI; 'classic' is AIOS's cron + chat view.
   const [view, setView] = useState<'dashboard' | 'classic'>('dashboard');
   const [configLoaded, setConfigLoaded] = useState(false);
+  const [dashboardUrl, setDashboardUrl] = useState('');
   const [baseUrl, setBaseUrl] = useState('http://192.168.1.185:8642/v1');
   const [hasApiKey, setHasApiKey] = useState(false);
   const [model, setModel] = useState('hermes-mac');
@@ -312,6 +314,7 @@ export default function HermesTab({ active = true }: { active?: boolean }) {
       const cfg = (await res.json()) as HermesConfig;
       if (cfg.baseUrl) setBaseUrl(cfg.baseUrl);
       if (cfg.model) setModel(cfg.model);
+      setDashboardUrl(cfg.dashboardUrl || '');
       setHasApiKey(!!cfg.hasApiKey);
     } catch (e) {
       console.error('Failed to load Hermes config:', e);
@@ -603,7 +606,7 @@ export default function HermesTab({ active = true }: { active?: boolean }) {
 
       {configLoaded && (
         <div className="flex-1 min-h-0 flex flex-col" style={{ display: view === 'dashboard' ? 'flex' : 'none' }}>
-          <HermesDashboard visible={active && view === 'dashboard'} apiBaseUrl={baseUrl} />
+          <HermesDashboard visible={active && view === 'dashboard'} apiBaseUrl={baseUrl} savedUrl={dashboardUrl} />
         </div>
       )}
 

@@ -1,12 +1,11 @@
-// AI layer. Phase 1: Gemini for snippet analysis + embeddings + Ask the Vault chat.
-// Phase 2 will add OpenAI/Anthropic/Grok routing for DeepDive chat.
+// AI layer for snippets, notes, DeepDive maps, embeddings and Ask Second
+// Brain. Every call names a task; the model it runs on is chosen in
+// Settings → Models (electron/model-router.cjs).
 
 import { Type } from '@google/genai';
-import { geminiClient } from './geminiClient';
 import { apiUrl } from './apiBase';
-import { getAnthropicAuthMode } from './authMode';
-
-export type OcrProvider = 'openai' | 'gemini' | 'anthropic' | 'grok';
+import { aiGenerate, parseJsonObject, embeddingsMode, type AiTask } from './modelRouting';
+import { embedLocal, LOCAL_EMBEDDING_DIM } from './localEmbeddings';
 
 export interface AnalyzedEntity {
   type: 'link' | 'number' | 'address' | 'info';
@@ -32,56 +31,36 @@ export interface MarkdownAnalysis {
   entities: AnalyzedEntity[];
 }
 
-let geminiReady = false;
+// True when a text model is connected (Settings → Models). A tiny event so
+// tabs can enable their AI actions as soon as one is added.
+let aiReady = false;
 const listeners = new Set<(ready: boolean) => void>();
 
-export function setGeminiReady(ready: boolean): void {
-  if (ready === geminiReady) return;
-  geminiReady = ready;
+export function setAiReady(ready: boolean): void {
+  if (ready === aiReady) return;
+  aiReady = ready;
   for (const fn of listeners) fn(ready);
 }
 
-export function onGeminiReadyChange(fn: (ready: boolean) => void): () => void {
+export function onAiReadyChange(fn: (ready: boolean) => void): () => void {
   listeners.add(fn);
   return () => { listeners.delete(fn); };
 }
 
-function getClient() {
-  if (!geminiReady) {
-    throw new Error('Gemini API key is not configured. Open Models to add your key.');
-  }
-  return geminiClient;
+export function isAiReady(): boolean {
+  return aiReady;
 }
 
-export function isGeminiReady(): boolean {
-  return geminiReady;
+/** Run a task that must answer with JSON shaped like `schema` (a Gemini-style
+ *  schema; its descriptions tell the model what each field holds). */
+async function generateJson<T>(task: AiTask, prompt: string, schema: object): Promise<T> {
+  const { text } = await aiGenerate({
+    task,
+    prompt: `${prompt}\n\nReturn JSON matching this schema (field descriptions say what each holds):\n${JSON.stringify(schema)}`,
+    json: true,
+  });
+  return parseJsonObject<T>(text);
 }
-
-const responseSchema = {
-  type: Type.OBJECT,
-  properties: {
-    title: { type: Type.STRING, description: '5-10 word descriptive title for this capture' },
-    summary: { type: Type.STRING, description: 'A concise paragraph (2-4 sentences) describing what is in the image and what it appears to be doing or showing' },
-    category: { type: Type.STRING, description: 'One short category name like Houdini, Travel, Finance, Development, Design, Reference, Personal, General' },
-    source: { type: Type.STRING, description: 'Best guess of the source app/website based on visible UI cues (e.g. Chrome, VS Code, Houdini, YouTube, Slack)' },
-    tags: { type: Type.ARRAY, items: { type: Type.STRING }, description: '3-8 lowercase keyword tags' },
-    entities: {
-      type: Type.ARRAY,
-      description: 'Notable extracted entities like phone numbers, addresses, prices, URLs, dates, names, product names, version strings',
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          type: { type: Type.STRING, description: 'One of: link, number, address, info' },
-          label: { type: Type.STRING, description: 'Short label for what this entity represents' },
-          value: { type: Type.STRING, description: 'The literal extracted value' },
-        },
-        required: ['type', 'label', 'value'],
-      },
-    },
-    extractedText: { type: Type.STRING, description: 'All readable text in the image, transcribed verbatim. Empty string if no text.' },
-  },
-  required: ['title', 'summary', 'category', 'source', 'tags', 'entities', 'extractedText'],
-};
 
 function dataUrlToInline(dataUrl: string): { mimeType: string; data: string } {
   const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
@@ -89,30 +68,18 @@ function dataUrlToInline(dataUrl: string): { mimeType: string; data: string } {
   return { mimeType: match[1], data: match[2] };
 }
 
+/** Read a screenshot on the model routed to 'ocr' (see electron/snip-ocr.cjs). */
 export async function analyzeSnip(imageDataUrl: string): Promise<SnipAnalysis> {
-  const ai = getClient();
-  const inline = dataUrlToInline(imageDataUrl);
-
-  const result = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [{
-      role: 'user',
-      parts: [
-        { inlineData: inline },
-        { text: `You are the AI curator for "AIOS Vault" — a personal knowledge capture tool. The user has just captured this screenshot. Analyze it and return structured metadata so it can be filed and searched later.\n\nBe specific and faithful to what is actually visible. Do not invent details. If the image is mostly empty or unreadable, say so honestly in the summary.` },
-      ],
-    }],
-    config: { responseMimeType: 'application/json', responseSchema },
+  const res = await fetch(apiUrl('/api/vision/analyze-snip'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ imageDataUrl }),
   });
-
-  const text = result.text;
-  if (!text) throw new Error('Gemini returned no content');
-  const parsed = JSON.parse(text) as SnipAnalysis;
-
-  const allowed = new Set(['link', 'number', 'address', 'info']);
-  parsed.entities = (parsed.entities ?? []).map(e => ({ ...e, type: allowed.has(e.type) ? e.type : 'info' }));
-  parsed.tags = parsed.tags ?? [];
-  return parsed;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error || `Reading the screenshot failed (${res.status})`);
+  }
+  return res.json();
 }
 
 /** Downscale a capture before OCR so a large (multi-monitor) screenshot doesn't
@@ -142,56 +109,10 @@ export function downscaleDataUrl(dataUrl: string, maxDim = 1600): Promise<string
   });
 }
 
-/** OCR a capture after downscaling. Preferred entry point for raw captures.
- *  Gemini first; if it fails (no key, depleted credits, outage) Claude reads the
- *  image instead, and the error names both failures if that fails too. */
+/** OCR a capture after downscaling. Preferred entry point for raw captures;
+ *  the router falls back to other connected vision models if the chosen one fails. */
 export async function analyzeSnipScaled(dataUrl: string): Promise<SnipAnalysis> {
-  const scaled = await downscaleDataUrl(dataUrl);
-  try {
-    return await analyzeSnip(scaled);
-  } catch (geminiError) {
-    try {
-      return await analyzeSnipWith('anthropic', scaled);
-    } catch (claudeError) {
-      const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-      throw new Error(`Gemini: ${msg(geminiError)} | ${msg(claudeError)}`);
-    }
-  }
-}
-
-async function analyzeSnipViaServer(provider: 'openai' | 'anthropic', imageDataUrl: string): Promise<SnipAnalysis> {
-  const body: Record<string, string> = { imageDataUrl, provider };
-  if (provider === 'anthropic') body.authMode = await getAnthropicAuthMode();
-  const res = await fetch(apiUrl('/api/vision/analyze-snip'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-    throw new Error(err.error || `${provider} vision failed (${res.status})`);
-  }
-  return res.json();
-}
-
-// Dispatches snippet analysis to the chosen vision provider.
-// - 'gemini' uses the authenticated main-process generation service.
-// - 'openai' / 'anthropic' go through the local Electron API server, which holds
-//   the credentials in main. 'anthropic' follows the Anthropic auth mode: the
-//   Claude Code subscription or the stored key.
-// - 'grok' is not yet wired.
-export async function analyzeSnipWith(provider: OcrProvider, imageDataUrl: string): Promise<SnipAnalysis> {
-  if (provider === 'gemini') return analyzeSnip(imageDataUrl);
-  if (provider === 'openai' || provider === 'anthropic') return analyzeSnipViaServer(provider, imageDataUrl);
-  throw new Error(`${provider} OCR is not yet wired. Switch to Gemini, Claude or OpenAI.`);
-}
-
-export function isOcrProviderReady(provider: OcrProvider, configured: Set<string>): boolean {
-  if (provider === 'gemini') return configured.has('gemini') || isGeminiReady();
-  if (provider === 'openai') return configured.has('openai');
-  // Subscription mode needs no stored key; the server reports a missing login.
-  if (provider === 'anthropic') return true;
-  return false;
+  return analyzeSnip(await downscaleDataUrl(dataUrl));
 }
 
 export interface TextAnalysis {
@@ -225,19 +146,9 @@ const textResponseSchema = {
 };
 
 export async function analyzeText(text: string): Promise<TextAnalysis> {
-  const ai = getClient();
-  const result = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [{
-      role: 'user',
-      parts: [{ text: `You are extracting a chunk of saved text from a user's personal knowledge vault. Analyze this text fragment and return structured metadata. Be specific. Do not invent details.\n\nText:\n"""\n${text}\n"""` }],
-    }],
-    config: { responseMimeType: 'application/json', responseSchema: textResponseSchema },
-  });
-
-  const out = result.text;
-  if (!out) throw new Error('Gemini returned no content');
-  const parsed = JSON.parse(out) as TextAnalysis;
+  const parsed = await generateJson<TextAnalysis>('tagging',
+    `You are extracting a chunk of saved text from a user's personal knowledge vault. Analyze this text fragment and return structured metadata. Be specific. Do not invent details.\n\nText:\n"""\n${text}\n"""`,
+    textResponseSchema);
   const allowed = new Set(['link', 'number', 'address', 'info']);
   parsed.entities = (parsed.entities ?? []).map(e => ({ ...e, type: allowed.has(e.type) ? e.type : 'info' }));
   parsed.tags = (parsed.tags ?? []).map(t => t.toLowerCase().trim()).filter(Boolean);
@@ -271,19 +182,9 @@ const markdownResponseSchema = {
 // Like analyzeText, but returns a real title + topical category so the note
 // blends into the brain graph by subject instead of a fixed bucket.
 export async function analyzeMarkdown(text: string): Promise<MarkdownAnalysis> {
-  const ai = getClient();
-  const result = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [{
-      role: 'user',
-      parts: [{ text: `You are filing a markdown document into a personal knowledge vault. Analyze it and return structured metadata. Be specific; do not invent details.\n\nDocument:\n"""\n${text}\n"""` }],
-    }],
-    config: { responseMimeType: 'application/json', responseSchema: markdownResponseSchema },
-  });
-
-  const out = result.text;
-  if (!out) throw new Error('Gemini returned no content');
-  const parsed = JSON.parse(out) as MarkdownAnalysis;
+  const parsed = await generateJson<MarkdownAnalysis>('tagging',
+    `You are filing a markdown document into a personal knowledge vault. Analyze it and return structured metadata. Be specific; do not invent details.\n\nDocument:\n"""\n${text}\n"""`,
+    markdownResponseSchema);
   const allowed = new Set(['link', 'number', 'address', 'info']);
   parsed.entities = (parsed.entities ?? []).map(e => ({ ...e, type: allowed.has(e.type) ? e.type : 'info' }));
   parsed.tags = (parsed.tags ?? []).map(t => t.toLowerCase().trim()).filter(Boolean);
@@ -399,8 +300,6 @@ export async function analyzeDeepDiveUnderstanding(
   transcript: string,
   sources: UnderstandingSourceInput[],
 ): Promise<DeepDiveUnderstanding> {
-  const ai = getClient();
-
   const sourcesBlock = sources.length
     ? sources.map(s => `[${s.id}] ${s.title}${s.description ? ` — ${s.description.slice(0, 200)}` : ''}`).join('\n')
     : '(no sources)';
@@ -423,15 +322,7 @@ TRANSCRIPT:
 ${transcript}
 """`;
 
-  const result = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    config: { responseMimeType: 'application/json', responseSchema: understandingSchema },
-  });
-
-  const out = result.text;
-  if (!out) throw new Error('Gemini returned no content');
-  return validateUnderstanding(JSON.parse(out) as DeepDiveUnderstanding);
+  return validateUnderstanding(await generateJson<DeepDiveUnderstanding>('understanding', prompt, understandingSchema));
 }
 
 function validateUnderstanding(parsed: DeepDiveUnderstanding): DeepDiveUnderstanding {
@@ -455,8 +346,6 @@ export async function analyzeUnderstandingDrilldown(
   transcript: string,
   sources: UnderstandingSourceInput[],
 ): Promise<DeepDiveUnderstanding> {
-  const ai = getClient();
-
   const sourcesBlock = sources.length
     ? sources.map(s => `[${s.id}] ${s.title}${s.description ? ` — ${s.description.slice(0, 200)}` : ''}`).join('\n')
     : '(no sources)';
@@ -486,15 +375,7 @@ TRANSCRIPT:
 ${transcript}
 """`;
 
-  const result = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    config: { responseMimeType: 'application/json', responseSchema: understandingSchema },
-  });
-
-  const out = result.text;
-  if (!out) throw new Error('Gemini returned no content');
-  return validateUnderstanding(JSON.parse(out) as DeepDiveUnderstanding);
+  return validateUnderstanding(await generateJson<DeepDiveUnderstanding>('understanding', prompt, understandingSchema));
 }
 
 const EMBED_MAX_CHARS = 8000;        // per-item cap (model input limit)
@@ -527,9 +408,9 @@ function embedRetryDelayMs(e: any, attempt: number): number {
 }
 
 async function rawEmbed(contents: string[]): Promise<number[][]> {
-  // Embeddings run through the local Electron API server, which holds the
-  // Gemini key in main (encrypted keystore). This is immune to the renderer's
-  // in-memory key being wiped by a hot-reload or boot race mid-job.
+  // The built-in model runs here; other providers run in main, which holds
+  // their keys (encrypted keystore).
+  if (embeddingsMode() === 'local') return embedLocal(contents);
   const res = await fetch(apiUrl('/api/embeddings'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -544,9 +425,9 @@ async function rawEmbed(contents: string[]): Promise<number[][]> {
   }
   const data = await res.json();
   const embs = data?.embeddings;
-  if (!Array.isArray(embs) || !embs.length) throw new Error('Gemini returned no embeddings');
+  if (!Array.isArray(embs) || !embs.length) throw new Error('No embeddings were returned');
   return embs.map((v: unknown) => {
-    if (!Array.isArray(v) || !v.length) throw new Error('Gemini returned an empty embedding');
+    if (!Array.isArray(v) || !v.length) throw new Error('An embedding came back empty');
     return v as number[];
   });
 }
@@ -561,7 +442,7 @@ async function embedBatch(batch: string[], signal?: AbortSignal): Promise<number
       const vecs = await rawEmbed(batch);
       if (vecs.length === batch.length) return vecs;
       if (batch.length > 1) return embedEach(batch, signal); // count mismatch → per-item
-      throw new Error('Gemini returned the wrong number of embeddings');
+      throw new Error('The wrong number of embeddings came back');
     } catch (e) {
       const status = embedErrorStatus(e);
       if (status === 400 && batch.length > 1) return embedEach(batch, signal); // too large → split
@@ -621,6 +502,23 @@ export async function embedText(text: string): Promise<number[]> {
   return vec;
 }
 
+/** Vector length the current embeddings provider produces, when known. A
+ *  stored vector of another length came from a different model and must be
+ *  rebuilt before it can be compared. */
+export function currentEmbeddingDim(): number | null {
+  const mode = embeddingsMode();
+  if (mode === 'local') return LOCAL_EMBEDDING_DIM;
+  if (mode === 'gemini') return 3072;
+  return null;
+}
+
+/** True when a record has no vector, or one from a different embedding model. */
+export function needsEmbedding(embedding: number[] | undefined): boolean {
+  if (!embedding?.length) return true;
+  const dim = currentEmbeddingDim();
+  return dim !== null && embedding.length !== dim;
+}
+
 export function cosineSimilarity(a: number[], b: number[]): number {
   if (!a?.length || !b?.length || a.length !== b.length) return 0;
   let dot = 0, na = 0, nb = 0;
@@ -650,9 +548,9 @@ const toWireHistory = (history: ChatTurn[]) =>
   history.map(t => ({ role: t.role === 'model' ? 'assistant' : 'user', content: t.text }));
 
 /**
- * ChatGPT reads a catalog of every snip and returns the ids that help answer
- * `question`, best first (keyword match if ChatGPT is unavailable). Runs in
- * main — see electron/vault-ask.cjs.
+ * The model routed to Ask Second Brain reads a catalog of every snip and
+ * returns the ids that help answer `question`, best first (keyword match if no
+ * model can). Runs in main — see electron/vault-ask.cjs.
  */
 export async function pickVaultSnippets(question: string, history: ChatTurn[] = [], limit?: number): Promise<string[]> {
   const res = await fetch(apiUrl('/api/vault/pick'), {
@@ -665,7 +563,7 @@ export async function pickVaultSnippets(question: string, history: ChatTurn[] = 
   return Array.isArray(data?.ids) ? data.ids : [];
 }
 
-/** Grounded answer from the given snips: ChatGPT, then Claude, then Gemini. */
+/** Grounded answer from the given snips, on the model routed to Ask Second Brain. */
 export async function* chatWithVault(history: ChatTurn[], question: string, contextItems: VaultContextItem[]): AsyncGenerator<string> {
   const res = await fetch(apiUrl('/api/vault/answer'), {
     method: 'POST',

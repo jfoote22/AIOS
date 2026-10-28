@@ -89,6 +89,44 @@ app.whenReady().then(async () => {
   const back = await hermesView.show(`${base}/`, { x: 0, y: 0, width: 10, height: 10 });
   assert.equal(back.ok, true, back.error);
 
+  // Saved dashboard login: the Hermes login page is filled in automatically,
+  // once — a rejected password doesn't loop.
+  const logins = [];
+  const authed = await listen((req, res) => {
+    const cookie = /session=ok/.test(req.headers.cookie || '');
+    if (req.method === 'POST' && req.url === '/auth/password-login') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        const j = JSON.parse(body);
+        logins.push(j);
+        if (j.provider !== 'basic' || j.username !== 'justin' || j.password !== 'pw"1') { res.statusCode = 401; return res.end('{}'); }
+        res.setHeader('Set-Cookie', 'session=ok; Path=/; HttpOnly');
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ ok: true, next: '/chat' }));
+      });
+      return;
+    }
+    if (req.url.startsWith('/login')) { res.setHeader('Content-Type', 'text/html'); return res.end('<title>login</title>'); }
+    if (!cookie) { res.statusCode = 302; res.setHeader('Location', '/login?next=%2Fchat'); return res.end(); }
+    res.setHeader('Content-Type', 'text/html');
+    res.end('<title>signed-in</title>');
+  });
+  const authedBase = `http://127.0.0.1:${authed.address().port}`;
+  const { setProviderKey } = require('../electron/keystore.cjs');
+  setProviderKey('hermes_dashboard_user', 'justin');
+  setProviderKey('hermes_dashboard_password', 'wrong');
+  await hermesView.show(`${authedBase}/`, { x: 0, y: 0, width: 10, height: 10 });
+  await until(() => logins.length === 1);
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(logins.length, 1, 'a rejected login is not retried');
+  assert.equal(view.webContents.getTitle(), 'login');
+  setProviderKey('hermes_dashboard_password', 'pw"1');
+  view.webContents.reload();
+  await until(() => view.webContents.getTitle() === 'signed-in', 8000);
+  assert.deepEqual(logins[1], { provider: 'basic', username: 'justin', password: 'pw"1', next: '/chat' });
+  authed.close();
+
   hermesView.hide();
   assert.equal(view.getVisible(), false);
 

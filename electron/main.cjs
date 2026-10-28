@@ -378,7 +378,13 @@ app.whenReady().then(async () => {
   }
 
   try {
-    const { port } = await apiServer.start({ development: isDev, approveAgentTool: async ({ agentName, cwd, tool, input, signal }) => {
+    const { port } = await apiServer.start({ development: isDev, gatewayInfo: () => {
+      const st = mobileGateway.status();
+      return {
+        enabled: st.enabled, running: st.running, port: st.port,
+        addresses: mobileGateway.allAddresses().map((address) => ({ address, tailscale: mobileGateway.isTailscaleAddress(address) })),
+      };
+    }, approveAgentTool: async ({ agentName, cwd, tool, input, signal }) => {
       if (!mainWindow || mainWindow.isDestroyed() || signal.aborted) return false;
       const detail = JSON.stringify(input, null, 2);
       // Never truncate away the part of a command the user would be approving.

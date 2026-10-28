@@ -1,5 +1,5 @@
-// Multi-provider registry. Phase 1: Gemini wired for snippet analysis;
-// OpenAI/Anthropic/Grok/Ollama placeholders ready for Phase 2 (DeepDive chat).
+// API-key providers shown in Settings → Models. Local and other OpenAI-compatible
+// servers are added as connections instead (electron/model-routing.cjs).
 
 export type ProviderId = 'gemini' | 'openai' | 'anthropic' | 'grok' | 'deepgram' | 'replicate' | 'ollama' | 'youtube';
 
@@ -22,7 +22,6 @@ export const PROVIDERS: ProviderDef[] = [
   { id: 'grok',      label: 'xAI Grok',        keyHint: 'xai-…',  url: 'https://console.x.ai/',                   defaultModel: 'grok-2' },
   { id: 'deepgram',  label: 'Deepgram',        keyHint: 'dg_…',   url: 'https://console.deepgram.com/',           defaultModel: 'nova-2' },
   { id: 'replicate', label: 'Replicate',       keyHint: 'r8_…',   url: 'https://replicate.com/account/api-tokens' },
-  { id: 'ollama',    label: 'Ollama (local)',  keyHint: 'http://localhost:11434', isUrl: true, url: 'https://ollama.com', defaultModel: 'llama3.2' },
   { id: 'youtube',   label: 'YouTube Data API', keyHint: 'AIza…', url: 'https://console.cloud.google.com/apis/library/youtube.googleapis.com' },
 ];
 

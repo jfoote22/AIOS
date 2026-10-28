@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import * as db from '../lib/db';
 import {
-  analyzeText, analyzeSnipScaled, isGeminiReady, onGeminiReadyChange,
+  analyzeText, analyzeSnipScaled, isAiReady, onAiReadyChange,
   embedText, cosineSimilarity, buildEmbedSource, chatWithVault, pickVaultSnippets,
   type ChatTurn, type VaultContextItem,
 } from '../lib/ai';
@@ -57,7 +57,7 @@ export default function SnippingTab() {
   const [searchQuery, setSearchQuery] = useState('');
   const [queryEmbedding, setQueryEmbedding] = useState<number[] | null>(null);
   const [isSemanticSearching, setIsSemanticSearching] = useState(false);
-  const [aiReady, setAiReady] = useState<boolean>(isGeminiReady());
+  const [aiReady, setAiReady] = useState<boolean>(isAiReady());
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const isElectron = !!window.aios?.isElectron;
@@ -72,7 +72,7 @@ export default function SnippingTab() {
     return () => { if (off) off(); };
   }, []);
 
-  useEffect(() => { setAiReady(isGeminiReady()); const unsub = onGeminiReadyChange(setAiReady); return unsub; }, []);
+  useEffect(() => { setAiReady(isAiReady()); const unsub = onAiReadyChange(setAiReady); return unsub; }, []);
 
   useEffect(() => {
     // Global hotkey / Quick Snip always creates a NEW snippet. "Add Shot" no
@@ -90,7 +90,7 @@ export default function SnippingTab() {
           status: i.status || 'ready' as const,
         }));
         setVault(normalized);
-        if (!isGeminiReady()) return;
+        if (!isAiReady()) return;
         const needEmbed = normalized.filter(i => i.status === 'ready' && (!i.embedding || !i.embedding.length));
         for (const item of needEmbed) {
           embedText(buildEmbedSource(item))
@@ -185,11 +185,11 @@ export default function SnippingTab() {
     const placeholder: CapturedItem = {
       id, image: dataUrl, timestamp: Date.now(), tags: [],
       title: 'Analyzing…',
-      summary: aiReady ? 'Analyzing this capture…' : 'Gemini key not set — open the Models tab to add your key.',
+      summary: aiReady ? 'Analyzing this capture…' : 'No AI model connected — add one in Settings → Models.',
       source: '—', category: aiReady ? 'Pending' : 'Unprocessed',
       entities: [], subImages: [dataUrl], extractedText: '',
       status: aiReady ? 'analyzing' : 'error',
-      error: aiReady ? undefined : 'Gemini key not set',
+      error: aiReady ? undefined : 'No AI model connected',
     };
     setVault(prev => [placeholder, ...prev]);
     db.putSnippet(placeholder).then(() => emitOwnChange()).catch(err => console.error('Failed to persist snip:', err));
@@ -782,7 +782,7 @@ export default function SnippingTab() {
                 <div className="flex gap-2 items-end">
                   <textarea ref={chatInputRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
-                    rows={1} placeholder={aiReady ? 'Ask a question about your vault…' : 'AI not configured — add your Gemini key in Models tab'}
+                    rows={1} placeholder={aiReady ? 'Ask a question about your vault…' : 'No AI model connected — add one in Settings → Models'}
                     disabled={!aiReady || chatBusy}
                     className="flex-1 resize-none bg-zinc-900 border border-zinc-800 rounded-xl py-3 px-4 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all max-h-32 disabled:opacity-50" />
                   <button onClick={sendChat} disabled={!aiReady || chatBusy || !chatInput.trim()}

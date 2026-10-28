@@ -3,6 +3,8 @@ import QRCode from 'qrcode';
 import { CheckCircle2, Copy, Inbox, KeyRound, Loader2, RefreshCw, Save, Server, Smartphone, XCircle } from 'lucide-react';
 import { apiUrl, initApiBase } from '../lib/apiBase';
 import type { MemoryIngestStatus, MobileGatewayStatus } from '../electron';
+import HermesBridgeCard from '../components/HermesBridgeCard';
+import HermesConnectionCard from '../components/HermesConnectionCard';
 
 interface HermesConfig {
   baseUrl: string;
@@ -31,6 +33,18 @@ export default function HermesSettingsTab() {
   const [mobPort, setMobPort] = useState(8766);
   const [mobSaving, setMobSaving] = useState(false);
   const [mobCopied, setMobCopied] = useState<'url' | 'token' | 'code' | null>(null);
+
+  // Quick setup (HermesConnectionCard) changes the base URL; reflect it here.
+  useEffect(() => {
+    const reload = async () => {
+      try {
+        const cfg = await (await fetch(apiUrl('/api/hermes/config'))).json() as HermesConfig;
+        if (cfg.baseUrl) setBaseUrl(cfg.baseUrl);
+      } catch { /* keep what's shown */ }
+    };
+    window.addEventListener('aios:hermes-config-changed', reload);
+    return () => window.removeEventListener('aios:hermes-config-changed', reload);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -182,6 +196,10 @@ export default function HermesSettingsTab() {
             </p>
           </div>
         </div>
+
+        <div className="mb-4"><HermesConnectionCard /></div>
+
+        <div className="mb-4"><HermesBridgeCard /></div>
 
         <div className="p-5 bg-zinc-900/50 border border-zinc-800 rounded-2xl">
           <div className="flex items-center gap-3 mb-5">

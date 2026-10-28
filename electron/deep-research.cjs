@@ -3,8 +3,7 @@
 // loop, built entirely on primitives this app already ships:
 //   - search     → research.findLinks()  (Gemini Google-Search grounding + liveness verify)
 //   - read/scrape → extract.extractUrl()  (Readability/Turndown + headless Electron fallback)
-//   - summarize   → Gemini (cheap, high-volume per-source attribution)
-//   - synthesize  → Claude (best long-form cited writing)
+//   - plan, summarize, synthesize, verify → the model routed to 'research'
 //
 // The loop emits typed progress events via an onEvent callback so the renderer
 // can render live status, per-source cards, and a streaming cited report.
@@ -12,11 +11,7 @@
 
 const research = require('./research.cjs');
 const extract = require('./extract.cjs');
-const { getProviderKey } = require('./keystore.cjs');
-const { promptStream } = require('./agent-prompt.cjs');
-const { loadClaudeSdk } = require('./sdk-binaries.cjs');
-const { noToolsPolicy, assertAgentResult } = require('./agent-policy.cjs');
-const { getModelId } = require('./modelstore.cjs');
+const router = require('./model-router.cjs');
 
 // --- tuning knobs (overridable per request) ---
 const DEFAULTS = {
@@ -90,63 +85,15 @@ function throwIfAborted(signal) {
   }
 }
 
-// --- Gemini: planning + per-source summarization (and grounded search reuse) ---
-async function geminiGenerate(prompt, { search = false } = {}) {
-  const key = getProviderKey('gemini');
-  if (!key) throw new Error('Gemini key not configured — it powers deep-research search & summarization. Add it in the Models tab.');
-  const { GoogleGenAI } = await import('@google/genai');
-  const client = new GoogleGenAI({ apiKey: key });
-  const result = await client.models.generateContent({
-    model: getModelId('gemini'),
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    ...(search ? { config: { tools: [{ googleSearch: {} }] } } : {}),
-  });
-  return result.text || '';
+// --- Planning, per-source summaries, the report and its verification all run
+// on the model routed to 'research' (model-router.cjs). Web search itself is
+// research.findLinks(), which still needs a Gemini key (Google Search grounding).
+async function modelText(prompt, { system = '', signal } = {}) {
+  return (await router.generate({ task: 'research', system, prompt, signal })).text;
 }
 
-// --- Claude: final synthesis (streaming) + JSON judgments (verification) ---
-// Honors the same dual auth as the rest of the app: subscription (Agent SDK,
-// the user's Claude plan) or API key (@anthropic-ai/sdk).
-async function claudeStream({ system, user, authMode, onDelta, signal }) {
-  let full = '';
-  if (authMode === 'subscription') {
-    const { query } = await loadClaudeSdk();
-    const modelId = getModelId('claude') || getModelId('anthropic');
-    const stream = query({
-      prompt: promptStream(`${system}\n\n${user}`),
-      options: { model: modelId, systemPrompt: system, ...noToolsPolicy() },
-    });
-    let prev = 0;
-    for await (const msg of stream) {
-      if (signal?.aborted) break;
-      if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
-        let f = '';
-        for (const b of msg.message.content) if (b && b.type === 'text' && typeof b.text === 'string') f += b.text;
-        if (f.length > prev) { onDelta?.(f.slice(prev)); prev = f.length; full = f; }
-      } else if (msg.type === 'result') { assertAgentResult(msg); break; }
-    }
-    return full;
-  }
-  const key = getProviderKey('anthropic');
-  if (!key) throw new Error('Anthropic key not configured — needed to synthesize the report. Add it in the Models tab or switch to Claude subscription auth.');
-  const { default: Anthropic } = await import('@anthropic-ai/sdk');
-  const client = new Anthropic({ apiKey: key });
-  const modelId = getModelId('claude') || getModelId('anthropic');
-  const stream = await client.messages.stream(
-    { model: modelId, max_tokens: 4096, system, messages: [{ role: 'user', content: user }] },
-    { signal },
-  );
-  for await (const ev of stream) {
-    if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-      onDelta?.(ev.delta.text);
-      full += ev.delta.text;
-    }
-  }
-  return full;
-}
-
-async function claudeText({ system, user, authMode, signal }) {
-  return claudeStream({ system, user, authMode, signal, onDelta: null });
+async function modelStream({ system, user, onDelta, signal }) {
+  return (await router.generate({ task: 'research', system, prompt: user, onDelta, signal })).text;
 }
 
 // --- Pipeline stages ---
@@ -161,7 +108,7 @@ Decompose this into ${breadth} specific, non-overlapping research questions that
 
 Respond with NOTHING but a JSON array of question strings:
 <json>["question 1","question 2", ...]</json>`;
-  const text = await geminiGenerate(prompt);
+  const text = await modelText(prompt);
   const arr = parseJsonLoose(text);
   const questions = Array.isArray(arr) ? arr.filter(q => typeof q === 'string' && q.trim()).map(q => q.trim()) : [];
   if (!questions.length) return [query]; // fall back to the raw query as a single line
@@ -184,7 +131,7 @@ Identify ${count} NEW, deeper follow-up questions that fill important gaps, reso
 
 Respond with NOTHING but a JSON array of question strings:
 <json>["question 1", ...]</json>`;
-  const text = await geminiGenerate(prompt);
+  const text = await modelText(prompt);
   const arr = parseJsonLoose(text);
   const qs = Array.isArray(arr) ? arr.filter(q => typeof q === 'string' && q.trim()).map(q => q.trim()) : [];
   return qs.slice(0, count);
@@ -201,7 +148,7 @@ ${body.slice(0, SUMMARY_BODY_CAP)}
 """
 
 Extract ONLY the facts, data, figures, and arguments from THIS source that help answer the research question. Write 3-6 tight bullet points, each self-contained. Quote specific numbers/names where present. Do NOT add anything not supported by the content. If this source is irrelevant or contentless, reply with exactly: IRRELEVANT`;
-  const text = (await geminiGenerate(prompt)).trim();
+  const text = (await modelText(prompt)).trim();
   if (!text || /^IRRELEVANT/i.test(text)) return null;
   return text;
 }
@@ -245,7 +192,7 @@ async function researchQuestion({ subQuestion, perQuery, concurrency, seen, assi
 }
 
 // --- Public entry point ---
-async function runDeepResearch({ query, breadth, depth, perQuery, concurrency, totalWords, authMode, onEvent, signal }) {
+async function runDeepResearch({ query, breadth, depth, perQuery, concurrency, totalWords, onEvent, signal }) {
   const cfg = {
     breadth: clampInt(breadth, 2, 8, DEFAULTS.breadth),
     depth: clampInt(depth, 1, 4, DEFAULTS.depth),
@@ -324,8 +271,8 @@ ${allSources.map(s => `[${s.n}] ${s.title} — ${s.url}\n${s.summary}`).join('\n
 Write the full research report now.`;
 
   let report = '';
-  report = await claudeStream({
-    system, user, authMode, signal,
+  report = await modelStream({
+    system, user, signal,
     onDelta: (delta) => emit({ type: 'report-delta', delta }),
   });
   report = report.trim();
@@ -339,8 +286,8 @@ Write the full research report now.`;
 
 // --- Adversarial verification (the step GPT Researcher omits) ---
 // Checks each cited factual claim in the report against the cited source
-// summary. One batched Claude call keeps it cheap. Returns claim verdicts.
-async function verifyReport({ query, report, sources, authMode, signal }) {
+// summary. One batched model call keeps it cheap. Returns claim verdicts.
+async function verifyReport({ query, report, sources, signal }) {
   if (!report || !Array.isArray(sources) || !sources.length) {
     return { claims: [] };
   }
@@ -363,7 +310,7 @@ ${report.slice(0, 16000)}
 
 Return the JSON array of claim verdicts now.`;
 
-  const raw = await claudeText({ system, user, authMode, signal });
+  const raw = await modelText(user, { system, signal });
   const arr = parseJsonLoose(raw);
   const claims = Array.isArray(arr)
     ? arr
