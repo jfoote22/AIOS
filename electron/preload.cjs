@@ -14,6 +14,13 @@ contextBridge.exposeInMainWorld('aios', {
   // App info
   getVersion: () => ipcRenderer.invoke('app:get-version'),
   getApiPort: () => ipcRenderer.invoke('app:get-api-port'),
+  // Embedded Hermes dashboard (native view laid over the Hermes tab)
+  hermesView: {
+    show: (url, bounds) => ipcRenderer.invoke('hermes-view:show', url, bounds),
+    setBounds: (bounds) => ipcRenderer.send('hermes-view:bounds', bounds),
+    hide: () => ipcRenderer.send('hermes-view:hide'),
+    reload: () => ipcRenderer.send('hermes-view:reload'),
+  },
   // Native folder picker
   pickFolder: (opts) => ipcRenderer.invoke('dialog:pick-folder', opts || {}),
   authorizeWorkspace: (root) => ipcRenderer.invoke('files:authorize-workspace', root),

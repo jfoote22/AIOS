@@ -41,6 +41,14 @@ declare global {
       captureRegion: () => Promise<{ dataUrl: string } | null>;
       getVersion: () => Promise<string>;
       getApiPort: () => Promise<number>;
+      /** Hermes web dashboard in a native view over the Hermes tab. Bounds are
+       *  CSS pixels relative to the window's content area. */
+      hermesView: {
+        show: (url: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean; url?: string; error?: string }>;
+        setBounds: (bounds: { x: number; y: number; width: number; height: number }) => void;
+        hide: () => void;
+        reload: () => void;
+      };
       authorizeWorkspace: (root: string) => Promise<boolean>;
       pickFolder: (opts?: { title?: string; defaultPath?: string }) => Promise<string | null>;
       pickFiles: (opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }) => Promise<string[]>;

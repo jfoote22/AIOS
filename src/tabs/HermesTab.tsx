@@ -7,6 +7,7 @@ import {
 import { apiUrl, initApiBase } from '../lib/apiBase';
 import { getAnthropicAuthMode } from '../lib/authMode';
 import { useExternalInputSync } from '../lib/useExternalInputSync';
+import HermesDashboard from '../components/HermesDashboard';
 
 type StatusKind = 'idle' | 'ok' | 'err';
 
@@ -269,7 +270,10 @@ function ScheduleBuilder({ value, onChange }: { value: string; onChange: (value:
   );
 }
 
-export default function HermesTab() {
+export default function HermesTab({ active = true }: { active?: boolean }) {
+  // 'dashboard' embeds Hermes's own web UI; 'classic' is AIOS's cron + chat view.
+  const [view, setView] = useState<'dashboard' | 'classic'>('dashboard');
+  const [configLoaded, setConfigLoaded] = useState(false);
   const [baseUrl, setBaseUrl] = useState('http://192.168.1.185:8642/v1');
   const [hasApiKey, setHasApiKey] = useState(false);
   const [model, setModel] = useState('hermes-mac');
@@ -311,6 +315,8 @@ export default function HermesTab() {
       setHasApiKey(!!cfg.hasApiKey);
     } catch (e) {
       console.error('Failed to load Hermes config:', e);
+    } finally {
+      setConfigLoaded(true);
     }
   }, []);
 
@@ -565,24 +571,43 @@ export default function HermesTab() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {(status.kind !== 'idle' || models.length > 0) && (
+          <div className="flex rounded-lg border border-zinc-800 p-0.5 text-xs font-bold uppercase tracking-wider">
+            {(['dashboard', 'classic'] as const).map((v) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                className={`px-3 py-1.5 rounded-md transition-colors ${view === v ? 'bg-indigo-600/20 text-indigo-300' : 'text-zinc-500 hover:text-white'}`}
+              >
+                {v === 'dashboard' ? 'Dashboard' : 'Cron & Chat'}
+              </button>
+            ))}
+          </div>
+          {view === 'classic' && (status.kind !== 'idle' || models.length > 0) && (
             <div className={`hidden md:flex items-center gap-2 border rounded-lg px-3 py-2 text-xs ${statusClasses(status.kind)}`}>
               {status.kind === 'ok' ? <CheckCircle2 className="w-4 h-4" /> : status.kind === 'err' ? <XCircle className="w-4 h-4" /> : <Activity className="w-4 h-4" />}
               <span className="max-w-[280px] truncate">{status.text}</span>
             </div>
           )}
-          <button
-            onClick={checkConnection}
-            disabled={checking || !canUse}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-900 disabled:text-zinc-600 text-xs font-bold uppercase tracking-wider transition-colors"
-          >
-            {checking ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            Check
-          </button>
+          {view === 'classic' && (
+            <button
+              onClick={checkConnection}
+              disabled={checking || !canUse}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-900 disabled:text-zinc-600 text-xs font-bold uppercase tracking-wider transition-colors"
+            >
+              {checking ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              Check
+            </button>
+          )}
         </div>
       </header>
 
-      <div className={`flex-1 min-h-0 grid ${cronCollapsed ? 'grid-cols-[56px_minmax(0,1fr)]' : 'grid-cols-1 2xl:grid-cols-[minmax(720px,1fr)_minmax(460px,1fr)] xl:grid-cols-[minmax(640px,1fr)_minmax(420px,0.9fr)]'}`}>
+      {configLoaded && (
+        <div className="flex-1 min-h-0 flex flex-col" style={{ display: view === 'dashboard' ? 'flex' : 'none' }}>
+          <HermesDashboard visible={active && view === 'dashboard'} apiBaseUrl={baseUrl} />
+        </div>
+      )}
+
+      <div style={{ display: view === 'classic' ? undefined : 'none' }} className={`flex-1 min-h-0 grid ${cronCollapsed ? 'grid-cols-[56px_minmax(0,1fr)]' : 'grid-cols-1 2xl:grid-cols-[minmax(720px,1fr)_minmax(460px,1fr)] xl:grid-cols-[minmax(640px,1fr)_minmax(420px,0.9fr)]'}`}>
         <section className="border-r border-zinc-800 overflow-hidden bg-zinc-950/30 min-h-0">
           {cronCollapsed ? (
             <div className="h-full flex flex-col items-center py-4 gap-3">

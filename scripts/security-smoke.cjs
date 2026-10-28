@@ -68,6 +68,10 @@ app.whenReady().then(async () => {
   assert.equal((await post('fs/write', { root: editor, relPath: 'test.md', content: 'denied' })).status, 403);
   assert.equal((await post('project/load', { projectRoot: workspace })).status, 403);
   assert.equal((await post('research/extract-file', { filePath: note })).status, 403);
+  // The paused Orchestra board can't plan, draft, or run agents (features.ts).
+  for (const route of ['kanban/plan', 'agents/run', 'agents/review', 'agents/draft', 'skills/draft']) {
+    assert.equal((await post(route, {})).status, 410, route);
+  }
   const { fileAccess } = require('../electron/file-access.cjs');
   await fileAccess.grantWorkspace(workspace); // native dialog result; never an API grant
   assert.equal((await post('fs/write', { root: editor, relPath: 'test.md', content: 'preserve me' })).status, 200);

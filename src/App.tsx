@@ -13,6 +13,7 @@ import { setGeminiReady } from './lib/ai';
 import { initApiBase } from './lib/apiBase';
 import { refreshModels } from './lib/models';
 import { onNavigate } from './lib/navigate';
+import { KANBAN_ENABLED } from './lib/features';
 import ErrorBoundary from './components/ErrorBoundary';
 
 function TabPanel({ active, label, children }: { active: boolean; label: string; children: React.ReactNode }) {
@@ -62,9 +63,9 @@ export default function App() {
         <TabPanel active={active === 'deepdives'} label="DeepDives"><DeepDivesTab /></TabPanel>
         <TabPanel active={active === 'snipping'} label="Snipping"><SnippingTab /></TabPanel>
         <TabPanel active={active === 'secondbrain'} label="Second Brain"><SecondBrainTab active={active === 'secondbrain'} /></TabPanel>
-        <TabPanel active={active === 'hermes'} label="Hermes"><HermesTab /></TabPanel>
+        <TabPanel active={active === 'hermes'} label="Hermes"><HermesTab active={active === 'hermes'} /></TabPanel>
         <TabPanel active={active === 'terminal'} label="Terminal"><TerminalTab active={active === 'terminal'} /></TabPanel>
-        <TabPanel active={active === 'kanban'} label="Kanban"><KanbanTab /></TabPanel>
+        {KANBAN_ENABLED && <TabPanel active={active === 'kanban'} label="Kanban"><KanbanTab /></TabPanel>}
         <TabPanel active={active === 'settings'} label="Settings"><SettingsTab /></TabPanel>
       </main>
     </div>

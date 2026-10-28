@@ -10,6 +10,7 @@ const reportExport = require('./report-export.cjs');
 const sqliteStore = require('./sqlite-store.cjs');
 const memoryIngest = require('./memory-ingest.cjs');
 const mobileGateway = require('./mobile-gateway.cjs');
+const hermesView = require('./hermes-view.cjs');
 const { fileAccess, inspectPath } = require('./file-access.cjs');
 
 // Keep the renderer fully alive when the main window is minimized during a
@@ -147,6 +148,7 @@ function createWindow() {
   // Keep the menu bar hidden (clean custom UI) but the clipboard accelerators
   // from the application menu still fire — Ctrl+V, Ctrl+C, etc.
   protectWindow(mainWindow, { development: isDev });
+  hermesView.attach(mainWindow);
   mainWindow.setMenuBarVisibility(false);
   wireContextMenu(mainWindow.webContents);
 
@@ -456,6 +458,12 @@ app.on('will-quit', () => {
 });
 
 ipcMain.handle('app:get-version', () => app.getVersion());
+
+// Embedded Hermes dashboard (electron/hermes-view.cjs).
+ipcMain.handle('hermes-view:show', (_e, url, bounds) => hermesView.show(url, bounds));
+ipcMain.on('hermes-view:bounds', (_e, bounds) => hermesView.setBounds(bounds));
+ipcMain.on('hermes-view:hide', () => hermesView.hide());
+ipcMain.on('hermes-view:reload', () => hermesView.reload());
 ipcMain.handle('app:get-api-port', () => apiPort);
 
 // Tear a terminal session off into its own window. The renderer detaches its

@@ -446,6 +446,14 @@ function start({ development = false, approveAgentTool } = {}) {
   app.disable('x-powered-by');
   app.use(localApiGuard({ development }));
   app.use(express.json({ limit: '20mb' }));
+  // The kanban board, Maestro, and agent/skill builders are paused (see
+  // src/lib/features.ts). Refuse their routes so nothing can plan, draft, or
+  // run an agent while the tab is hidden.
+  if (process.env.AIOS_ENABLE_KANBAN !== '1') {
+    app.use(['/api/kanban', '/api/agents', '/api/skills'], (_req, res) => {
+      res.status(410).json({ error: 'The Orchestra board is turned off in this build.' });
+    });
+  }
   registerGeminiGeneration(app, { getProviderKey });
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
